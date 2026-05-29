@@ -9,7 +9,7 @@
 
 **CowAgent** 是一个开源的超级 AI 助理，能够主动思考和规划任务、操作计算机和外部资源、创造和执行 Skills、构建知识库与长期记忆，与你一同成长，是 Agent Harness 工程的最佳实践之一。
 
-CowAgent 轻量、易部署、可扩展，自由接入主流大模型，覆盖微信、飞书、钉钉、企微、QQ、网页等多渠道，7×24 运行于个人电脑或服务器中。
+CowAgent 轻量、易部署、可扩展，自由接入主流大模型，覆盖微信、飞书、钉钉、企微、QQ、Telegram、网页等多渠道，7×24 运行于个人电脑或服务器中。
 
 <p align="center">
   <a href="https://cowagent.ai/?lang=zh">🌐 官网</a> &nbsp;·&nbsp;
@@ -30,7 +30,7 @@ CowAgent 轻量、易部署、可扩展，自由接入主流大模型，覆盖�
 | [知识库](https://docs.cowagent.ai/knowledge) | 自动整理结构化知识为 Markdown Wiki，构建持续增长的知识图谱，可视化浏览 |
 | [技能](https://docs.cowagent.ai/skills) | 从 [Skill Hub](https://skills.cowagent.ai/)、GitHub、ClawHub 等一键安装；也可通过对话创造自定义技能 |
 | [工具](https://docs.cowagent.ai/tools) | 内置文件读写、终端、浏览器、定时任务、记忆检索、联网搜索等 10+ 工具，支持 MCP 协议 |
-| [通道](https://docs.cowagent.ai/channels) | 一个 Agent 同时接入 Web、微信、飞书、钉钉、企微、QQ、公众号 等多个渠道 |
+| [通道](https://docs.cowagent.ai/channels) | 一个 Agent 同时接入 Web、微信、飞书、钉钉、企微、QQ、公众号、Telegram 等多个渠道 |
 | 多模态 | 文本、图片、语音、文件全消息类型支持，覆盖识别、生成、收发 |
 | [模型](https://docs.cowagent.ai/models) | DeepSeek、Claude、Gemini、GPT、GLM、Qwen、Kimi、MiniMax、Doubao 等主流厂商，配置一行切换 |
 | [部署](https://docs.cowagent.ai/guide/quick-start) | 一键脚本安装，Web 控制台统一管理；本地、Docker、服务器多种部署方式 |
@@ -96,7 +96,7 @@ CowAgent 支持国内外主流厂商的大语言模型。**文本对话、图像
 | --- | --- | :-: | :-: | :-: | :-: | :-: | :-: |
 | [DeepSeek](https://docs.cowagent.ai/models/deepseek) | deepseek-v4-flash / pro | ✅ | | | | | |
 | [MiniMax](https://docs.cowagent.ai/models/minimax) | MiniMax-M2.7 | ✅ | ✅ | ✅ | | ✅ | |
-| [Claude](https://docs.cowagent.ai/models/claude) | claude-opus-4-7 | ✅ | ✅ | | | | |
+| [Claude](https://docs.cowagent.ai/models/claude) | claude-opus-4-8 | ✅ | ✅ | | | | |
 | [Gemini](https://docs.cowagent.ai/models/gemini) | gemini-3.5-flash | ✅ | ✅ | ✅ | | | |
 | [OpenAI](https://docs.cowagent.ai/models/openai) | gpt-5.5、o 系列 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [智谱 GLM](https://docs.cowagent.ai/models/glm) | glm-5.1、glm-5v-turbo | ✅ | ✅ | | ✅ | | ✅ |
@@ -104,6 +104,7 @@ CowAgent 支持国内外主流厂商的大语言模型。**文本对话、图像
 | [豆包 Doubao](https://docs.cowagent.ai/models/doubao) | doubao-seed-2.0 系列 | ✅ | ✅ | ✅ | | | ✅ |
 | [Kimi](https://docs.cowagent.ai/models/kimi) | kimi-k2.6 | ✅ | ✅ | | | | |
 | [百度ERNIE](https://docs.cowagent.ai/models/qianfan) | ernie-5.1 | ✅ | ✅ | | | | |
+| [小米 MiMo](https://docs.cowagent.ai/models/mimo) | mimo-v2.5-pro / v2.5 | ✅ | ✅ | | | ✅ | |
 | [LinkAI](https://docs.cowagent.ai/models/linkai) | 一个 Key 接入 100+ 模型 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [自定义](https://docs.cowagent.ai/models/custom) | 本地模型 / 三方代理 | ✅ | | | | | |
 
@@ -125,6 +126,7 @@ CowAgent 支持国内外主流厂商的大语言模型。**文本对话、图像
 | [QQ](https://docs.cowagent.ai/channels/qq) | ✅ | ✅ | ✅ | | ✅ |
 | [企业微信应用](https://docs.cowagent.ai/channels/wecom) | ✅ | ✅ | ✅ | ✅ | |
 | [微信公众号](https://docs.cowagent.ai/channels/wechatmp) | ✅ | ✅ | | ✅ | |
+| [Telegram](https://docs.cowagent.ai/channels/telegram) | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 > 飞书、企微智能机器人支持在 Web 控制台内**扫码一键接入**，无需公网 IP。详见 [通道概览](https://docs.cowagent.ai/channels)。
 

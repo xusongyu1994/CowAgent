@@ -15,6 +15,7 @@ ZHIPU_AI = "zhipu"
 MOONSHOT = "moonshot"
 MiniMax = "minimax"
 DEEPSEEK = "deepseek"
+MIMO = "mimo"  # 小米 MiMo 大模型
 CUSTOM = "custom"  # custom OpenAI-compatible API, bot_type won't auto-switch on model change
 MODELSCOPE = "modelscope"
 
@@ -29,8 +30,9 @@ CLAUDE_35_SONNET = "claude-3-5-sonnet-latest"  # 带 latest 标签的模型名�
 CLAUDE_35_SONNET_1022 = "claude-3-5-sonnet-20241022"  # 带具体日期的模型名称，会固定为该日期发布的模型
 CLAUDE_35_SONNET_0620 = "claude-3-5-sonnet-20240620"
 CLAUDE_4_OPUS = "claude-opus-4-0"
+CLAUDE_4_8_OPUS = "claude-opus-4-8"      # Claude Opus 4.8 - Agent推荐模型
 CLAUDE_4_7_OPUS = "claude-opus-4-7"      # Claude Opus 4.7
-CLAUDE_4_6_OPUS = "claude-opus-4-6"      # Claude Opus 4.6 - Agent推荐模型
+CLAUDE_4_6_OPUS = "claude-opus-4-6"      # Claude Opus 4.6
 CLAUDE_4_SONNET = "claude-sonnet-4-0"    # Claude Sonnet 4.0
 CLAUDE_4_5_SONNET = "claude-sonnet-4-5"  # Claude Sonnet 4.5 - Agent推荐模型
 CLAUDE_4_6_SONNET = "claude-sonnet-4-6"  # Claude Sonnet 4.6 - Agent推荐模型
@@ -140,6 +142,13 @@ KIMI_K2 = "kimi-k2"
 KIMI_K2_5 = "kimi-k2.5"
 KIMI_K2_6 = "kimi-k2.6"  # Kimi K2.6 - Agent recommended model (default)
 
+# 小米 MiMo
+MIMO_V2_5_PRO = "mimo-v2.5-pro"      # MiMo V2.5 Pro - 旗舰，长上下文（默认推荐）
+MIMO_V2_5 = "mimo-v2.5"              # MiMo V2.5 - 多模态（文/图/音/视频）
+MIMO_V2_PRO = "mimo-v2-pro"          # MiMo V2 Pro
+MIMO_V2_OMNI = "mimo-v2-omni"        # MiMo V2 Omni - 多模态
+MIMO_V2_FLASH = "mimo-v2-flash"      # MiMo V2 Flash - 极速版
+
 # Doubao (Volcengine Ark)
 DOUBAO = "doubao"
 DOUBAO_SEED_2_CODE = "doubao-seed-2-0-code-preview-260215"
@@ -182,8 +191,11 @@ MODEL_LIST = [
               # MiniMax
               MiniMax, MINIMAX_M2_7, MINIMAX_M2_7_HIGHSPEED, MINIMAX_M2_5, MINIMAX_M2_1, MINIMAX_M2_1_LIGHTNING, MINIMAX_M2, MINIMAX_ABAB6_5,
 
+              # 小米 MiMo
+              MIMO, MIMO_V2_5_PRO, MIMO_V2_5, MIMO_V2_PRO, MIMO_V2_OMNI, MIMO_V2_FLASH,
+
               # Claude
-              CLAUDE3, CLAUDE_4_6_SONNET, CLAUDE_4_7_OPUS, CLAUDE_4_6_OPUS, CLAUDE_4_OPUS, CLAUDE_4_5_SONNET, CLAUDE_4_SONNET, CLAUDE_3_OPUS, CLAUDE_3_OPUS_0229,
+              CLAUDE3, CLAUDE_4_8_OPUS, CLAUDE_4_7_OPUS, CLAUDE_4_6_SONNET, CLAUDE_4_6_OPUS, CLAUDE_4_OPUS, CLAUDE_4_5_SONNET, CLAUDE_4_SONNET, CLAUDE_3_OPUS, CLAUDE_3_OPUS_0229,
               CLAUDE_35_SONNET, CLAUDE_35_SONNET_1022, CLAUDE_35_SONNET_0620, CLAUDE_3_SONNET, CLAUDE_3_HAIKU,
               "claude", "claude-3-haiku", "claude-3-sonnet", "claude-3-opus", "claude-3.5-sonnet",
 
@@ -232,3 +244,4 @@ DINGTALK = "dingtalk"
 WECOM_BOT = "wecom_bot"
 QQ = "qq"
 WEIXIN = "weixin"
+TELEGRAM = "telegram"

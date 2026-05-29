@@ -30,7 +30,7 @@ CowAgent は軽量でデプロイしやすく、拡張性に優れています�
 | [ナレッジベース](https://docs.cowagent.ai/ja/knowledge/index) | 構造化された知識を Markdown Wiki として自動整理し、進化し続けるナレッジグラフを可視化ブラウジング |
 | [Skill](https://docs.cowagent.ai/ja/skills/index) | [Skill Hub](https://skills.cowagent.ai/)、GitHub、ClawHub からワンクリックでインストール；対話によるカスタム Skill 作成にも対応 |
 | [ツール](https://docs.cowagent.ai/ja/tools/index) | ファイル I/O、ターミナル、ブラウザ、スケジューラ、記憶検索、Web 検索など 10+ の組み込みツール — MCP プロトコルに完全対応 |
-| [チャネル](https://docs.cowagent.ai/ja/channels/index) | 一つの Agent で Web、WeChat、Feishu、DingTalk、WeCom、QQ、公式アカウントを同時にサポート |
+| [チャネル](https://docs.cowagent.ai/ja/channels/index) | 一つの Agent で Web、WeChat、Feishu、DingTalk、WeCom、QQ、公式アカウント、Telegram を同時にサポート |
 | マルチモーダル | テキスト・画像・音声・ファイルをフルサポート — 認識・生成・双方向送受信 |
 | [モデル](https://docs.cowagent.ai/ja/models/index) | Claude、GPT、Gemini、DeepSeek、GLM、Qwen、Kimi、MiniMax、Doubao など、設定 1 行で切り替え可能 |
 | [デプロイ](https://docs.cowagent.ai/ja/guide/quick-start) | ワンラインインストーラー、統合された Web コンソール、複数のデプロイモード（ローカル / Docker / サーバー） |
@@ -94,7 +94,7 @@ CowAgent は主要な LLM プロバイダーすべてに対応しています。
 
 | プロバイダー | 代表的なモデル | チャット | 画像認識 | 画像生成 | ASR | TTS | Embedding |
 | --- | --- | :-: | :-: | :-: | :-: | :-: | :-: |
-| [Claude](https://docs.cowagent.ai/ja/models/claude) | claude-opus-4-7 | ✅ | ✅ | | | | |
+| [Claude](https://docs.cowagent.ai/ja/models/claude) | claude-opus-4-8 | ✅ | ✅ | | | | |
 | [OpenAI](https://docs.cowagent.ai/ja/models/openai) | gpt-5.5、o シリーズ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [Gemini](https://docs.cowagent.ai/ja/models/gemini) | gemini-3.5-flash | ✅ | ✅ | ✅ | | | |
 | [DeepSeek](https://docs.cowagent.ai/ja/models/deepseek) | deepseek-v4-flash / pro | ✅ | | | | | |
@@ -104,6 +104,7 @@ CowAgent は主要な LLM プロバイダーすべてに対応しています。
 | [Kimi](https://docs.cowagent.ai/ja/models/kimi) | kimi-k2.6 | ✅ | ✅ | | | | |
 | [MiniMax](https://docs.cowagent.ai/ja/models/minimax) | MiniMax-M2.7 | ✅ | ✅ | ✅ | | ✅ | |
 | [ERNIE](https://docs.cowagent.ai/ja/models/qianfan) | ernie-5.1 | ✅ | ✅ | | | | |
+| [MiMo](https://docs.cowagent.ai/ja/models/mimo) | mimo-v2.5-pro / v2.5 | ✅ | ✅ | | | ✅ | |
 | [LinkAI](https://docs.cowagent.ai/ja/models/linkai) | 1 つの Key で 100+ モデルに接続 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [カスタム](https://docs.cowagent.ai/ja/models/custom) | ローカルモデル / サードパーティプロキシ | ✅ | | | | | |
 
@@ -125,6 +126,7 @@ CowAgent は主要な LLM プロバイダーすべてに対応しています。
 | [QQ](https://docs.cowagent.ai/ja/channels/qq) | ✅ | ✅ | ✅ | | ✅ |
 | [WeCom App](https://docs.cowagent.ai/ja/channels/wecom) | ✅ | ✅ | ✅ | ✅ | |
 | [WeChat 公式アカウント](https://docs.cowagent.ai/ja/channels/wechatmp) | ✅ | ✅ | | ✅ | |
+| [Telegram](https://docs.cowagent.ai/ja/channels/telegram) | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 > Feishu と WeCom Bot は **Web コンソール内で QR コードをスキャンするだけで接続**できます — パブリック IP は不要です。詳細は [チャネル概要](https://docs.cowagent.ai/ja/channels/index) を参照してください。
 
