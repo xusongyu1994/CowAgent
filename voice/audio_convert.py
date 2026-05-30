@@ -1,3 +1,4 @@
+import os
 import shutil
 import wave
 
@@ -15,6 +16,23 @@ except ImportError:
     logger.debug("import pydub failed, voice conversion features will not be supported.")
     AudioSegment = None
     _pydub_available = False
+
+# Windows: 让 pydub 找到 ffmpeg 完整路径（必须在 pydub 导入之后）
+if _pydub_available:
+    _ffmpeg_path = r"C:\ffmpeg\bin\ffmpeg.exe"
+    _ffprobe_path = r"C:\ffmpeg\bin\ffprobe.exe"
+    if os.path.isfile(_ffmpeg_path):
+        AudioSegment.converter = _ffmpeg_path
+        if os.path.isfile(_ffprobe_path):
+            AudioSegment.ffprobe = _ffprobe_path
+        logger.info("[audio_convert] ffmpeg 路径: {}".format(_ffmpeg_path))
+    else:
+        # 尝试从 PATH 查找
+        _ffmpeg_in_path = shutil.which("ffmpeg")
+        if _ffmpeg_in_path:
+            logger.info("[audio_convert] ffmpeg 从 PATH 找到: {}".format(_ffmpeg_in_path))
+        else:
+            logger.warning("[audio_convert] ffmpeg 未找到: {}".format(_ffmpeg_path))
 
 sil_supports = [8000, 12000, 16000, 24000, 32000, 44100, 48000]  # slk转wav时，支持的采样率
 

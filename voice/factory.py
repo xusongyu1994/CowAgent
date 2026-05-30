@@ -70,4 +70,8 @@ def create_voice(voice_type):
         from voice.mimo.mimo_voice import MimoVoice
 
         return MimoVoice()
+    elif voice_type == "sr":
+        from voice.sr.sr_voice import SRVoice
+
+        return SRVoice()
     raise RuntimeError
