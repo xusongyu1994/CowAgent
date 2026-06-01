@@ -21,6 +21,7 @@ from channel.chat_channel import ChatChannel, check_prefix
 from channel.chat_message import ChatMessage
 from collections import OrderedDict
 from common import const
+from common import i18n
 from common.log import logger
 from common.singleton import singleton
 from config import conf
@@ -98,7 +99,7 @@ def _require_auth():
 def _cancel_reply_text(cancelled: int, lang: str) -> str:
     en = lang.startswith("en")
     if cancelled > 0:
-        return "🛑 Cancelled." if en else "🛑 已中止"
+        return "🛑 Cancelled" if en else "🛑 已中止"
     return "Nothing to cancel." if en else "当前没有可中止的任务。"
 
 
@@ -477,7 +478,10 @@ class WebChannel(ChatChannel):
                         )
                         q.put({
                             "type": "done",
-                            "content": "(模型未返回任何内容，请重试或换一种方式描述你的需求)",
+                            "content": i18n.t(
+                                "(模型未返回任何内容，请重试或换一种方式描述你的需求)",
+                                "(The model returned no content. Please retry or rephrase your request.)",
+                            ),
                             "request_id": request_id,
                             "timestamp": time.time(),
                         })
@@ -805,13 +809,13 @@ class WebChannel(ChatChannel):
                     if not fpath:
                         continue
                     if ftype == "image":
-                        file_refs.append(f"[图片: {fpath}]")
+                        file_refs.append(f"[{i18n.t('图片', 'Image')}: {fpath}]")
                     elif ftype == "video":
-                        file_refs.append(f"[视频: {fpath}]")
+                        file_refs.append(f"[{i18n.t('视频', 'Video')}: {fpath}]")
                     elif ftype == "directory":
-                        file_refs.append(f"[目录: {fpath}]")
+                        file_refs.append(f"[{i18n.t('目录', 'Directory')}: {fpath}]")
                     else:
-                        file_refs.append(f"[文件: {fpath}]")
+                        file_refs.append(f"[{i18n.t('文件', 'File')}: {fpath}]")
                 if file_refs:
                     prompt = prompt + "\n" + "\n".join(file_refs)
                     logger.info(f"[WebChannel] Attached {len(file_refs)} file(s) to message")
@@ -952,7 +956,7 @@ class WebChannel(ChatChannel):
             if request_id and request_id in self.sse_queues:
                 self.sse_queues[request_id].put({
                     "type": "cancelled",
-                    "content": "Cancelled" if lang.startswith("en") else "已中止",
+                    "content": "🛑 Cancelled" if lang.startswith("en") else "🛑 已中止",
                     "request_id": request_id,
                     "timestamp": time.time(),
                 })
@@ -1008,7 +1012,10 @@ class WebChannel(ChatChannel):
         """Serve the chat HTML page."""
         file_path = os.path.join(os.path.dirname(__file__), 'chat.html')  # 使用绝对路径
         with open(file_path, 'r', encoding='utf-8') as f:
-            return f.read()
+            html = f.read()
+        # Inject the backend-resolved default language so the console can use
+        # it on first load (when the user has no saved cow_lang preference).
+        return html.replace("{{COW_DEFAULT_LANG}}", i18n.get_language())
 
     def startup(self):
         configured_host = conf().get("web_host", "")
@@ -1018,26 +1025,30 @@ class WebChannel(ChatChannel):
 
         self._cleanup_stale_voice_recordings()
 
-        # 打印可用渠道类型提示
+        # Print available channel types
         logger.info(
-            "[WebChannel] 全部可用通道如下，可修改 config.json 配置文件中的 channel_type 字段进行切换，多个通道用逗号分隔：")
-        logger.info("[WebChannel]   1. weixin           - 微信")
-        logger.info("[WebChannel]   2. web              - 网页")
-        logger.info("[WebChannel]   3. terminal         - 终端")
-        logger.info("[WebChannel]   4. feishu           - 飞书")
-        logger.info("[WebChannel]   5. dingtalk         - 钉钉")
-        logger.info("[WebChannel]   6. wecom_bot        - 企微智能机器人")
-        logger.info("[WebChannel]   7. wechatcom_app    - 企微自建应用")
-        logger.info("[WebChannel]   8. wechatmp         - 个人公众号")
-        logger.info("[WebChannel]   9. wechatmp_service - 企业公众号")
-        logger.info("[WebChannel] ✅ Web控制台已运行")
-        logger.info(f"[WebChannel] 🌐 本地访问: http://localhost:{port}")
+            "[WebChannel] Available channels (edit `channel_type` in config.json to switch, separate multiple with commas):")
+        logger.info("[WebChannel]   1. web              - Web")
+        logger.info("[WebChannel]   2. terminal         - Terminal")
+        logger.info("[WebChannel]   3. weixin           - WeChat")
+        logger.info("[WebChannel]   4. feishu           - Feishu")
+        logger.info("[WebChannel]   5. dingtalk         - DingTalk")
+        logger.info("[WebChannel]   6. wecom_bot        - WeCom Bot")
+        logger.info("[WebChannel]   7. wechatcom_app    - WeCom App")
+        logger.info("[WebChannel]   8. wechat_kf        - WeChat Customer Service")
+        logger.info("[WebChannel]   9. wechatmp         - WeChat Official Account")
+        logger.info("[WebChannel]  10. wechatmp_service - WeChat Official Account (Service)")
+        logger.info("[WebChannel]  11. telegram         - Telegram")
+        logger.info("[WebChannel]  12. slack            - Slack")
+        logger.info("[WebChannel]  13. discord          - Discord")
+        logger.info("[WebChannel] ✅ Web console is running")
+        logger.info(f"[WebChannel] 🌐 Local access: http://localhost:{port}")
         if is_public_bind:
-            logger.info(f"[WebChannel] 🌍 服务器访问: http://YOUR_IP:{port} (将YOUR_IP替换为服务器IP)")
+            logger.info(f"[WebChannel] 🌍 Server access: http://YOUR_IP:{port} (replace YOUR_IP with your server IP)")
             if not _is_password_enabled():
-                logger.info("[WebChannel] ⚠️  当前监听 0.0.0.0 且未设置 web_password，公网部署建议在 config.json 中配置访问密码")
+                logger.info("[WebChannel] ⚠️  Listening on 0.0.0.0 without web_password set; set an access password in config.json for public deployment")
         else:
-            logger.info(f"[WebChannel] 🔒 当前仅监听 {host}，仅本机可访问。如需公网访问，请将 web_host 改为 0.0.0.0 并配置 web_password 密码")
+            logger.info(f"[WebChannel] 🔒 Listening on {host} only (local access). For public access, set web_host to 0.0.0.0 and configure web_password")
 
         try:
             import webbrowser
@@ -1315,7 +1326,20 @@ class FileServeHandler:
             file_path = params.path
             if not file_path or not os.path.isabs(file_path):
                 raise web.notfound()
-            file_path = os.path.normpath(file_path)
+            # Resolve symlinks and confine access to the allowed root dirs,
+            # so this endpoint can't be abused to read arbitrary files (e.g. /etc/passwd, ~/.ssh).
+            # Defaults to the user home dir plus the agent workspace; set web_file_serve_root="/"
+            # to allow the whole filesystem.
+            file_path = os.path.realpath(file_path)
+            serve_root = conf().get("web_file_serve_root", "~") or "~"
+            allowed_roots = [
+                os.path.realpath(os.path.expanduser(serve_root)),
+                os.path.realpath(os.path.expanduser(conf().get("agent_workspace", "~/cow"))),
+            ]
+            if os.sep not in allowed_roots and not any(
+                os.path.commonpath([file_path, root]) == root for root in allowed_roots
+            ):
+                raise web.notfound()
             if not os.path.isfile(file_path):
                 raise web.notfound()
             content_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
@@ -1371,6 +1395,8 @@ class ChatHandler:
         cache_bust = str(int(time.time()))
         html = html.replace('assets/js/console.js', f'assets/js/console.js?v={cache_bust}')
         html = html.replace('assets/css/console.css', f'assets/css/console.css?v={cache_bust}')
+        # Inject the backend-resolved default language for first-load fallback.
+        html = html.replace("{{COW_DEFAULT_LANG}}", i18n.get_language())
         return html
 
 
@@ -1509,6 +1535,7 @@ class ConfigHandler:
     ])
 
     EDITABLE_KEYS = {
+        "cow_lang",
         "model", "bot_type", "use_linkai",
         "open_ai_api_base", "deepseek_api_base", "qianfan_api_base", "claude_api_base", "gemini_api_base",
         "zhipu_ai_api_base", "moonshot_base_url", "ark_base_url", "custom_api_base", "mimo_api_base",
@@ -1616,6 +1643,15 @@ class ConfigHandler:
                 json.dump(file_cfg, f, indent=4, ensure_ascii=False)
 
             logger.info(f"[WebChannel] Config updated: {list(applied.keys())}")
+
+            # Apply a language change immediately so backend logs, agent
+            # replies and CLI output switch without a restart.
+            if "cow_lang" in applied:
+                try:
+                    i18n.resolve_language(applied["cow_lang"])
+                    logger.info(f"[WebChannel] Language switched to: {i18n.get_language()}")
+                except Exception as lang_err:
+                    logger.warning(f"[WebChannel] Failed to apply language: {lang_err}")
 
             # Reset Bridge so that bot routing reflects the new config.
             # Without this, Bridge keeps its cached bot instance (e.g. LinkAIBot)
@@ -2897,6 +2933,18 @@ class ChannelsHandler:
                 {"key": "wechatcomapp_port", "label": "Port", "type": "number", "default": 9898},
             ],
         }),
+        ("wechat_kf", {
+            "label": {"zh": "微信客服", "en": "WeCom Customer Service"},
+            "icon": "fa-headset",
+            "color": "emerald",
+            "fields": [
+                {"key": "wechat_kf_corp_id", "label": "Corp ID", "type": "text"},
+                {"key": "wechat_kf_secret", "label": "Secret", "type": "secret"},
+                {"key": "wechat_kf_token", "label": "Token", "type": "secret"},
+                {"key": "wechat_kf_aes_key", "label": "AES Key", "type": "secret"},
+                {"key": "wechat_kf_port", "label": "Port", "type": "number", "default": 9888},
+            ],
+        }),
         ("wechatmp", {
             "label": {"zh": "公众号", "en": "WeChat MP"},
             "icon": "fa-comment-dots",
@@ -2915,6 +2963,23 @@ class ChannelsHandler:
             "color": "sky",
             "fields": [
                 {"key": "telegram_token", "label": "Bot Token", "type": "secret"},
+            ],
+        }),
+        ("slack", {
+            "label": {"zh": "Slack", "en": "Slack"},
+            "icon": "fa-hashtag",
+            "color": "purple",
+            "fields": [
+                {"key": "slack_bot_token", "label": "Bot Token (xoxb-)", "type": "secret"},
+                {"key": "slack_app_token", "label": "App Token (xapp-)", "type": "secret"},
+            ],
+        }),
+        ("discord", {
+            "label": {"zh": "Discord", "en": "Discord"},
+            "icon": "fa-discord",
+            "color": "indigo",
+            "fields": [
+                {"key": "discord_token", "label": "Bot Token", "type": "secret"},
             ],
         }),
     ])
