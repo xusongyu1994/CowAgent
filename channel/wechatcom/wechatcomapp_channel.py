@@ -28,6 +28,7 @@ MAX_UTF8_LEN = 2048
 @singleton
 class WechatComAppChannel(ChatChannel):
     NOT_SUPPORT_REPLYTYPE = []
+    channel_type = "wechatcom_app"  # 定义渠道类型
 
     def __init__(self):
         super().__init__()

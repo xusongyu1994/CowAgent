@@ -212,7 +212,8 @@ class WebMessage(ChatMessage):
             msg_id,
             content,
             ctype=ContextType.TEXT,
-            from_user_id="User",
+            from_user_id="web_admin",
+            from_user_nickname="管理员",
             to_user_id="Chatgpt",
             other_user_id="Chatgpt",
     ):
@@ -220,6 +221,7 @@ class WebMessage(ChatMessage):
         self.ctype = ctype
         self.content = content
         self.from_user_id = from_user_id
+        self.from_user_nickname = from_user_nickname
         self.to_user_id = to_user_id
         self.other_user_id = other_user_id
 

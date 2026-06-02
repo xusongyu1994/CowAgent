@@ -50,3 +50,11 @@ class WechatComAppMessage(ChatMessage):
         self.from_user_id = msg.source
         self.to_user_id = msg.target
         self.other_user_id = msg.source
+        # 获取用户姓名
+        self.from_user_nickname = self.from_user_id  # 默认值使用UserID
+        try:
+            user_info = client.user.get(self.from_user_id)
+            if user_info and 'name' in user_info:
+                self.from_user_nickname = user_info['name']
+        except Exception as e:
+            logger.debug(f"[wechatcom] Cannot get user name for {self.from_user_id}: {e}")

@@ -53,6 +53,11 @@ class Agent:
         self.enable_skills = enable_skills  # Skills enabled flag
         self.runtime_info = runtime_info  # Runtime info for dynamic time update
         
+        # Current user identity (set when processing a message)
+        self.current_user_id = None
+        self.current_user_nickname = None
+        self.current_channel = None
+        
         # Initialize skill manager
         self.skill_manager = None
         if enable_skills:
@@ -120,12 +125,29 @@ class Agent:
             except Exception:
                 lang = "zh"
             builder = PromptBuilder(workspace_dir=self.workspace_dir or "", language=lang)
+            
+            # Build user_identity from current user info
+            user_identity = None
+            if self.current_user_id:
+                user_identity = {
+                    "name": self.current_user_nickname or self.current_user_id,
+                    "nickname": self.current_user_nickname or self.current_user_id,
+                }
+                if self.current_channel:
+                    # Ensure channel is a string, not an object
+                    channel_str = self.current_channel if isinstance(self.current_channel, str) else str(self.current_channel)
+                    user_identity["notes"] = f"来自{channel_str}渠道"
+                logger.info(f"[Agent] Built user_identity: {user_identity}")
+            else:
+                logger.warning("[Agent] current_user_id is None, cannot build user_identity!")
+            
             return builder.build(
                 tools=self.tools,
                 context_files=context_files,
                 skill_manager=self.skill_manager,
                 memory_manager=self.memory_manager,
                 runtime_info=self.runtime_info,
+                user_identity=user_identity,
             )
         except Exception as e:
             logger.warning(f"Failed to rebuild system prompt, using cached version: {e}")
@@ -146,6 +168,19 @@ class Agent:
         if not self.skill_manager:
             return []
         return self.skill_manager.list_skills()
+
+    def set_current_user(self, user_id: str, user_nickname: str = None, channel: str = None):
+        """
+        Set the current user's identity.
+        
+        :param user_id: The user's ID (e.g., WeChat Work UserID or "web_admin")
+        :param user_nickname: The user's nickname/preferred name
+        :param channel: The channel the user is chatting from (e.g., "wechatcom_app", "web")
+        """
+        self.current_user_id = user_id
+        self.current_user_nickname = user_nickname or user_id
+        self.current_channel = channel
+        logger.debug(f"[Agent] Set current user: {self.current_user_id} ({self.current_user_nickname}), channel: {self.current_channel}")
 
     def _get_model_context_window(self) -> int:
         """

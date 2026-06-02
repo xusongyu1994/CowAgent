@@ -3,7 +3,57 @@ Agent Bridge - Integrates Agent system with existing COW bridge
 """
 
 import os
-from typing import Optional, List
+from typing import Optional, List, Tuple
+
+
+def _extract_user_identity(context: 'Context') -> Tuple[Optional[str], Optional[str], str]:
+    """
+    Extract user identity from context.
+    
+    This function tries multiple sources to get user identity:
+    1. context["from_user_id"], context["from_user_nickname"], context["channel_type"]
+    2. context["msg"] (ChatMessage object) attributes
+    3. Fallback to default values
+    
+    Returns:
+        Tuple of (user_id, user_nickname, channel_type)
+    """
+    if not context:
+        return None, None, "unknown"
+    
+    # Try to get from context directly
+    user_id = context.get("from_user_id")
+    user_nickname = context.get("from_user_nickname")
+    channel = context.get("channel_type", "")
+    
+    # Try to get from context["msg"] (ChatMessage object)
+    cmsg = context.get("msg")
+    if cmsg:
+        if not user_id and hasattr(cmsg, 'from_user_id'):
+            user_id = cmsg.from_user_id
+        if not user_nickname and hasattr(cmsg, 'from_user_nickname'):
+            user_nickname = cmsg.from_user_nickname
+        
+        # Try to get channel from cmsg._channel
+        if not channel and hasattr(cmsg, '_channel'):
+            channel_obj = cmsg._channel
+            if hasattr(channel_obj, 'channel_type'):
+                channel = channel_obj.channel_type
+    
+    # Try to get channel from context["channel"]
+    if not channel:
+        channel_obj = context.get("channel")
+        if channel_obj and hasattr(channel_obj, 'channel_type'):
+            channel = channel_obj.channel_type
+    
+    # Ensure channel is a string
+    if not channel:
+        channel = "unknown"
+    if not isinstance(channel, str):
+        # logger.warning(f"[AgentBridge] channel is not a string: {type(channel)}, value: {channel}")
+        channel = str(channel)
+    
+    return user_id, user_nickname, channel
 
 from agent.protocol import Agent, LLMModel, LLMRequest, get_cancel_registry
 from bridge.agent_event_handler import AgentEventHandler
@@ -463,6 +513,19 @@ class AgentBridge:
                     1, int(conf().get("agent_max_context_turns", 20)) // 5
                 )
                 self._trim_in_memory_to_turns(agent, scheduler_keep_turns)
+
+            # Set current user identity from context
+            if context:
+                # Use helper function to extract user identity
+                user_id, user_nickname, channel = _extract_user_identity(context)
+                
+                if user_id:
+                    agent.set_current_user(user_id, user_nickname, channel)
+                    # Rebuild system prompt with user identity
+                    agent.system_prompt = agent.get_full_system_prompt()
+                    logger.info(f"[AgentBridge] Set current user: {user_id} ({user_nickname}), channel: {channel}")
+                else:
+                    logger.warning(f"[AgentBridge] Cannot determine user_id from context: {context}")
 
             try:
                 # Use agent's run_stream method with event handler
