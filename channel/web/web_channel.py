@@ -1409,7 +1409,7 @@ class ConfigHandler:
         const.GEMINI_35_FLASH, const.GEMINI_31_FLASH_LITE_PRE, const.GEMINI_31_PRO_PRE, const.GEMINI_3_FLASH_PRE,
         const.GPT_55, const.GPT_54, const.GPT_54_MINI, const.GPT_54_NANO, const.GPT_5, const.GPT_41, const.GPT_4o,
         const.GLM_5_1, const.GLM_5_TURBO, const.GLM_5, const.GLM_4_7,
-        const.QWEN36_PLUS, const.QWEN37_MAX, const.QWEN35_PLUS, const.QWEN3_MAX,
+        const.QWEN37_PLUS, const.QWEN37_MAX, const.QWEN36_PLUS,
         const.DOUBAO_SEED_2_PRO, const.DOUBAO_SEED_2_CODE,
         const.KIMI_K2_6, const.KIMI_K2_5, const.KIMI_K2,
         const.ERNIE_5_1, const.ERNIE_5, const.ERNIE_X1_1, const.ERNIE_45_TURBO_128K, const.ERNIE_45_TURBO_32K,
@@ -1482,7 +1482,7 @@ class ConfigHandler:
             "api_base_key": None,
             "api_base_default": None,
             "api_base_placeholder": "",
-            "models": [const.QWEN36_PLUS, const.QWEN37_MAX, const.QWEN35_PLUS, const.QWEN3_MAX],
+            "models": [const.QWEN37_PLUS, const.QWEN37_MAX, const.QWEN36_PLUS],
         }),
         ("doubao", {
             "label": {"zh": "豆包", "en": "Doubao"},
@@ -1717,6 +1717,28 @@ class ModelsHandler:
             {"value": "tts-1",  "hint": "OpenAI · 多语种通用"},
             {"value": "doubao", "hint": "字节豆包 · 中文音色丰富"},
             {"value": "baidu",  "hint": "百度 · 中文主播音色"},
+        ],
+    }
+
+    # ASR engine catalog per provider. The first entry of each list is the
+    # runtime default (mirrors DEFAULT_ASR_MODEL in voice/*). Users can still
+    # pick "custom" in the UI to send any other model id.
+    _ASR_PROVIDER_MODELS = {
+        "openai": [
+            {"value": "gpt-4o-mini-transcribe", "hint": "默认 · 速度快"},
+            {"value": "gpt-4o-transcribe",      "hint": "更高准确率"},
+            {"value": "whisper-1",              "hint": "经典 Whisper"},
+        ],
+        "dashscope": [
+            {"value": "qwen3-asr-flash", "hint": "覆盖普通话、方言与主流外语"},
+        ],
+        "zhipu": [
+            {"value": "glm-asr-2512", "hint": "智谱语音识别"},
+        ],
+        # LinkAI gateway pins whisper-1 for ASR and ignores any other id,
+        # so expose only that to avoid misleading the user.
+        "linkai": [
+            {"value": "whisper-1", "hint": "网关固定使用"},
         ],
     }
 
@@ -1964,7 +1986,7 @@ class ModelsHandler:
         ],
         "doubao":    [const.DOUBAO_SEED_2_PRO],
         "moonshot":  [const.KIMI_K2_6],
-        "dashscope": [const.QWEN36_PLUS, const.QWEN35_PLUS, const.QWEN3_MAX],
+        "dashscope": [const.QWEN37_PLUS, const.QWEN36_PLUS],
         "claudeAPI": [const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS],
         "gemini":    [const.GEMINI_35_FLASH, const.GEMINI_31_FLASH_LITE_PRE, const.GEMINI_31_PRO_PRE, const.GEMINI_3_FLASH_PRE],
         "qianfan":   [const.ERNIE_45_TURBO_VL],
@@ -1985,7 +2007,7 @@ class ModelsHandler:
         "linkai":    [
             const.GPT_41_MINI,
             const.GPT_54_MINI,
-            const.QWEN36_PLUS,
+            const.QWEN37_PLUS,
             const.DOUBAO_SEED_2_PRO,
             const.KIMI_K2_6,
             const.CLAUDE_4_6_SONNET,
@@ -2102,7 +2124,7 @@ class ModelsHandler:
     _VISION_AUTO_ORDER = [
         ("moonshot",  "moonshot_api_key",  const.KIMI_K2_6),
         ("doubao",    "ark_api_key",       const.DOUBAO_SEED_2_PRO),
-        ("dashscope", "dashscope_api_key", const.QWEN36_PLUS),
+        ("dashscope", "dashscope_api_key", const.QWEN37_PLUS),
         ("claudeAPI", "claude_api_key",    const.CLAUDE_4_6_SONNET),
         ("gemini",    "gemini_api_key",    const.GEMINI_35_FLASH),
         ("qianfan",   "qianfan_api_key",   const.ERNIE_45_TURBO_VL),
@@ -2240,8 +2262,9 @@ class ModelsHandler:
             "editable": True,
             "current_provider": explicit,
             "suggested_provider": suggested,
-            "current_model": "",
+            "current_model": (local_config.get("voice_to_text_model") or "") if explicit else "",
             "providers": cls._ASR_PROVIDERS,
+            "provider_models": cls._ASR_PROVIDER_MODELS,
         }
 
     @classmethod
@@ -2613,7 +2636,7 @@ class ModelsHandler:
         if capability == "vision":
             return self._set_vision(provider_id, model)
         if capability == "asr":
-            return self._set_simple("voice_to_text", provider_id)
+            return self._set_asr(provider_id, model)
         if capability == "tts":
             return self._set_tts(provider_id, model, (data.get("voice") or "").strip())
         if capability == "embedding":
@@ -2772,6 +2795,30 @@ class ModelsHandler:
         if key in ("voice_to_text", "text_to_voice"):
             self._refresh_voice_routing()
         return json.dumps({"status": "success", key: value})
+
+    def _set_asr(self, provider_id: str, model: str) -> str:
+        local_config = conf()
+        file_cfg = self._read_file_config()
+        local_config["voice_to_text"] = provider_id
+        file_cfg["voice_to_text"] = provider_id
+        # Only overwrite the model when one is supplied. An empty model means
+        # "keep whatever is configured" so switching provider from the console
+        # never wipes a user's hand-set voice_to_text_model (runtime falls back
+        # to the engine default via `or DEFAULT_ASR_MODEL` regardless).
+        if model:
+            local_config["voice_to_text_model"] = model
+            file_cfg["voice_to_text_model"] = model
+        self._write_file_config(file_cfg)
+        logger.info(
+            f"[ModelsHandler] asr updated: provider={provider_id!r} "
+            f"model={model!r}"
+        )
+        self._refresh_voice_routing()
+        return json.dumps({
+            "status": "success",
+            "provider": provider_id,
+            "model": local_config.get("voice_to_text_model", ""),
+        })
 
     def _set_tts(self, provider_id: str, model: str, voice: str = "") -> str:
         local_config = conf()
