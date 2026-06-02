@@ -157,6 +157,31 @@ class WechatComAppChannel(ChatChannel):
                 return
             self.client.message.send_image(self.agent_id, receiver, response["media_id"])
             logger.info("[wechatcom] sendImage, receiver={}".format(receiver))
+        elif reply.type == ReplyType.FILE:
+            # 发送文件（如PDF、DOC等）
+            file_path = reply.content
+            # 去除 file:// 前缀
+            if file_path.startswith("file://"):
+                file_path = file_path[7:]
+            
+            try:
+                with open(file_path, "rb") as f:
+                    response = self.client.media.upload("file", f)
+                logger.debug("[wechatcom] upload file response: {}".format(response))
+            except WeChatClientException as e:
+                logger.error("[wechatcom] upload file failed: {}".format(e))
+                return
+            except Exception as e:
+                logger.error("[wechatcom] open file failed: {}".format(e))
+                return
+
+            # 如果有附加的文本内容，先发送文本
+            if hasattr(reply, 'text_content') and reply.text_content:
+                self.client.message.send_text(self.agent_id, receiver, reply.text_content)
+                time.sleep(0.3)
+
+            self.client.message.send_file(self.agent_id, receiver, response["media_id"])
+            logger.info("[wechatcom] sendFile={}, receiver={}".format(file_path, receiver))
 
 
 class Query:
