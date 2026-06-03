@@ -242,6 +242,8 @@ def _execute_agent_task(task: dict, agent_bridge) -> bool:
                     context["dingtalk_sender_staff_id"] = sender_staff_id
         elif channel_type == "wecom_bot":
             context["msg"] = None
+        elif channel_type == "wechatcom_app":
+            context["msg"] = None
 
         # Use Agent to execute the task
         # Mark this as a scheduled task execution to prevent recursive task creation
@@ -335,6 +337,8 @@ def _execute_send_message(task: dict, agent_bridge) -> bool:
                 else:
                     logger.warning(f"[Scheduler] Task {task['id']}: DingTalk single chat message missing sender_staff_id")
         elif channel_type == "wecom_bot":
+            context["msg"] = None
+        elif channel_type == "wechatcom_app":
             context["msg"] = None
         elif channel_type == "qq":
             context["msg"] = None
