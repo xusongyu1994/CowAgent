@@ -64,6 +64,13 @@ def _import_optional_tools():
     except Exception as e:
         logger.error(f"[Tools] WebFetch failed to load: {e}")
 
+    # WeCom App Send Tool (企微自建应用发送工具)
+    try:
+        from agent.tools.wechatcom.wecom_app_send import WecomAppSend
+        tools['WecomAppSend'] = WecomAppSend
+    except Exception as e:
+        logger.error(f"[Tools] WecomAppSend not loaded: {e}")
+
     # Vision Tool (conditionally loaded based on API key availability)
     try:
         from agent.tools.vision.vision import Vision
@@ -85,6 +92,7 @@ Vision = _optional_tools.get('Vision')
 GoogleSearch = _optional_tools.get('GoogleSearch')
 FileSave = _optional_tools.get('FileSave')
 Terminal = _optional_tools.get('Terminal')
+WecomAppSend = _optional_tools.get('WecomAppSend')
 
 
 # BrowserTool (requires playwright)
@@ -142,6 +150,7 @@ __all__ = [
     'Vision',
     'BrowserTool',
     'McpTool',
+    'WecomAppSend',
 ]
 
 """
