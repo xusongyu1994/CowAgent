@@ -345,6 +345,14 @@ class AgentBridge:
                 self.scheduler_initialized = True
         except Exception as e:
             logger.warning(f"[AgentBridge] Eager scheduler init failed: {e}")
+
+        # Start the self-evolution idle trigger (idempotent, daemon thread).
+        try:
+            from agent.evolution.trigger import start_evolution_trigger
+            start_evolution_trigger(self)
+        except Exception as e:
+            logger.warning(f"[AgentBridge] Evolution trigger init failed: {e}")
+
     def create_agent(self, system_prompt: str, tools: List = None, **kwargs) -> Agent:
         """
         Create the super agent with COW integration
@@ -433,7 +441,49 @@ class AgentBridge:
         """Initialize agent for a specific session"""
         agent = self.initializer.initialize_agent(session_id=session_id)
         self.agents[session_id] = agent
-    
+
+    def sync_session_messages_from_store(self, session_id: str) -> int:
+        """Reload an agent's in-memory ``messages`` list from the persistent
+        conversation store.
+
+        Used after an external mutation (e.g. user edits / deletes a message
+        via the web console) so the agent's next turn sees the same history
+        as the database. The operation is a no-op when the agent has not been
+        instantiated yet for the session.
+
+        Returns:
+            Number of messages now held in the agent's memory. Returns -1 if
+            the agent does not exist or has no compatible ``messages`` attr.
+        """
+        if not session_id or session_id not in self.agents:
+            return -1
+        agent = self.agents[session_id]
+        if not (hasattr(agent, "messages") and hasattr(agent, "messages_lock")):
+            return -1
+        try:
+            from agent.memory import get_conversation_store
+            store = get_conversation_store()
+            # No turn cap here: we want a faithful mirror of what the store
+            # has for this session after deletion.
+            remaining = store.load_messages(session_id, max_turns=10**6)
+        except Exception as e:
+            logger.warning(
+                f"[AgentBridge] Failed to load messages for sync (session={session_id}): {e}"
+            )
+            return -1
+        with agent.messages_lock:
+            agent.messages.clear()
+            for msg in remaining:
+                agent.messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"],
+                })
+            count = len(agent.messages)
+        logger.info(
+            f"[AgentBridge] Synced agent memory for session={session_id}, messages={count}"
+        )
+        return count
+
     def agent_reply(self, query: str, context: Context = None, 
                    on_event=None, clear_history: bool = False) -> Reply:
         """
@@ -568,6 +618,23 @@ class AgentBridge:
                         except Exception as e:
                             logger.warning(f"[AgentBridge] Failed to clear DB after recovery: {e}")
             
+            # Record this user turn for the self-evolution idle trigger. Skip
+            # scheduler-injected / scheduled-task sessions so internal runs do
+            # not count as user activity.
+            if session_id and not session_id.startswith("scheduler_") and not (
+                context and context.get("is_scheduled_task")
+            ):
+                try:
+                    from agent.evolution.trigger import note_user_turn
+                    ch = (context.get("channel_type") or "") if context else ""
+                    rcv = (context.get("receiver") or "") if context else ""
+                    is_group = bool(context.get("isgroup")) if context else False
+                    # Only enable proactive push for single chats (group push is
+                    # noisy); group sessions still evolve, just without notify.
+                    note_user_turn(agent, channel_type=ch, receiver=(rcv if not is_group else ""))
+                except Exception:
+                    pass
+
             # Post-message hot-reload: detect edits to ~/cow/mcp.json and
             # sync any new/removed MCP tools into the live agent in the
             # background. Off the critical path so user latency is unaffected;

@@ -253,6 +253,21 @@ class WebChannel(ChatChannel):
         """生成唯一的请求ID"""
         return str(uuid.uuid4())
 
+    def _fetch_latest_pair_seqs(self, session_id: str):
+        """Query the conversation store for the latest user/bot message seqs.
+
+        Returned as ``{"user_seq": int|None, "bot_seq": int|None}``; used to
+        attach seq metadata onto the SSE ``done`` event so the frontend can
+        wire edit / regenerate buttons for live-streamed bubbles without a
+        page refresh.
+        """
+        try:
+            from agent.memory import get_conversation_store
+            return get_conversation_store().get_latest_pair_seqs(session_id)
+        except Exception as e:
+            logger.debug(f"[WebChannel] _fetch_latest_pair_seqs failed: {e}")
+            return {"user_seq": None, "bot_seq": None}
+
     def send(self, reply: Reply, context: Context):
         try:
             if reply.type in self.NOT_SUPPORT_REPLYTYPE:
@@ -293,11 +308,14 @@ class WebChannel(ChatChannel):
                 if reply.type in (ReplyType.IMAGE_URL, ReplyType.FILE) and content.startswith("file://"):
                     text_content = getattr(reply, 'text_content', '')
                     if text_content:
+                        seqs = self._fetch_latest_pair_seqs(session_id)
                         self.sse_queues[request_id].put({
                             "type": "done",
                             "content": text_content,
                             "request_id": request_id,
-                            "timestamp": time.time()
+                            "timestamp": time.time(),
+                            "user_seq": seqs.get("user_seq"),
+                            "bot_seq": seqs.get("bot_seq"),
                         })
                     logger.debug(f"SSE skipped duplicate file for request {request_id}")
                     return
@@ -309,11 +327,14 @@ class WebChannel(ChatChannel):
                     logger.debug(f"SSE skipped http media reply for request {request_id}")
                     return
 
+                seqs = self._fetch_latest_pair_seqs(session_id)
                 self.sse_queues[request_id].put({
                     "type": "done",
                     "content": content,
                     "request_id": request_id,
-                    "timestamp": time.time()
+                    "timestamp": time.time(),
+                    "user_seq": seqs.get("user_seq"),
+                    "bot_seq": seqs.get("bot_seq"),
                 })
                 logger.debug(f"SSE done sent for request {request_id}")
                 # Auto-trigger TTS once the bot finishes its text reply. The
@@ -1027,22 +1048,44 @@ class WebChannel(ChatChannel):
 
         self._cleanup_stale_voice_recordings()
 
-        # Print available channel types
+        # Print available channel types (ordered by language: prioritize
+        # locally-popular channels for the current UI language)
         logger.info(
             "[WebChannel] Available channels (edit `channel_type` in config.json to switch, separate multiple with commas):")
-        logger.info("[WebChannel]   1. web              - Web")
-        logger.info("[WebChannel]   2. terminal         - Terminal")
-        logger.info("[WebChannel]   3. weixin           - WeChat")
-        logger.info("[WebChannel]   4. feishu           - Feishu")
-        logger.info("[WebChannel]   5. dingtalk         - DingTalk")
-        logger.info("[WebChannel]   6. wecom_bot        - WeCom Bot")
-        logger.info("[WebChannel]   7. wechatcom_app    - WeCom App")
-        logger.info("[WebChannel]   8. wechat_kf        - WeChat Customer Service")
-        logger.info("[WebChannel]   9. wechatmp         - WeChat Official Account")
-        logger.info("[WebChannel]  10. wechatmp_service - WeChat Official Account (Service)")
-        logger.info("[WebChannel]  11. telegram         - Telegram")
-        logger.info("[WebChannel]  12. slack            - Slack")
-        logger.info("[WebChannel]  13. discord          - Discord")
+        zh_channels = [
+            ("web", "Web"),
+            ("terminal", "Terminal"),
+            ("weixin", "WeChat"),
+            ("feishu", "Feishu"),
+            ("dingtalk", "DingTalk"),
+            ("wecom_bot", "WeCom Bot"),
+            ("wechatcom_app", "WeCom App"),
+            ("wechat_kf", "WeChat Customer Service"),
+            ("wechatmp", "WeChat Official Account"),
+            ("wechatmp_service", "WeChat Official Account (Service)"),
+            ("telegram", "Telegram"),
+            ("slack", "Slack"),
+            ("discord", "Discord"),
+        ]
+        en_channels = [
+            ("web", "Web"),
+            ("terminal", "Terminal"),
+            ("telegram", "Telegram"),
+            ("slack", "Slack"),
+            ("discord", "Discord"),
+            ("weixin", "WeChat"),
+            ("feishu", "Feishu"),
+            ("dingtalk", "DingTalk"),
+            ("wecom_bot", "WeCom Bot"),
+            ("wechatcom_app", "WeCom App"),
+            ("wechat_kf", "WeChat Customer Service"),
+            ("wechatmp", "WeChat Official Account"),
+            ("wechatmp_service", "WeChat Official Account (Service)"),
+        ]
+        channels = en_channels if i18n.get_language() == "en" else zh_channels
+        name_width = max(len(name) for name, _ in channels)
+        for idx, (name, label) in enumerate(channels, 1):
+            logger.info(f"[WebChannel]  {idx:>2}. {name:<{name_width}} - {label}")
         logger.info("[WebChannel] ✅ Web console is running")
         logger.info(f"[WebChannel] 🌐 Local access: http://localhost:{port}")
         if is_public_bind:
@@ -1098,6 +1141,7 @@ class WebChannel(ChatChannel):
             '/api/sessions/(.*)/clear_context', 'SessionClearContextHandler',
             '/api/sessions/(.*)', 'SessionDetailHandler',
             '/api/history', 'HistoryHandler',
+            '/api/messages/delete', 'MessageDeleteHandler',
             '/api/logs', 'LogsHandler',
             '/api/version', 'VersionHandler',
             '/assets/(.*)', 'AssetsHandler',
@@ -1545,7 +1589,7 @@ class ConfigHandler:
         "zhipu_ai_api_key", "dashscope_api_key", "moonshot_api_key",
         "ark_api_key", "minimax_api_key", "linkai_api_key", "custom_api_key", "mimo_api_key",
         "agent_max_context_tokens", "agent_max_context_turns", "agent_max_steps",
-        "enable_thinking", "web_password",
+        "enable_thinking", "self_evolution_enabled", "web_password",
     }
 
     @staticmethod
@@ -1600,6 +1644,7 @@ class ConfigHandler:
                 "agent_max_context_turns": local_config.get("agent_max_context_turns", 20),
                 "agent_max_steps": local_config.get("agent_max_steps", 20),
                 "enable_thinking": bool(local_config.get("enable_thinking", False)),
+                "self_evolution_enabled": bool(local_config.get("self_evolution_enabled", False)),
                 "api_bases": api_bases,
                 "api_keys": api_keys_masked,
                 "providers": providers,
@@ -1625,7 +1670,7 @@ class ConfigHandler:
                     continue
                 if key in ("agent_max_context_tokens", "agent_max_context_turns", "agent_max_steps"):
                     value = int(value)
-                if key in ("use_linkai", "enable_thinking"):
+                if key in ("use_linkai", "enable_thinking", "self_evolution_enabled"):
                     value = bool(value)
                 local_config[key] = value
                 applied[key] = value
@@ -3919,6 +3964,40 @@ class HistoryHandler:
             return json.dumps({"status": "success", **result}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"[WebChannel] History API error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+
+class MessageDeleteHandler:
+    def POST(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        web.header('Access-Control-Allow-Origin', '*')
+        try:
+            data = json.loads(web.data())
+            session_id = data.get('session_id', '').strip()
+            user_seq = data.get('user_seq')
+            delete_user = data.get('delete_user', True)
+            cascade = data.get('cascade', False)
+            
+            if not session_id or user_seq is None:
+                return json.dumps({"status": "error", "message": "session_id and user_seq required"})
+            
+            # 1. Delete from database
+            from agent.memory import get_conversation_store
+            store = get_conversation_store()
+            deleted = store.delete_message_pair(session_id, int(user_seq), delete_user=delete_user, cascade=cascade)
+
+            # 2. Sync agent's in-memory context so its next turn sees the
+            # same history as the DB. Handled by the agent_bridge helper.
+            try:
+                from bridge import Bridge
+                Bridge().get_agent_bridge().sync_session_messages_from_store(session_id)
+            except Exception as sync_err:
+                logger.warning(f"[WebChannel] Failed to sync agent memory: {sync_err}")
+
+            return json.dumps({"status": "success", "deleted": deleted}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Message delete error: {e}")
             return json.dumps({"status": "error", "message": str(e)})
 
 
