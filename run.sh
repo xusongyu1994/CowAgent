@@ -359,38 +359,36 @@ detect_python_command() {
     FOUND_NEWER_VERSION=""
     
     # Try to find Python command in order of preference
-    for cmd in python3 python python3.12 python3.11 python3.10 python3.9 python3.8 python3.7; do
+    for cmd in python3 python python3.12 python3.11 python3.10 python3.9 python3.8 python3.7 python3.13; do
         if command -v $cmd &> /dev/null; then
             # Check Python version
             major_version=$($cmd -c 'import sys; print(sys.version_info[0])' 2>/dev/null)
             minor_version=$($cmd -c 'import sys; print(sys.version_info[1])' 2>/dev/null)
             
             if [[ "$major_version" == "3" ]]; then
-                # Check if version is in supported range (3.7 - 3.12)
-                if (( minor_version >= 7 && minor_version <= 12 )); then
+                # Supported range is 3.7+. On 3.13+ web.py is installed from a
+                # pinned GitHub commit (see requirements.txt), which needs git.
+                if (( minor_version >= 7 )); then
                     PYTHON_CMD=$cmd
                     PYTHON_VERSION="${major_version}.${minor_version}"
                     break
-                elif (( minor_version >= 13 )); then
-                    # Found Python 3.13+, but not compatible
-                    if [ -z "$FOUND_NEWER_VERSION" ]; then
-                        FOUND_NEWER_VERSION="${major_version}.${minor_version}"
-                    fi
                 fi
             fi
         fi
     done
     
     if [ -z "$PYTHON_CMD" ]; then
-        echo -e "${YELLOW}Tried: python3, python, python3.12, python3.11, python3.10, python3.9, python3.8, python3.7${NC}"
-        if [ -n "$FOUND_NEWER_VERSION" ]; then
-            echo -e "${RED}❌ Found Python $FOUND_NEWER_VERSION, but this project requires Python 3.7-3.12${NC}"
-            echo -e "${YELLOW}Python 3.13+ has compatibility issues with some dependencies (web.py, cgi module removed)${NC}"
-            echo -e "${YELLOW}Please install Python 3.7-3.12 (recommend Python 3.12)${NC}"
-        else
-            echo -e "${RED}❌ No suitable Python found. Please install Python 3.7-3.12${NC}"
-        fi
+        echo -e "${YELLOW}Tried: python3, python, python3.12, python3.11, python3.10, python3.9, python3.8, python3.7, python3.13${NC}"
+        echo -e "${RED}❌ No suitable Python found. Please install Python 3.7 or newer${NC}"
         exit 1
+    fi
+
+    # On 3.13+, web.py is pulled from GitHub via pip, which requires git.
+    if [[ "$major_version" == "3" ]] && (( minor_version >= 13 )); then
+        if ! command -v git &> /dev/null; then
+            echo -e "${YELLOW}⚠️  Python $PYTHON_VERSION detected. Installing web.py from GitHub requires git, which was not found.${NC}"
+            echo -e "${YELLOW}    Please install git, or use Python 3.12 where web.py installs directly from PyPI.${NC}"
+        fi
     fi
     
     # Export for global use
@@ -599,7 +597,7 @@ select_model() {
     # The 12th option is "skip" -> configure later in the web console.
     select_menu sel "$title" \
         "DeepSeek (deepseek-v4-flash, deepseek-v4-pro, etc.)" \
-        "Claude (claude-opus-4-8, claude-opus-4-7, etc.)" \
+        "Claude (claude-fable-5, claude-opus-4-8, etc.)" \
         "Gemini (gemini-3.5-flash, gemini-3.1-pro-preview, etc.)" \
         "OpenAI (gpt-5.5, etc.)" \
         "MiniMax (MiniMax-M3, etc.)" \
@@ -631,7 +629,7 @@ read_model_config() {
 configure_model() {
     case "$model_choice" in
         1) read_model_config "DeepSeek" "deepseek-v4-flash" "DEEPSEEK_KEY" ;;
-        2) read_model_config "Claude" "claude-opus-4-8" "CLAUDE_KEY" ;;
+        2) read_model_config "Claude" "claude-fable-5" "CLAUDE_KEY" ;;
         3) read_model_config "Gemini" "gemini-3.1-pro-preview" "GEMINI_KEY" ;;
         4) read_model_config "OpenAI" "gpt-5.5" "OPENAI_KEY" ;;
         5) read_model_config "MiniMax" "MiniMax-M3" "MINIMAX_KEY" ;;
@@ -883,6 +881,9 @@ base = {
     'agent_max_context_tokens': 40000,
     'agent_max_context_turns': 30,
     'agent_max_steps': 15,
+    # New installs opt into self-evolution; existing users (no key) keep the
+    # code default (off) so an upgrade never silently changes their behavior.
+    'self_evolution_enabled': True,
 }
 channel_map = {
     'feishu': {'feishu_app_id': 'FEISHU_APP_ID', 'feishu_app_secret': 'FEISHU_APP_SECRET'},

@@ -470,6 +470,9 @@ function applyI18n() {
     installCfgTipPortal();
     const langLabel = document.getElementById('lang-label');
     if (langLabel) langLabel.textContent = currentLang === 'zh' ? '中文' : 'EN';
+    // Point the docs link to the locale-specific documentation site.
+    const docsLink = document.getElementById('docs-link');
+    if (docsLink) docsLink.href = currentLang === 'zh' ? 'https://docs.cowagent.ai/zh' : 'https://docs.cowagent.ai';
 }
 
 // Single entry point for switching language. Updates the in-memory language,
@@ -855,8 +858,10 @@ function _addCodeBlockHeaders(container) {
         if (!codeEl) return;
         
         const langClass = Array.from(codeEl.classList).find(c => c.startsWith('language-'));
-        const language = langClass ? langClass.replace('language-', '') : 'code';
-        const langLabel = language.charAt(0).toUpperCase() + language.slice(1);
+        const language = langClass ? langClass.replace('language-', '') : '';
+        // Hide label for unknown/empty languages (e.g. language-undefined)
+        const showLang = language && language !== 'undefined' && language !== 'code';
+        const langLabel = showLang ? language.charAt(0).toUpperCase() + language.slice(1) : '';
         
         const wrapper = document.createElement('div');
         wrapper.className = 'code-block-wrapper';
@@ -883,6 +888,8 @@ let isPolling = false;
 let pollGeneration = 0;   // incremented on each restart to cancel stale poll loops
 let loadingContainers = {};
 let activeStreams = {};   // request_id -> EventSource
+let sessionActiveRequest = {};   // session_id -> request_id (in-flight stream per session)
+let streamBuffers = {};   // request_id -> { items: [event...], timestamp } for re-attach replay
 let isComposing = false;
 let appConfig = { use_agent: false, title: '揽盛电气智能体', subtitle: '', providers: {}, api_bases: {} };
 
@@ -1297,8 +1304,15 @@ sendBtn.addEventListener('click', () => {
 
 function updateSendBtnState() {
     if (sendBtnMode === 'cancel') {
-        // Don't downgrade a Cancel button on input edits.
-        return;
+        // Self-heal a stuck Cancel button: if there's no live stream backing
+        // the current request, the cancel state leaked (e.g. a stream ended
+        // without resetting). Recover to Send so the input isn't blocked.
+        if (!activeRequestId || !activeStreams[activeRequestId]) {
+            resetSendBtnSendMode();
+        } else {
+            // Don't downgrade a genuinely active Cancel button on input edits.
+            return;
+        }
     }
     sendBtn.disabled = uploadingCount > 0 || (!chatInput.value.trim() && pendingAttachments.length === 0);
 }
@@ -2230,7 +2244,7 @@ function sendMessage() {
     postWithRetry(0);
 }
 
-function startSSE(requestId, loadingEl, timestamp, titleInfo) {
+function startSSE(requestId, loadingEl, timestamp, titleInfo, replayItems) {
     let botEl = null;
     let stepsEl = null;    // .agent-steps  (thinking summaries + tool indicators)
     let contentEl = null;  // .answer-content (final streaming answer)
@@ -2241,6 +2255,25 @@ function startSSE(requestId, loadingEl, timestamp, titleInfo) {
     let reasoningText = '';
     let reasoningStartTime = 0;
     let done = false;
+
+    // The session this stream belongs to. Sessions run in parallel: the user
+    // may switch to another session while this one is still streaming. The
+    // stream keeps running in the background (so the reply still completes and
+    // persists); when foreign it does not touch the view but still records
+    // every event into a buffer, so returning to the session can rebuild the
+    // bubble by replaying the buffer and then resume live rendering.
+    const ownerSession = sessionId;
+    const isActive = () => ownerSession === sessionId;
+    sessionActiveRequest[ownerSession] = requestId;
+    // Per-request event buffer used to rebuild the bubble on re-attach.
+    const buffer = streamBuffers[requestId] || { items: [], timestamp };
+    streamBuffers[requestId] = buffer;
+    const clearOwnerRequest = () => {
+        if (sessionActiveRequest[ownerSession] === requestId) {
+            delete sessionActiveRequest[ownerSession];
+        }
+        delete streamBuffers[requestId];
+    };
 
     const MAX_RECONNECTS = 10;
     const RECONNECT_BASE_MS = 1000;
@@ -2283,17 +2316,13 @@ function startSSE(requestId, loadingEl, timestamp, titleInfo) {
         mediaEl = botEl.querySelector('.media-content');
     }
 
-    function connect() {
-        const es = new EventSource(`/stream?request_id=${encodeURIComponent(requestId)}`);
-        activeStreams[requestId] = es;
+    // Holds the live EventSource so terminal events (done/voice_attach/error)
+    // can close it. During replay there is no live connection (null).
+    let currentEs = null;
 
-        es.onmessage = function(e) {
-            let item;
-            try { item = JSON.parse(e.data); } catch (_) { return; }
-
-            // Successful data received, reset reconnect counter
-            reconnectCount = 0;
-
+    // Render one SSE event into the bubble. Used by the live handler and by
+    // re-attach replay alike, so both paths produce identical UI.
+    function processSSEItem(item) {
             if (item.type === 'reasoning') {
                 ensureBotEl();
                 reasoningText += item.content;
@@ -2507,6 +2536,7 @@ function startSSE(requestId, loadingEl, timestamp, titleInfo) {
                 // TTS audio (`voice_attach`). It will close the stream on
                 // its own via onerror once the tail expires.
                 done = true;
+                clearOwnerRequest();
                 resetSendBtnSendMode();
 
                 const finalTextRaw = item.content || accumulatedText;
@@ -2562,17 +2592,52 @@ function startSSE(requestId, loadingEl, timestamp, titleInfo) {
                 if (botEl && item.url) {
                     attachAudioToBotBubble(botEl, item.url, { autoplay: true });
                 }
-                es.close();
+                if (currentEs) { currentEs.close(); }
                 delete activeStreams[requestId];
+                clearOwnerRequest();
 
             } else if (item.type === 'error') {
                 done = true;
-                es.close();
+                if (currentEs) { currentEs.close(); }
                 delete activeStreams[requestId];
+                clearOwnerRequest();
                 if (loadingEl) { loadingEl.remove(); loadingEl = null; }
                 addBotMessage(t('error_send'), new Date());
                 resetSendBtnSendMode();
             }
+    }
+
+    function connect() {
+        const es = new EventSource(`/stream?request_id=${encodeURIComponent(requestId)}`);
+        currentEs = es;
+        activeStreams[requestId] = es;
+
+        es.onmessage = function(e) {
+            let item;
+            try { item = JSON.parse(e.data); } catch (_) { return; }
+
+            // Successful data received, reset reconnect counter
+            reconnectCount = 0;
+
+            // Record every event for re-attach replay (capped to avoid
+            // unbounded growth on very long streams).
+            if (buffer.items.length < 5000) buffer.items.push(item);
+
+            // Background session: keep the stream alive so the reply finishes
+            // and persists, but skip rendering into the now-foreign view. The
+            // buffer above still grows so returning to the session can rebuild
+            // the bubble and resume live rendering.
+            if (ownerSession !== sessionId) {
+                if (item.type === 'done' || item.type === 'error' || item.type === 'voice_attach') {
+                    done = true;
+                    es.close();
+                    delete activeStreams[requestId];
+                    clearOwnerRequest();
+                }
+                return;
+            }
+
+            processSSEItem(item);
         };
 
         es.onerror = function() {
@@ -2598,7 +2663,10 @@ function startSSE(requestId, loadingEl, timestamp, titleInfo) {
                 return;
             }
 
-            // Exhausted retries, show whatever we have
+            // Exhausted retries. Only surface the failure in the owning view —
+            // a background session must not mutate the currently shown chat.
+            clearOwnerRequest();
+            if (!isActive()) return;
             if (loadingEl) { loadingEl.remove(); loadingEl = null; }
             if (!botEl) {
                 addBotMessage(t('error_send'), new Date());
@@ -2610,6 +2678,27 @@ function startSSE(requestId, loadingEl, timestamp, titleInfo) {
             }
             resetSendBtnSendMode();
         };
+    }
+
+    // Re-attach replay: rebuild the bubble from buffered events (snapshot,
+    // not animated) before connecting for the live tail. `processSSEItem`
+    // is the same renderer used by the live onmessage handler, so the
+    // snapshot matches exactly what live rendering would have produced.
+    if (replayItems && replayItems.length) {
+        for (const item of replayItems) {
+            try { processSSEItem(item); } catch (_) {}
+            if (item.type === 'done' || item.type === 'error' || item.type === 'voice_attach') {
+                done = true;
+            }
+        }
+        // If the buffered stream already finished, don't reconnect — the
+        // reply is complete and persisted; show its final state and stop.
+        if (done) {
+            clearOwnerRequest();
+            resetSendBtnSendMode();
+            scrollChatToBottom(true);
+            return;
+        }
     }
 
     connect();
@@ -2641,10 +2730,19 @@ function startPolling() {
                     loadingContainers[rid].remove();
                     delete loadingContainers[rid];
                 }
-                const welcomeScreen = document.getElementById('welcome-screen');
-                if (welcomeScreen) welcomeScreen.remove();
-                addBotMessage(data.content, new Date(data.timestamp * 1000), rid);
-                scrollChatToBottom();
+                // Skip if this reply is already on screen. Happens when a reply
+                // arrives via both the SSE stream and the poll queue (e.g. the
+                // user switched away mid-run, leaving the queued reply to be
+                // re-fetched on return) — render it only once.
+                const already = rid && messagesDiv.querySelector(
+                    `[data-request-id="${rid}"]`
+                );
+                if (!already) {
+                    const welcomeScreen = document.getElementById('welcome-screen');
+                    if (welcomeScreen) welcomeScreen.remove();
+                    addBotMessage(data.content, new Date(data.timestamp * 1000), rid);
+                    scrollChatToBottom();
+                }
             }
             const delay = (data.status === 'success' && data.has_content) ? 5000 : 10000;
             setTimeout(poll, delay);
@@ -2889,8 +2987,11 @@ function createBotMessageEl(content, timestamp, requestId, msg) {
     }
 
     // Self-evolution bubbles get a small badge so the user can feel the agent
-    // learned something on its own (text itself stays clean).
-    const evolutionBadge = (msg && msg.kind === 'evolution')
+    // learned something on its own (text itself stays clean). History replay
+    // carries msg.kind; live pushes are identified by the evolution_ request id.
+    const isEvolution = (msg && msg.kind === 'evolution')
+        || (typeof requestId === 'string' && requestId.startsWith('evolution_'));
+    const evolutionBadge = isEvolution
         ? `<div class="flex items-center gap-1 mb-1.5 text-xs text-slate-400 dark:text-slate-500">
                 <i class="fas fa-seedling text-[11px]"></i>
                 <span>${t('evolution_badge')}</span>
@@ -3174,9 +3275,12 @@ function loadHistory(page) {
             historyPage = page;
 
             if (isFirstLoad) {
-                // Use requestAnimationFrame to ensure the DOM has fully rendered
-                // before scrolling, otherwise scrollHeight may not reflect new content.
+                // Scroll to the very bottom after the DOM settles. A single
+                // rAF isn't enough: markdown/code-highlight/images keep growing
+                // scrollHeight after the first paint, leaving the last bubble's
+                // timestamp clipped. Re-pin a few times to catch late layout.
                 requestAnimationFrame(() => scrollChatToBottom(true));
+                [120, 350, 700].forEach(d => setTimeout(() => scrollChatToBottom(true), d));
             } else {
                 // Restore scroll position so loading older messages doesn't jump the view
                 messagesDiv.scrollTop = messagesDiv.scrollHeight - prevScrollHeight;
@@ -3204,15 +3308,15 @@ function addLoadingIndicator() {
     return el;
 }
 
-function newChat() {
-    // Close all active SSE connections for the current session
-    Object.values(activeStreams).forEach(es => { try { es.close(); } catch (_) {} });
-    activeStreams = {};
+function newChat(optimistic = true) {
+    // Do NOT close active streams: other sessions keep streaming in the
+    // background (each stream self-guards against the foreign view) and their
+    // replies still complete and persist.
 
     // Generate a fresh session and persist it so the next page load also starts clean
     sessionId = generateSessionId();
     localStorage.setItem(SESSION_ID_KEY, sessionId);
-    loadingContainers = {};
+    resetSendBtnSendMode();  // fresh session has no in-flight reply
     startPolling();  // bump generation so old loop self-cancels, new loop uses fresh sessionId
     messagesDiv.innerHTML = '';
     const ws = document.createElement('div');
@@ -3308,8 +3412,16 @@ function newChat() {
         _showSessionOverlay();
         _persistPanelState();
     }
+    // Only prepend an optimistic "new chat" item when this is a real new-chat
+    // action. When called after deleting the current session, skip it: the
+    // fresh session has no backend record yet, so inserting it would leave an
+    // empty, undeletable item in the list (deleting it just spawns another).
     const newSid = sessionId;
-    loadSessionList(() => _addOptimisticSessionItem(newSid));
+    if (optimistic) {
+        loadSessionList(() => _addOptimisticSessionItem(newSid));
+    } else {
+        loadSessionList();
+    }
 }
 
 // =====================================================================
@@ -3547,15 +3659,56 @@ function _onSessionListScroll() {
     }
 })();
 
+// Returning to a session whose reply is still streaming in the background.
+// Close the background EventSource, rebuild the bubble from the buffered
+// events (snapshot), then resume live streaming via a fresh connection that
+// reads the remaining tail from the backend queue. Returns true if a stream
+// was re-attached. The user's own bubble is already in history (persisted
+// eagerly), so it was rendered by loadHistory before this runs.
+function _reattachStream(sid) {
+    const requestId = sessionActiveRequest[sid];
+    if (!requestId) return false;
+    const buffer = streamBuffers[requestId];
+    if (!buffer) return false;
+
+    // If the buffered stream already finished, the assistant reply is already
+    // persisted and rendered by loadHistory — re-attaching would duplicate it.
+    // Just clean up the buffer/cursor and rely on history.
+    const finished = buffer.items.some(
+        it => it.type === 'done' || it.type === 'error'
+    );
+    if (finished) {
+        const oldEs = activeStreams[requestId];
+        if (oldEs) { try { oldEs.close(); } catch (_) {} delete activeStreams[requestId]; }
+        delete streamBuffers[requestId];
+        delete sessionActiveRequest[sid];
+        resetSendBtnSendMode();
+        return false;
+    }
+
+    // Stop the background stream so the rebuilt one is the sole consumer of
+    // the backend queue (the queue survives until "done", so the new
+    // connection picks up any remaining events).
+    const oldEs = activeStreams[requestId];
+    if (oldEs) { try { oldEs.close(); } catch (_) {} delete activeStreams[requestId]; }
+
+    // Snapshot the buffered events into the replay, then start a fresh stream
+    // that replays them and reconnects for the live tail.
+    const replay = buffer.items.slice();
+    startSSE(requestId, null, buffer.timestamp || new Date(), null, replay);
+    return true;
+}
+
 function switchSession(newSessionId) {
     if (newSessionId === sessionId) {
         if (currentView !== 'chat') navigateTo('chat');
         return;
     }
 
-    Object.values(activeStreams).forEach(es => { try { es.close(); } catch (_) {} });
-    activeStreams = {};
-    loadingContainers = {};
+    // Do NOT close active streams here: sessions run in parallel, so any
+    // in-flight reply for another session must keep streaming in the
+    // background (it self-guards against rendering into the foreign view).
+    // Switching back re-attaches and resumes live streaming.
 
     sessionId = newSessionId;
     localStorage.setItem(SESSION_ID_KEY, sessionId);
@@ -3568,6 +3721,17 @@ function switchSession(newSessionId) {
     loadHistory(1);
     startPolling();
 
+    // Restore the send button to match this session's stream state, and if a
+    // reply is still streaming in the background, re-attach to resume showing
+    // it live (the user turn itself comes from history above).
+    const pendingReq = sessionActiveRequest[sessionId];
+    if (pendingReq) {
+        setSendBtnCancelMode(pendingReq);
+        _reattachStream(sessionId);
+    } else {
+        resetSendBtnSendMode();
+    }
+
     document.querySelectorAll('.session-item').forEach(el => {
         el.classList.toggle('active', el.dataset.sessionId === sessionId);
     });
@@ -3578,18 +3742,47 @@ function switchSession(newSessionId) {
 
 function deleteSession(sid) {
     showConfirmModal(t('delete_session_title'), t('delete_session_confirm'), () => {
+        // Before deleting, find the next real session to fall back to when the
+        // current one is removed (the sibling item in the list, which is sorted
+        // newest-first). Falls back to the welcome screen if none remain.
+        const nextSid = sid === sessionId ? _findNextSessionId(sid) : null;
+
         fetch(`/api/sessions/${encodeURIComponent(sid)}`, { method: 'DELETE' })
             .then(r => r.json())
             .then(data => {
                 if (data.status !== 'success') return;
-                if (sid === sessionId) {
-                    newChat();
-                } else {
+                if (sid !== sessionId) {
                     loadSessionList();
+                    return;
+                }
+                if (nextSid) {
+                    // Switch to an existing session; refresh the list afterwards
+                    // so the deleted item disappears.
+                    switchSession(nextSid);
+                    loadSessionList();
+                } else {
+                    // No other sessions: reset to a fresh empty session without
+                    // inserting an optimistic placeholder (it has no backend
+                    // record and would be an empty, undeletable item).
+                    newChat(false);
                 }
             })
             .catch(() => {});
     });
+}
+
+// Pick the session to show after deleting `sid` (the current session): prefer
+// the next item below it in the list, otherwise the previous one. Returns null
+// if no other session exists.
+function _findNextSessionId(sid) {
+    const items = Array.from(document.querySelectorAll('.session-item[data-session-id]'));
+    const idx = items.findIndex(el => el.dataset.sessionId === sid);
+    if (idx === -1) {
+        const other = items.find(el => el.dataset.sessionId !== sid);
+        return other ? other.dataset.sessionId : null;
+    }
+    const next = items[idx + 1] || items[idx - 1];
+    return next ? next.dataset.sessionId : null;
 }
 
 function showConfirmModal(title, message, onConfirm) {

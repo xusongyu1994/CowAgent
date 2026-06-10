@@ -15,7 +15,7 @@
   [<a href="../../README.md">English</a>] | [<a href="../zh/README.md">中文</a>] | [日本語]
 </p>
 
-**CowAgent** は、自律的にタスクを計画し、コンピュータや外部リソースを操作し、Skill を作成・実行し、パーソナルナレッジベースと長期記憶でユーザーとともに成長するオープンソースのスーパー AI アシスタントです。エンドツーエンドの Agent Harness のリファレンス実装の一つでもあります。
+**CowAgent** は、自律的にタスクを計画し、コンピュータや外部リソースを操作し、Skill を作成・実行し、パーソナルナレッジベースと長期記憶を構築し、自己進化によってユーザーとともに成長するオープンソースのスーパー AI アシスタントです。エンドツーエンドの Agent Harness のリファレンス実装の一つでもあります。
 
 CowAgent は軽量でデプロイしやすく、拡張性に優れています。主要な LLM プロバイダーをそのまま組み込み、Web や主要な IM プラットフォーム上で動作。個人 PC やサーバー上で 24 時間 365 日稼働できます。
 
@@ -36,6 +36,7 @@ CowAgent は軽量でデプロイしやすく、拡張性に優れています�
 | [タスク計画](https://docs.cowagent.ai/ja/intro/architecture) | 複雑なタスクを分解し、目標達成までツールを繰り返し呼び出して段階的に実行 |
 | [長期記憶](https://docs.cowagent.ai/ja/memory/index) | 三層構造（コンテキスト → デイリー → コア）、Deep Dream による自動蒸留、キーワードとベクトルのハイブリッド検索 |
 | [ナレッジベース](https://docs.cowagent.ai/ja/knowledge/index) | 構造化された知識を Markdown Wiki として自動整理し、進化し続けるナレッジグラフを可視化ブラウジング |
+| [自己進化](https://docs.cowagent.ai/ja/memory/self-evolution) | 会話を自動でレビューして Skill を改善し、未完了のタスクを引き継ぎ、記憶と知識を補完。日々の利用を通じて成長 |
 | [Skill](https://docs.cowagent.ai/ja/skills/index) | [Skill Hub](https://skills.cowagent.ai/)、GitHub、ClawHub からワンクリックでインストール；対話によるカスタム Skill 作成にも対応 |
 | [ツール](https://docs.cowagent.ai/ja/tools/index) | ファイル I/O、ターミナル、ブラウザ、スケジューラ、記憶検索、Web 検索など 10+ の組み込みツール — MCP プロトコルに完全対応 |
 | [チャネル](https://docs.cowagent.ai/ja/channels/index) | 一つの Agent で Web、WeChat、Feishu、DingTalk、WeCom、QQ、公式アカウント、Telegram、Slack を同時にサポート |
@@ -102,7 +103,7 @@ CowAgent は主要な LLM プロバイダーすべてに対応しています。
 
 | プロバイダー | 代表的なモデル | チャット | 画像認識 | 画像生成 | ASR | TTS | Embedding |
 | --- | --- | :-: | :-: | :-: | :-: | :-: | :-: |
-| [Claude](https://docs.cowagent.ai/ja/models/claude) | claude-opus-4-8 | ✅ | ✅ | | | | |
+| [Claude](https://docs.cowagent.ai/ja/models/claude) | claude-fable-5 | ✅ | ✅ | | | | |
 | [OpenAI](https://docs.cowagent.ai/ja/models/openai) | gpt-5.5、o シリーズ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [Gemini](https://docs.cowagent.ai/ja/models/gemini) | gemini-3.5-flash | ✅ | ✅ | ✅ | | | |
 | [DeepSeek](https://docs.cowagent.ai/ja/models/deepseek) | deepseek-v4-flash / pro | ✅ | | | | | |
@@ -197,6 +198,8 @@ CowAgent は主要な LLM プロバイダーすべてに対応しています。
 <br/>
 
 ## 🏷 更新履歴
+
+> **2026.06.09:** [v2.1.1](https://github.com/zhayujie/CowAgent/releases/tag/2.1.1) — 自己進化、Web コンソールの強化（メッセージ管理、マルチセッション並行）、クロスプラットフォーム対応の MCP 強化と並行呼び出し、新モデル（MiniMax-M3、qwen3.7-plus）、Python 3.13 対応。
 
 > **2026.06.01:** [v2.1.0](https://github.com/zhayujie/CowAgent/releases/tag/2.1.0) — 国際化対応、新チャネル（Telegram、Discord、Slack、WeChat カスタマーサービス）、CLI インタラクション強化、ワンライナーインストールの最適化、MCP Streamable HTTP 対応、新モデル（claude-opus-4-8、MiMo）。
 

@@ -52,6 +52,11 @@ class Agent:
         self.workspace_dir = workspace_dir  # Workspace directory
         self.enable_skills = enable_skills  # Skills enabled flag
         self.runtime_info = runtime_info  # Runtime info for dynamic time update
+        # Optional extra instructions appended AFTER the rebuilt full system
+        # prompt. Used by the self-evolution review agent to add its task brief
+        # on top of the full context (tools, workspace, user preferences, time)
+        # so it both follows the user's preferences and knows its evolution job.
+        self.extra_system_suffix = None
         
         # Current user identity (set when processing a message)
         self.current_user_id = None
@@ -141,7 +146,7 @@ class Agent:
             else:
                 logger.warning("[Agent] current_user_id is None, cannot build user_identity!")
             
-            return builder.build(
+            full = builder.build(
                 tools=self.tools,
                 context_files=context_files,
                 skill_manager=self.skill_manager,
@@ -149,8 +154,13 @@ class Agent:
                 runtime_info=self.runtime_info,
                 user_identity=user_identity,
             )
+            if self.extra_system_suffix:
+                full = f"{full}\n\n{self.extra_system_suffix}"
+            return full
         except Exception as e:
             logger.warning(f"Failed to rebuild system prompt, using cached version: {e}")
+            if self.extra_system_suffix:
+                return f"{self.system_prompt}\n\n{self.extra_system_suffix}"
             return self.system_prompt
 
     def refresh_skills(self):

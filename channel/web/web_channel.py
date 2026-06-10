@@ -362,6 +362,13 @@ class WebChannel(ChatChannel):
                 ):
                     logger.debug(f"Polling skipped duplicate file reply for session {session_id}")
                     return
+                # SSE-enabled requests already stream the text reply to the
+                # client. Do NOT also enqueue it for polling: if the user
+                # switched away mid-run, the queued copy would resurface as a
+                # duplicate bubble when they return and poll the session.
+                if reply.type == ReplyType.TEXT and context.get("on_event") is not None:
+                    logger.debug(f"Polling skipped SSE text reply for session {session_id}")
+                    return
                 response_data = {
                     "type": str(reply.type),
                     "content": content,
@@ -942,7 +949,12 @@ class WebChannel(ChatChannel):
                     post_done = True
                     post_deadline = time.time() + 2  # 2s post-attach tail
         finally:
-            self.sse_queues.pop(request_id, None)
+            # Only drop the queue once the reply is actually complete. If the
+            # client disconnected early (e.g. switched sessions and will
+            # re-attach with the same request_id), keep the queue so the new
+            # connection can resume reading the remaining events.
+            if post_done or time.time() >= deadline:
+                self.sse_queues.pop(request_id, None)
 
     def cancel_request(self):
         """
@@ -1449,9 +1461,12 @@ class ChatHandler:
 class ConfigHandler:
 
     _RECOMMENDED_MODELS = [
-        const.DEEPSEEK_V4_FLASH, const.DEEPSEEK_V4_PRO, const.DEEPSEEK_CHAT, const.DEEPSEEK_REASONER,
+        const.DEEPSEEK_V4_FLASH, const.DEEPSEEK_V4_PRO,
         const.MINIMAX_M3, const.MINIMAX_M2_7_HIGHSPEED, const.MINIMAX_M2_7,
-        const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS, const.CLAUDE_4_5_SONNET,
+        # claude-fable-5 is intentionally placed at the end of the Claude
+        # group here: it is expensive, so avoid surfacing it too early in
+        # the LinkAI dropdown.
+        const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS, const.CLAUDE_FABLE_5,
         const.GEMINI_35_FLASH, const.GEMINI_31_FLASH_LITE_PRE, const.GEMINI_31_PRO_PRE, const.GEMINI_3_FLASH_PRE,
         const.GPT_55, const.GPT_54, const.GPT_54_MINI, const.GPT_54_NANO, const.GPT_5, const.GPT_41, const.GPT_4o,
         const.GLM_5_1, const.GLM_5_TURBO, const.GLM_5, const.GLM_4_7,
@@ -1496,7 +1511,7 @@ class ConfigHandler:
             "api_base_key": "claude_api_base",
             "api_base_default": "https://api.anthropic.com/v1",
             "api_base_placeholder": _PLACEHOLDER_V1,
-            "models": [const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS, const.CLAUDE_4_5_SONNET],
+            "models": [const.CLAUDE_FABLE_5, const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS],
         }),
         ("gemini", {
             "label": "Gemini",

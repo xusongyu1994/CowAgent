@@ -15,7 +15,7 @@
   [<a href="../../README.md">English</a>] | [中文] | [<a href="../ja/README.md">日本語</a>]
 </p>
 
-**CowAgent** 是一个开源的超级 AI 助理，能够主动思考和规划任务、操作计算机和外部资源、创造和执行 Skills、构建知识库与长期记忆，与你一同成长，是 Agent Harness 工程的最佳实践之一。
+**CowAgent** 是一个开源的超级 AI 助理，能够主动思考和规划任务、操作计算机和外部资源、创造和执行 Skills、构建知识库与长期记忆、通过自主进化与你一同成长，是 Agent Harness 工程的最佳实践之一。
 
 CowAgent 轻量、易部署、可扩展，自由接入主流大模型，覆盖微信、飞书、钉钉、企微、QQ、Telegram、Slack、网页等多渠道，7×24 运行于个人电脑或服务器中。
 
@@ -36,6 +36,7 @@ CowAgent 轻量、易部署、可扩展，自由接入主流大模型，覆盖�
 | [任务规划](https://docs.cowagent.ai/zh/intro/architecture) | 理解复杂任务并自主分解执行，循环调用工具直到完成目标 |
 | [长期记忆](https://docs.cowagent.ai/zh/memory) | 三层记忆架构（上下文 → 天级 → 核心），梦境蒸馏自动整理，支持关键词与向量混合检索 |
 | [知识库](https://docs.cowagent.ai/zh/knowledge) | 自动整理结构化知识为 Markdown Wiki，构建持续增长的知识图谱，可视化浏览 |
+| [自主进化](https://docs.cowagent.ai/zh/memory/self-evolution) | 自动复盘对话，优化技能、处理未完成事项、沉淀记忆与知识，在使用中持续成长 |
 | [技能](https://docs.cowagent.ai/zh/skills) | 从 [Skill Hub](https://skills.cowagent.ai/)、GitHub、ClawHub 等一键安装；也可通过对话创造自定义技能 |
 | [工具](https://docs.cowagent.ai/zh/tools) | 内置文件读写、终端、浏览器、定时任务、记忆检索、联网搜索等 10+ 工具，支持 MCP 协议 |
 | [通道](https://docs.cowagent.ai/zh/channels) | 一个 Agent 同时接入 Web、微信、飞书、钉钉、企微、QQ、公众号、Telegram、Slack 等多个渠道 |
@@ -104,7 +105,7 @@ CowAgent 支持国内外主流厂商的大语言模型。**文本对话、图像
 | --- | --- | :-: | :-: | :-: | :-: | :-: | :-: |
 | [DeepSeek](https://docs.cowagent.ai/zh/models/deepseek) | deepseek-v4-flash / pro | ✅ | | | | | |
 | [MiniMax](https://docs.cowagent.ai/zh/models/minimax) | MiniMax-M3 | ✅ | ✅ | ✅ | | ✅ | |
-| [Claude](https://docs.cowagent.ai/zh/models/claude) | claude-opus-4-8 | ✅ | ✅ | | | | |
+| [Claude](https://docs.cowagent.ai/zh/models/claude) | claude-fable-5 | ✅ | ✅ | | | | |
 | [Gemini](https://docs.cowagent.ai/zh/models/gemini) | gemini-3.5-flash | ✅ | ✅ | ✅ | | | |
 | [OpenAI](https://docs.cowagent.ai/zh/models/openai) | gpt-5.5、o 系列 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [智谱 GLM](https://docs.cowagent.ai/zh/models/glm) | glm-5.1、glm-5v-turbo | ✅ | ✅ | | ✅ | | ✅ |
@@ -198,6 +199,8 @@ CowAgent 支持国内外主流厂商的大语言模型。**文本对话、图像
 <br/>
 
 ## 🏷 更新日志
+
+> **2026.06.09：** [v2.1.1](https://github.com/zhayujie/CowAgent/releases/tag/2.1.1) — 自进化能力、Web 控制台升级（消息管理、多会话并行）、新模型接入（MiniMax-M3、qwen3.7-plus）、Python 3.13 支持
 
 > **2026.06.01：** [v2.1.0](https://github.com/zhayujie/CowAgent/releases/tag/2.1.0) — 国际化支持、新增通道（Telegram、Discord、Slack、微信客服）、命令行交互升级、一键安装脚本优化、MCP Streamable HTTP 支持、新模型接入（claude-opus-4-8、MiMo）
 

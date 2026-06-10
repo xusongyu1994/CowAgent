@@ -194,6 +194,8 @@ function Select-Language {
 
 # ── Python detection ─────────────────────────────────────────────
 function Find-Python {
+    # 3.13 compatibility is not great, so prefer 3.7-3.12 and only fall back to 3.13.
+    $fallback = $null
     foreach ($cmd in @("python3", "python")) {
         $bin = Get-Command $cmd -ErrorAction SilentlyContinue
         if (-not $bin) { continue }
@@ -201,18 +203,21 @@ function Find-Python {
             $ver = & $bin.Source -c "import sys; v=sys.version_info; print(f'{v.major}.{v.minor}')" 2>$null
             $parts = $ver -split '\.'
             $major = [int]$parts[0]; $minor = [int]$parts[1]
-            if ($major -eq 3 -and $minor -ge 9 -and $minor -le 13) {
+            if ($major -eq 3 -and $minor -ge 7 -and $minor -le 12) {
                 return $bin.Source
+            }
+            if ($major -eq 3 -and $minor -eq 13 -and -not $fallback) {
+                $fallback = $bin.Source
             }
         } catch {}
     }
-    return $null
+    return $fallback
 }
 
 $PythonCmd = Find-Python
 function Assert-Python {
     if (-not $PythonCmd) {
-        Write-Err (T "未找到 Python 3.9-3.13，请从 https://www.python.org/downloads/ 安装" "Python 3.9-3.13 not found. Please install from https://www.python.org/downloads/")
+        Write-Err (T "未找到 Python 3.7-3.13，请从 https://www.python.org/downloads/ 安装" "Python 3.7-3.13 not found. Please install from https://www.python.org/downloads/")
         Read-Host (T "按回车退出" "Press Enter to exit")
         exit 1
     }
@@ -365,7 +370,7 @@ function Install-Dependencies {
 # Each entry: Provider / default model name / config key field / optional base.
 $ModelChoices = @{
     1  = @{ Provider = "DeepSeek";                Default = "deepseek-v4-flash";                   Field = "deepseek_api_key" }
-    2  = @{ Provider = "Claude";                  Default = "claude-opus-4-8";                     Field = "claude_api_key";    BaseField = "claude_api_base" }
+    2  = @{ Provider = "Claude";                  Default = "claude-fable-5";                      Field = "claude_api_key";    BaseField = "claude_api_base" }
     3  = @{ Provider = "Gemini";                  Default = "gemini-3.1-pro-preview";              Field = "gemini_api_key";    BaseField = "gemini_api_base" }
     4  = @{ Provider = "OpenAI";                  Default = "gpt-5.5";                             Field = "open_ai_api_key";   BaseField = "open_ai_api_base" }
     5  = @{ Provider = "MiniMax";                 Default = "MiniMax-M3";                          Field = "minimax_api_key" }
@@ -382,7 +387,7 @@ function Select-Model {
     $title = T "选择 AI 模型" "Select AI Model"
     $options = @(
         "DeepSeek (deepseek-v4-flash, deepseek-v4-pro, etc.)",
-        "Claude (claude-opus-4-8, claude-opus-4-7, etc.)",
+        "Claude (claude-fable-5, claude-opus-4-8, etc.)",
         "Gemini (gemini-3.5-flash, gemini-3.1-pro-preview, etc.)",
         "OpenAI (gpt-5.5, etc.)",
         "MiniMax (MiniMax-M3, etc.)",
