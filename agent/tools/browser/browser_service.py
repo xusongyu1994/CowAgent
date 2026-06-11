@@ -12,7 +12,7 @@ import sys
 import uuid
 import queue
 import threading
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, List, Callable, TYPE_CHECKING
 
 from common.log import logger
 from common.utils import expand_path, is_cloud_deployment
@@ -25,6 +25,9 @@ try:
     _HAS_PLAYWRIGHT = True
 except ImportError:
     _HAS_PLAYWRIGHT = False
+
+if TYPE_CHECKING:
+    from playwright.sync_api import Page as PageType
 
 
 # ---------------------------------------------------------------------------
@@ -321,6 +324,10 @@ class BrowserService:
         self._context = None
         self._page = None
 
+        # Multi-tab support: track all pages
+        self._pages: List[Any] = []  # type: ignore[type-arg]
+        self._page_index: int = 0
+
         # Launch mode: one of "fresh" | "persistent" | "cdp".
         # - cdp: connect to an externally launched Chrome via CDP endpoint.
         # - persistent: launch with launch_persistent_context using a user_data_dir
@@ -486,7 +493,10 @@ class BrowserService:
             user_agent=user_agent,
         )
         self._page = self._context.new_page()
+        self._pages = [self._page]
+        self._page_index = 0
         self._wire_close_listeners()
+        self._wire_new_page_listener()
 
     def _launch_persistent(self, launch_args: List[str], viewport: Dict[str, int], user_agent: str):
         """Launch Chromium with a persistent user_data_dir so login state survives."""
@@ -518,7 +528,10 @@ class BrowserService:
         self._browser = None
         pages = self._context.pages
         self._page = pages[0] if pages else self._context.new_page()
+        self._pages = list(self._context.pages)
+        self._page_index = 0
         self._wire_close_listeners()
+        self._wire_new_page_listener()
 
     def _connect_cdp(self, viewport: Dict[str, int]):
         """Attach to an existing Chrome started with --remote-debugging-port."""
@@ -545,22 +558,53 @@ class BrowserService:
 
         pages = self._context.pages
         self._page = pages[0] if pages else self._context.new_page()
+        self._pages = list(self._context.pages)
+        self._page_index = 0
         self._wire_close_listeners()
+        self._wire_new_page_listener()
 
     def _wire_close_listeners(self):
-        """Mark needs_restart whenever the browser / context / page dies externally."""
-        def _on_dead(_obj=None):
+        """Mark needs_restart only when the entire browser/context dies."""
+        def _on_browser_dead(_obj=None):
             self._needs_restart = True
 
         try:
             if self._browser:
-                self._browser.on("disconnected", _on_dead)
+                self._browser.on("disconnected", _on_browser_dead)
             if self._context:
-                self._context.on("close", _on_dead)
-            if self._page:
-                self._page.on("close", _on_dead)
+                self._context.on("close", _on_browser_dead)
+            # No longer listen to individual page close for _needs_restart
         except Exception as e:
             logger.debug(f"[Browser] Failed to wire close listeners: {e}")
+
+    def _wire_new_page_listener(self):
+        """Listen for new pages opened (e.g., target=_blank or window.open())."""
+        def _on_new_page(page: Any):
+            logger.info(f"[Browser] New page opened: {page.url}")
+            self._pages.append(page)
+            # Auto-switch to the new page
+            self._page = page
+            self._page_index = len(self._pages) - 1
+            # Listen for this page's close event
+            page.on("close", lambda _: self._on_page_closed(page))
+
+        if self._context:
+            self._context.on("page", _on_new_page)
+
+    def _on_page_closed(self, page: Any):
+        """Handle individual page close (e.g., user closes a tab)."""
+        if page in self._pages:
+            idx = self._pages.index(page)
+            self._pages.pop(idx)
+            # If the closed page was the active one, switch to the last page
+            if idx == self._page_index:
+                if self._pages:
+                    self._page_index = len(self._pages) - 1
+                    self._page = self._pages[self._page_index]
+                else:
+                    self._page = None
+            elif idx < self._page_index:
+                self._page_index -= 1
 
     def _shutdown_browser(self):
         """Shut down Playwright resources on the background thread.
@@ -598,6 +642,8 @@ class BrowserService:
         except Exception as e:
             logger.debug(f"[Browser] playwright stop error: {e}")
         self._page = None
+        self._pages = []
+        self._page_index = 0
         self._context = None
         self._browser = None
         self._playwright = None
@@ -670,6 +716,8 @@ class BrowserService:
             t.join(timeout=10)
         with self._lock:
             self._thread = None
+            self._pages = []
+            self._page_index = 0
             self._needs_restart = False
 
     # ------------------------------------------------------------------
@@ -946,6 +994,47 @@ class BrowserService:
             return {"pressed": key}
         except Exception as e:
             return {"error": f"Press failed: {e}"}
+
+    # ------------------------------------------------------------------
+    # Multi-tab management
+    # ------------------------------------------------------------------
+
+    def list_pages(self) -> Dict[str, Any]:
+        """List all open pages/tabs."""
+        return self._submit(self._do_list_pages)
+
+    def _do_list_pages(self) -> Dict[str, Any]:
+        pages_info = []
+        for i, p in enumerate(self._pages):
+            try:
+                pages_info.append({
+                    "index": i,
+                    "url": p.url,
+                    "title": p.title(),
+                    "is_active": i == self._page_index
+                })
+            except Exception:
+                pages_info.append({
+                    "index": i,
+                    "url": "N/A",
+                    "title": "N/A",
+                    "is_active": False
+                })
+        return {"pages": pages_info, "active_index": self._page_index}
+
+    def switch_page(self, index: int) -> Dict[str, Any]:
+        """Switch to the page at the given index."""
+        return self._submit(self._do_switch_page, index)
+
+    def _do_switch_page(self, index: int) -> Dict[str, Any]:
+        if index < 0 or index >= len(self._pages):
+            return {"error": f"Invalid page index {index}. Valid range: 0-{len(self._pages) - 1}"}
+        self._page_index = index
+        self._page = self._pages[index]
+        try:
+            return {"switched": True, "url": self._page.url, "title": self._page.title()}
+        except Exception:
+            return {"switched": True}
 
     # ------------------------------------------------------------------
     # Helpers

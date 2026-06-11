@@ -31,13 +31,14 @@ class BrowserTool(BaseTool):
     description: str = (
         "Control a browser to navigate web pages, interact with elements, and extract content. "
         "Actions: navigate, snapshot, click, fill, select, scroll, screenshot, wait, back, forward, "
-        "get_text, press, evaluate.\n\n"
+        "get_text, press, evaluate, list_pages, switch_page.\n\n"
         "Workflow: navigate (auto-includes snapshot with element refs) → click/fill/select by ref → snapshot to verify.\n\n"
         "Use snapshot as the primary way to read pages. Use screenshot + send to show key results to the user. "
         "For login/CAPTCHA/authorization etc., screenshot and ask the user for help. "
         "Login state is persisted across sessions (cookies / localStorage are kept in a "
         "user profile directory), so once the user logs in to a site, the agent can keep "
-        "using it without logging in again."
+        "using it without logging in again.\n\n"
+        "Multi-tab: Use 'list_pages' to see all open tabs, 'switch_page' to switch to a specific tab."
     )
 
     params: dict = {
@@ -48,12 +49,13 @@ class BrowserTool(BaseTool):
                 "description": (
                     "The browser action to perform. One of: "
                     "navigate, snapshot, click, fill, select, scroll, "
-                    "screenshot, wait, back, forward, get_text, press, evaluate"
+                    "screenshot, wait, back, forward, get_text, press, evaluate, "
+                    "list_pages, switch_page"
                 ),
                 "enum": [
                     "navigate", "snapshot", "click", "fill", "select", "scroll",
                     "screenshot", "wait", "back", "forward", "get_text", "press",
-                    "evaluate"
+                    "evaluate", "list_pages", "switch_page"
                 ]
             },
             "url": {
@@ -95,6 +97,10 @@ class BrowserTool(BaseTool):
             "timeout": {
                 "type": "integer",
                 "description": "Timeout in milliseconds (optional, default varies by action)"
+            },
+            "page_index": {
+                "type": "integer",
+                "description": "Page/tab index for 'list_pages' or 'switch_page' action"
             }
         },
         "required": ["action"]
@@ -264,6 +270,33 @@ class BrowserTool(BaseTool):
             return ToolResult.success(json.dumps(val, ensure_ascii=False, indent=2))
         return ToolResult.success(str(val) if val is not None else "(no return value)")
 
+    def _do_list_pages(self, args: Dict[str, Any]) -> ToolResult:
+        result = self._get_service().list_pages()
+        if "error" in result:
+            return ToolResult.fail(result["error"])
+        pages = result.get("pages", [])
+        active_idx = result.get("active_index", 0)
+        if not pages:
+            return ToolResult.success("No pages open.")
+        lines = ["Open pages/tabs:"]
+        for p in pages:
+            marker = " (active)" if p.get("is_active") else ""
+            lines.append(f"  [{p['index']}] {p['title']} - {p['url']}{marker}")
+        return ToolResult.success("\n".join(lines))
+
+    def _do_switch_page(self, args: Dict[str, Any]) -> ToolResult:
+        index = args.get("page_index")
+        if index is None:
+            return ToolResult.fail("Error: 'page_index' is required for switch_page action")
+        try:
+            index = int(index)
+        except ValueError:
+            return ToolResult.fail("Error: 'page_index' must be an integer")
+        result = self._get_service().switch_page(index)
+        if "error" in result:
+            return ToolResult.fail(result["error"])
+        return ToolResult.success(f"Switched to page: {result.get('title')} ({result.get('url')})")
+
     # Action dispatch table
     _ACTION_MAP = {
         "navigate": _do_navigate,
@@ -279,6 +312,8 @@ class BrowserTool(BaseTool):
         "get_text": _do_get_text,
         "press": _do_press,
         "evaluate": _do_evaluate,
+        "list_pages": _do_list_pages,
+        "switch_page": _do_switch_page,
     }
 
     # ------------------------------------------------------------------
