@@ -994,6 +994,147 @@ class AgentBridge:
                     f"for session={session_id}: {e}"
                 )
 
+    # Marker used to identify injected messages from other users
+    _INJECTED_MARKER = "[INJECTED]"
+
+    def inject_message_to_session(
+        self,
+        session_id: str,
+        content: str,
+        sender_name: str,
+        channel_type: str = "wechatcom_app",
+        is_file: bool = False,
+        file_name: str = "",
+    ) -> None:
+        """
+        Inject a message from another user into the receiver's session.
+
+        When user A sends a message/file to user B via wecom_app_send tool,
+        this method injects the message into B's AI context so B can refer to it later.
+
+        Args:
+            session_id: The receiver's session_id (usually receiver's userid)
+            content: The message content (for text) or file description (for file)
+            sender_name: The sender's name or userid
+            channel_type: The channel type, default "wechatcom_app"
+            is_file: Whether this is a file message
+            file_name: The file name if is_file is True
+        """
+        from config import conf
+        if not conf().get("inject_message_to_session", True):
+            return
+        if not session_id or not content:
+            return
+
+        # Construct the message text
+        if is_file:
+            if file_name:
+                display_content = f"【来自：{sender_name}】 发送了一个文件：{file_name}"
+            else:
+                display_content = f"【来自：{sender_name}】 发送了一个文件"
+        else:
+            display_content = f"【来自：{sender_name}】 {content}"
+
+        # Truncate to avoid bloating context
+        max_len = 2000
+        if len(display_content) > max_len:
+            display_content = display_content[:max_len] + "..."
+
+        # Construct messages to inject
+        # Use a special marker to identify injected messages for pruning
+        messages = [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": f"{self._INJECTED_MARKER} {display_content}"}],
+            },
+            {
+                "role": "assistant",
+                "content": [{"type": "text", "text": f"已收到来自 {sender_name} 的消息。"}],
+            },
+        ]
+
+        # Persist to database first
+        self._persist_messages(session_id, messages, channel_type)
+
+        # If the agent is active in memory, also update agent.messages
+        agent = self.agents.get(session_id)
+        if agent:
+            try:
+                with agent.messages_lock:
+                    agent.messages.extend(messages)
+                    # Prune old injected messages to avoid bloating
+                    self._prune_injected_messages(agent, session_id)
+            except Exception as e:
+                logger.warning(
+                    f"[AgentBridge] Failed to update in-memory injected message "
+                    f"for session={session_id}: {e}"
+                )
+
+        logger.info(
+            f"[AgentBridge] Injected message into session={session_id} "
+            f"from sender={sender_name}, is_file={is_file}"
+        )
+
+    def _prune_injected_messages(self, agent, session_id: str) -> None:
+        """
+        Prune old injected messages in the agent's in-memory messages.
+
+        Keeps only the last N injected message pairs (user + assistant).
+        Configuration: inject_message_max_per_session (default 5)
+        """
+        from config import conf
+        keep_last_n = max(int(conf().get("inject_message_max_per_session", 5) or 0), 0)
+
+        markers = (self._INJECTED_MARKER,)
+
+        def _is_injected_user(msg) -> bool:
+            if not isinstance(msg, dict) or msg.get("role") != "user":
+                return False
+            content = msg.get("content")
+            text = ""
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        text = block.get("text", "")
+                        break
+            return any(text.startswith(m) for m in markers)
+
+        msgs = agent.messages
+        pair_indices = []  # list of (user_idx, assistant_idx_or_None)
+        for idx, msg in enumerate(msgs):
+            if not _is_injected_user(msg):
+                continue
+            assistant_idx = None
+            if idx + 1 < len(msgs):
+                nxt = msgs[idx + 1]
+                if isinstance(nxt, dict) and nxt.get("role") == "assistant":
+                    assistant_idx = idx + 1
+            pair_indices.append((idx, assistant_idx))
+
+        if len(pair_indices) <= keep_last_n:
+            return
+
+        # Remove oldest pairs
+        to_remove = len(pair_indices) - keep_last_n
+        indices_to_remove = set()
+        for i in range(to_remove):
+            user_idx, assistant_idx = pair_indices[i]
+            indices_to_remove.add(user_idx)
+            if assistant_idx is not None:
+                indices_to_remove.add(assistant_idx)
+
+        # Remove in reverse order to preserve indices
+        for idx in sorted(indices_to_remove, reverse=True):
+            if 0 <= idx < len(msgs):
+                del msgs[idx]
+
+        logger.debug(
+            f"[AgentBridge] Pruned {to_remove} old injected message pairs "
+            f"for session={session_id} (keep_last_n={keep_last_n})"
+        )
+
     @staticmethod
     def _trim_in_memory_to_turns(agent, keep_turns: int) -> None:
         """Bound ``agent.messages`` to the most recent ``keep_turns`` real

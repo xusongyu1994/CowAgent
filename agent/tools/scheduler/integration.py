@@ -154,9 +154,8 @@ def _remember_delivered_output(
 ) -> None:
     """Best-effort persistence of the message the scheduler sent to a user.
 
-    Uses notify_session_id (the real chat session_id stored at task creation time)
-    so that group chats correctly associate the output with the user's conversation.
-    Falls back to receiver for backward compatibility with old tasks.
+    Injects into BOTH the receiver's and the creator's sessions so that
+    both users can refer to the scheduled output in follow-up questions.
 
     Per-action-type behaviour:
         - agent_task / tool_call / skill_call: gated by ``scheduler_inject_to_session``
@@ -175,17 +174,38 @@ def _remember_delivered_output(
         if not conf().get("scheduler_inject_send_message", False):
             return
 
-    session_id = action.get("notify_session_id") or action.get("receiver")
-    if not session_id:
+    # Collect all session_ids to inject into (dedup)
+    target_sessions = []
+
+    # 1. Always inject into receiver's session (B can see the message)
+    receiver = action.get("receiver", "")
+    if receiver and receiver not in target_sessions:
+        target_sessions.append(receiver)
+
+    # 2. Also inject into creator's session (A can see what was sent)
+    notify_session_id = action.get("notify_session_id", "")
+    if notify_session_id and notify_session_id not in target_sessions:
+        target_sessions.append(notify_session_id)
+
+    if not target_sessions:
         return
+
     try:
         remember = getattr(agent_bridge, "remember_scheduled_output", None)
-        if remember:
-            task_desc = action.get("task_description") or action.get("content", "")
-            remember(session_id, str(content), channel_type=channel_type, task_description=task_desc)
+        if not remember:
+            return
+        task_desc = action.get("task_description") or action.get("content", "")
+        for sid in target_sessions:
+            try:
+                remember(sid, str(content), channel_type=channel_type, task_description=task_desc)
+                logger.info(f"[Scheduler] Injected scheduled output to session={sid}")
+            except Exception as e:
+                logger.warning(
+                    f"[Scheduler] Failed to remember delivered output for {sid}: {e}"
+                )
     except Exception as e:
         logger.warning(
-            f"[Scheduler] Failed to remember delivered output for {session_id}: {e}"
+            f"[Scheduler] Failed to remember delivered output: {e}"
         )
 
 

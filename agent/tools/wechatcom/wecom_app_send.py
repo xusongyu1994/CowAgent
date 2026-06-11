@@ -100,11 +100,16 @@ class WecomAppSend(BaseTool):
                 from common.utils import split_string_by_utf8_length
                 MAX_UTF8_LEN = 2048
                 texts = split_string_by_utf8_length(text_to_send, MAX_UTF8_LEN)
-                for i, text in enumerate(texts):
-                    client.message.send_text(agent_id, user_ids_list, text)
+                for i, txt in enumerate(texts):
+                    client.message.send_text(agent_id, user_ids_list, txt)
                     if i != len(texts) - 1:
                         time.sleep(0.5)
                 logger.info(f"[WecomAppSend] 文本已发送给: {user_ids_list}, 发送者: {sender_name}")
+
+                # 注入消息到接收者的 AI 上下文
+                self._inject_message_to_receivers(
+                    user_ids_list, message, sender_name, channel, is_file=False
+                )
 
             # 发送文件
             if file_path:
@@ -144,6 +149,12 @@ class WecomAppSend(BaseTool):
                     client.message.send_file(agent_id, user_ids_list, media_id)
 
                 logger.info(f"[WecomAppSend] 文件({media_type})已发送给: {user_ids_list}, media_id={media_id}, 发送者: {sender_name}")
+
+                # 注入文件消息到接收者的 AI 上下文
+                file_name = os.path.basename(abs_path) if abs_path else ""
+                self._inject_message_to_receivers(
+                    user_ids_list, message or "文件", sender_name, channel, is_file=True, file_name=file_name
+                )
 
             return ToolResult.success({
                 "summary": f"已成功发送给 {len(user_ids_list)} 个接收者: {', '.join(user_ids_list)}",
@@ -321,3 +332,55 @@ class WecomAppSend(BaseTool):
             return message
         prefix = f"【来自：{sender_name}】\n"
         return prefix + message
+
+    def _inject_message_to_receivers(
+        self,
+        user_ids: List[str],
+        content: str,
+        sender_name: str,
+        channel,
+        is_file: bool = False,
+        file_name: str = "",
+    ) -> None:
+        """
+        将消息注入到接收者的 AI 上下文中。
+        
+        当 A 用户通过此工具给 B 用户发送消息时，
+        此方法将消息注入到 B 的 session 中，以便 B 后续询问 AI 时能看到。
+        
+        Args:
+            user_ids: 接收者的 userid 列表
+            content: 消息内容（文本）或文件描述
+            sender_name: 发送者名称
+            channel: 渠道实例（用于获取 channel_type）
+            is_file: 是否为文件消息
+            file_name: 文件名（如果是文件消息）
+        """
+        try:
+            # 获取 AgentBridge 实例
+            from bridge.bridge import Bridge
+            bridge = Bridge()
+            agent_bridge = bridge.get_agent_bridge()
+            
+            # 获取 channel_type
+            channel_type = "wechatcom_app"
+            if channel and hasattr(channel, 'channel_type'):
+                channel_type = channel.channel_type
+            
+            # 为每个接收者注入消息
+            for user_id in user_ids:
+                try:
+                    agent_bridge.inject_message_to_session(
+                        session_id=user_id,
+                        content=content,
+                        sender_name=sender_name,
+                        channel_type=channel_type,
+                        is_file=is_file,
+                        file_name=file_name,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[WecomAppSend] 注入消息到 {user_id} 的 session 失败: {e}"
+                    )
+        except Exception as e:
+            logger.error(f"[WecomAppSend] 注入消息失败: {e}")
