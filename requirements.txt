@@ -13,6 +13,9 @@ json-repair
 # wechatcom & wechatmp
 wechatpy
 
+# tencent cloud ASR & TTS
+tencentcloud-sdk-python
+
 # zhipuai
 zai-sdk
 # tongyi qwen sdk
