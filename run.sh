@@ -869,8 +869,10 @@ base = {
     'mimo_api_key': e('MIMO_KEY', ''),
     'deepseek_api_key': e('DEEPSEEK_KEY', ''),
     'deepseek_api_base': e('DEEPSEEK_BASE'),
-    'voice_to_text': 'openai',
-    'text_to_voice': 'openai',
+    # Leave ASR/TTS provider empty so the web console auto-suggests the vendor
+    # whose API key is actually configured (e.g. LinkAI), not always OpenAI.
+    'voice_to_text': '',
+    'text_to_voice': '',
     'voice_reply_voice': False,
     'speech_recognition': True,
     'group_speech_recognition': False,
@@ -878,9 +880,9 @@ base = {
     'linkai_api_key': e('LINKAI_KEY', ''),
     'linkai_app_code': '',
     'agent': True,
-    'agent_max_context_tokens': 40000,
-    'agent_max_context_turns': 30,
-    'agent_max_steps': 15,
+    'agent_max_context_tokens': 50000,
+    'agent_max_context_turns': 20,
+    'agent_max_steps': 20,
     # New installs opt into self-evolution; existing users (no key) keep the
     # code default (off) so an upgrade never silently changes their behavior.
     'self_evolution_enabled': True,
