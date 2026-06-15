@@ -434,7 +434,15 @@ class WebChannel(ChatChannel):
             elif event_type == "tool_execution_start":
                 tool_name = data.get("tool_name", "tool")
                 arguments = data.get("arguments", {})
-                q.put({"type": "tool_start", "tool": tool_name, "arguments": arguments})
+                q.put({"type": "tool_start", "tool_call_id": data.get("tool_call_id"), "tool": tool_name, "arguments": arguments})
+
+            elif event_type == "tool_execution_progress":
+                q.put({
+                    "type": "tool_progress",
+                    "tool_call_id": data.get("tool_call_id"),
+                    "tool": data.get("tool_name", "tool"),
+                    "content": str(data.get("message", ""))[-4 * 1024:],
+                })
 
             elif event_type == "tool_execution_end":
                 tool_name = data.get("tool_name", "tool")
@@ -447,6 +455,7 @@ class WebChannel(ChatChannel):
                     result_str = result_str[:2000] + "…"
                 q.put({
                     "type": "tool_end",
+                    "tool_call_id": data.get("tool_call_id"),
                     "tool": tool_name,
                     "status": status,
                     "result": result_str,
@@ -1463,10 +1472,9 @@ class ConfigHandler:
     _RECOMMENDED_MODELS = [
         const.DEEPSEEK_V4_FLASH, const.DEEPSEEK_V4_PRO,
         const.MINIMAX_M3, const.MINIMAX_M2_7_HIGHSPEED, const.MINIMAX_M2_7,
-        # claude-fable-5 is intentionally placed at the end of the Claude
-        # group here: it is expensive, so avoid surfacing it too early in
-        # the LinkAI dropdown.
-        const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS, const.CLAUDE_FABLE_5,
+        # claude-fable-5 is placed after claude-opus-4-7 (not as the Claude
+        # default) since it is often unavailable due to policy restrictions.
+        const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_FABLE_5, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS,
         const.GEMINI_35_FLASH, const.GEMINI_31_FLASH_LITE_PRE, const.GEMINI_31_PRO_PRE, const.GEMINI_3_FLASH_PRE,
         const.GPT_55, const.GPT_54, const.GPT_54_MINI, const.GPT_54_NANO, const.GPT_5, const.GPT_41, const.GPT_4o,
         const.GLM_5_1, const.GLM_5_TURBO, const.GLM_5, const.GLM_4_7,
@@ -1511,7 +1519,7 @@ class ConfigHandler:
             "api_base_key": "claude_api_base",
             "api_base_default": "https://api.anthropic.com/v1",
             "api_base_placeholder": _PLACEHOLDER_V1,
-            "models": [const.CLAUDE_FABLE_5, const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS],
+            "models": [const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_FABLE_5, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS],
         }),
         ("gemini", {
             "label": "Gemini",
@@ -1644,6 +1652,32 @@ class ConfigHandler:
                     "api_base_placeholder": p.get("api_base_placeholder", ""),
                     "api_key_field": p.get("api_key_field"),
                 }
+
+            # Expose user-defined custom providers as "custom:<id>" entries so
+            # the legacy config page can display and select them. Credentials
+            # are managed on the Models page, hence the null key/base fields.
+            # Mirrors the Models page: when expanded entries exist, the bare
+            # legacy "custom" entry is hidden — unless the flat single-provider
+            # custom config is still active or filled in.
+            try:
+                from models.custom_provider import get_custom_providers
+                custom_list = get_custom_providers()
+                legacy_custom_in_use = ModelsHandler._legacy_custom_in_use(local_config)
+                if custom_list and not legacy_custom_in_use:
+                    providers.pop("custom", None)
+                for cp in custom_list:
+                    cid = f"custom:{cp.get('id')}"
+                    cname = cp.get("name") or cp.get("id")
+                    providers[cid] = {
+                        "label": {"zh": cname, "en": cname},
+                        "models": [cp["model"]] if cp.get("model") else [],
+                        "api_base_key": None,
+                        "api_base_default": None,
+                        "api_base_placeholder": "",
+                        "api_key_field": None,
+                    }
+            except Exception as cp_err:
+                logger.warning(f"[ConfigHandler] failed to expand custom providers: {cp_err}")
 
             raw_pwd = str(local_config.get("web_password", "") or "")
             masked_pwd = ("*" * len(raw_pwd)) if raw_pwd else ""
@@ -2192,6 +2226,17 @@ class ModelsHandler:
         return cards
 
     @classmethod
+    def _legacy_custom_in_use(cls, local_config: dict) -> bool:
+        """True when the flat single-provider custom config is still relevant:
+        either it is the active bot_type, or its key/base fields are filled.
+        In that case the legacy "custom" card must stay visible even when
+        multi ``custom_providers`` entries exist."""
+        if (local_config.get("bot_type") or "") == "custom":
+            return True
+        return (cls._is_real_key(local_config.get("custom_api_key") or "")
+                or bool(local_config.get("custom_api_base")))
+
+    @classmethod
     def _provider_overview(cls) -> List[dict]:
         """All known providers (configured first, unconfigured after).
         Re-uses ConfigHandler.PROVIDER_MODELS for the canonical list.
@@ -2204,13 +2249,18 @@ class ModelsHandler:
         """
         local_config = conf()
         custom_cards = cls._custom_provider_cards(local_config)
+        # Keep the legacy single "custom" card visible alongside the expanded
+        # ones when the flat custom_api_key/base config is active or filled,
+        # so existing single-provider setups never disappear from the UI.
+        keep_legacy_custom = cls._legacy_custom_in_use(local_config)
         items = []
         for pid, p in ConfigHandler.PROVIDER_MODELS.items():
             if pid == "custom" and custom_cards:
-                # Multi-provider mode: emit the expanded cards instead of the
-                # single legacy custom card.
+                # Multi-provider mode: emit the expanded cards, plus the
+                # legacy card when it is still in use.
                 items.extend(custom_cards)
-                continue
+                if not keep_legacy_custom:
+                    continue
             key_field = p.get("api_key_field")
             base_field = p.get("api_base_key")
             raw_key = local_config.get(key_field, "") if key_field else ""
@@ -2255,11 +2305,15 @@ class ModelsHandler:
             provider_id = "linkai"
         # In multi-provider mode, replace the single "custom" entry with the
         # expanded "custom:<id>" ids so the chat dropdown matches the cards.
+        # The legacy "custom" entry stays when its flat config is still used.
         provider_ids = []
         custom_cards = cls._custom_provider_cards(local_config)
+        keep_legacy_custom = cls._legacy_custom_in_use(local_config)
         for pid in ConfigHandler.PROVIDER_MODELS.keys():
             if pid == "custom" and custom_cards:
                 provider_ids.extend(c["id"] for c in custom_cards)
+                if keep_legacy_custom:
+                    provider_ids.append(pid)
             else:
                 provider_ids.append(pid)
         return {
@@ -2883,11 +2937,14 @@ class ModelsHandler:
                 existing["api_base"] = api_base
             if api_key:
                 existing["api_key"] = api_key
-            # model is always overwritten (empty clears the default model).
-            if model:
-                existing["model"] = model
-            else:
-                existing.pop("model", None)
+            # Only touch model when explicitly provided in the payload; an
+            # explicit empty string clears it, a missing key keeps it (the
+            # UI modal no longer sends model, so manual config survives edits).
+            if "model" in data:
+                if model:
+                    existing["model"] = model
+                else:
+                    existing.pop("model", None)
             created = False
 
         # Decide bot_type — only switch when explicitly requested.

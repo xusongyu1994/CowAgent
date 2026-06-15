@@ -32,21 +32,13 @@ const I18N = {
         models_clear_credential: '清除凭据',
         models_base_default_hint: '留空将使用官方默认地址',
         models_base_default: '默认',
-        models_custom_section: '自定义厂商',
-        models_custom_section_desc: '配置多个 OpenAI 兼容厂商，自由切换',
-        models_custom_add: '添加自定义厂商',
+        models_custom_vendor_label: '自定义',
         models_custom_name: '名称',
-        models_custom_name_placeholder: '例如 siliconflow',
-        models_custom_default_model: '默认模型（可选）',
-        models_custom_default_model_placeholder: '例如 deepseek-ai/DeepSeek-V3',
-        models_custom_active: '使用中',
-        models_custom_set_active: '设为使用中',
         models_custom_delete: '删除',
         models_custom_delete_confirm_title: '删除自定义厂商',
         models_custom_delete_confirm_msg: '确定删除该自定义厂商吗？此操作无法撤销。',
         models_custom_name_required: '请填写名称',
         models_custom_base_required: '请填写 API Base',
-        models_custom_empty: '尚未配置自定义厂商，点击添加',
         models_custom_edit_title: '编辑自定义厂商',
         models_custom_add_title: '添加自定义厂商',
         models_capability_chat: '主模型',
@@ -205,6 +197,8 @@ const I18N = {
         delete_session_title: '删除会话',
         delete_message_confirm: '确认删除这条消息？',
         delete_message_title: '删除消息',
+        edit_disabled_reply_active: '正在生成回复，暂时无法编辑。',
+        delete_disabled_reply_active: '正在生成回复，暂时无法删除。',
         untitled_session: '新对话',
         context_cleared: '— 以上内容已从上下文中移除 —',
         tip_new_chat: '新建对话',
@@ -240,10 +234,10 @@ const I18N = {
         menu_logs: 'Logs',
         models_title: 'Models',
         models_desc: 'Manage chat, image, voice, embedding and search capabilities in one place',
-        models_section_vendors: 'Vendor Credentials',
+        models_section_vendors: 'Provider Credentials',
         models_section_vendors_desc: 'Configured once, shared by multiple model capabilities',
         models_section_capabilities: 'Capabilities',
-        models_add_vendor: 'Add Vendor',
+        models_add_vendor: 'Add Provider',
         models_provider: 'Provider',
         models_model: 'Model',
         models_voice: 'Voice',
@@ -253,21 +247,13 @@ const I18N = {
         models_clear_credential: 'Clear credentials',
         models_base_default_hint: 'Leave blank to use the official default base URL',
         models_base_default: 'Default',
-        models_custom_section: 'Custom Providers',
-        models_custom_section_desc: 'Configure multiple OpenAI-compatible providers and switch freely',
-        models_custom_add: 'Add custom provider',
+        models_custom_vendor_label: 'Custom',
         models_custom_name: 'Name',
-        models_custom_name_placeholder: 'e.g. siliconflow',
-        models_custom_default_model: 'Default model (optional)',
-        models_custom_default_model_placeholder: 'e.g. deepseek-ai/DeepSeek-V3',
-        models_custom_active: 'Active',
-        models_custom_set_active: 'Set active',
         models_custom_delete: 'Delete',
         models_custom_delete_confirm_title: 'Delete custom provider',
         models_custom_delete_confirm_msg: 'Delete this custom provider? This cannot be undone.',
         models_custom_name_required: 'Name is required',
         models_custom_base_required: 'API Base is required',
-        models_custom_empty: 'No custom providers yet, click to add',
         models_custom_edit_title: 'Edit custom provider',
         models_custom_add_title: 'Add custom provider',
         models_capability_chat: 'Main Model',
@@ -311,8 +297,8 @@ const I18N = {
         models_embedding_saved_msg: 'Send /memory rebuild-index in the chat to rebuild the index.',
         models_embedding_saved_ok: 'Go',
         models_pick_provider: 'Pick a provider',
-        models_clear_confirm_title: 'Clear vendor credentials',
-        models_clear_confirm_msg: 'Remove this vendor\'s API Key and Base URL? Capabilities relying on it will stop working.',
+        models_clear_confirm_title: 'Clear provider credentials',
+        models_clear_confirm_msg: 'Remove this provider\'s API Key and Base URL? Capabilities relying on it will stop working.',
         cancel: 'Cancel',
         save: 'Save',
         ok: 'OK',
@@ -426,6 +412,8 @@ const I18N = {
         delete_session_title: 'Delete Session',
         delete_message_confirm: 'Delete this message?',
         delete_message_title: 'Delete Message',
+        edit_disabled_reply_active: 'Reply is being generated; editing is temporarily unavailable.',
+        delete_disabled_reply_active: 'Reply is being generated; deletion is temporarily unavailable.',
         untitled_session: 'New Chat',
         context_cleared: '— Context above has been cleared —',
         tip_new_chat: 'New Chat',
@@ -923,6 +911,26 @@ let pollGeneration = 0;   // incremented on each restart to cancel stale poll lo
 let loadingContainers = {};
 let activeStreams = {};   // request_id -> EventSource
 let sessionActiveRequest = {};   // session_id -> request_id (in-flight stream per session)
+
+function isCurrentSessionConversationActive() {
+    return !!sessionActiveRequest[sessionId];
+}
+
+function updateEditButtonsState() {
+    const active = isCurrentSessionConversationActive();
+    document.querySelectorAll('.edit-msg-btn, .delete-msg-btn').forEach(btn => {
+        btn.disabled = active;
+        if (btn.classList.contains('edit-msg-btn')) {
+            btn.title = active
+                ? t('edit_disabled_reply_active')
+                : t('edit_message');
+        } else {
+            btn.title = active
+                ? t('delete_disabled_reply_active')
+                : t('delete_message_title');
+        }
+    });
+}
 let streamBuffers = {};   // request_id -> { items: [event...], timestamp } for re-attach replay
 let isComposing = false;
 let appConfig = { use_agent: false, title: '揽盛电气智能体', subtitle: '', providers: {}, api_bases: {} };
@@ -1211,6 +1219,7 @@ messagesDiv.addEventListener('click', (e) => {
     const editBtn = e.target.closest('.edit-msg-btn');
     if (editBtn) {
         e.preventDefault();
+        if (isCurrentSessionConversationActive()) return;
         const msgRoot = editBtn.closest('.user-message-group');
         if (msgRoot) editUserMessage(msgRoot);
         return;
@@ -1231,6 +1240,7 @@ messagesDiv.addEventListener('click', (e) => {
     const deleteBtn = e.target.closest('.delete-msg-btn');
     if (deleteBtn) {
         e.preventDefault();
+        if (isCurrentSessionConversationActive()) return;
         const userMsgEl = deleteBtn.closest('.user-message-group');
         if (!userMsgEl) return;
 
@@ -2027,6 +2037,7 @@ function copyToClipboard(text) {
 
 // Edit user message: extract content, remove this and subsequent messages, fill input
 async function editUserMessage(msgEl) {
+    if (isCurrentSessionConversationActive()) return;
     const rawContent = msgEl.dataset.rawContent;
     if (!rawContent) return;
 
@@ -2077,9 +2088,9 @@ async function editUserMessage(msgEl) {
 
     // Fill input with the original content
     chatInput.value = rawContent;
-    chatInput.style.height = 'auto';
-    chatInput.style.height = chatInput.scrollHeight + 'px';
+    chatInput.dispatchEvent(new Event("input", { bubbles: true }));
     chatInput.focus();
+    chatInput.selectionStart = chatInput.selectionEnd = chatInput.value.length;
     scrollChatToBottom();
 }
 
@@ -2284,7 +2295,7 @@ function startSSE(requestId, loadingEl, timestamp, titleInfo, replayItems) {
     let contentEl = null;  // .answer-content (final streaming answer)
     let mediaEl = null;    // .media-content (images & file attachments)
     let accumulatedText = '';
-    let currentToolEl = null;
+    const toolElements = new Map();
     let currentReasoningEl = null;  // live reasoning bubble
     let reasoningText = '';
     let reasoningStartTime = 0;
@@ -2299,12 +2310,14 @@ function startSSE(requestId, loadingEl, timestamp, titleInfo, replayItems) {
     const ownerSession = sessionId;
     const isActive = () => ownerSession === sessionId;
     sessionActiveRequest[ownerSession] = requestId;
+    updateEditButtonsState();
     // Per-request event buffer used to rebuild the bubble on re-attach.
     const buffer = streamBuffers[requestId] || { items: [], timestamp };
     streamBuffers[requestId] = buffer;
     const clearOwnerRequest = () => {
         if (sessionActiveRequest[ownerSession] === requestId) {
             delete sessionActiveRequest[ownerSession];
+            updateEditButtonsState();
         }
         delete streamBuffers[requestId];
     };
@@ -2453,10 +2466,11 @@ function startSSE(requestId, loadingEl, timestamp, titleInfo, replayItems) {
                 contentEl.innerHTML = '';
 
                 // Add tool execution indicator (collapsible)
-                currentToolEl = document.createElement('div');
-                currentToolEl.className = 'agent-step agent-tool-step';
+                const toolEl = document.createElement('div');
+                toolEl.className = 'agent-step agent-tool-step tool-streaming';
+                toolEl.dataset.progressReceived = 'false';
                 const argsStr = formatToolArgs(item.arguments || {});
-                currentToolEl.innerHTML = `
+                toolEl.innerHTML = `
                     <div class="tool-header" onclick="this.parentElement.classList.toggle('expanded')">
                         <i class="fas fa-cog fa-spin text-primary-400 flex-shrink-0 tool-icon"></i>
                         <span class="tool-name">${item.tool}</span>
@@ -2467,36 +2481,59 @@ function startSSE(requestId, loadingEl, timestamp, titleInfo, replayItems) {
                             <div class="tool-detail-label">Input</div>
                             <pre class="tool-detail-content">${argsStr}</pre>
                         </div>
-                        <div class="tool-detail-section tool-output-section"></div>
+                        <div class="tool-detail-section tool-output-section">
+                            <div class="tool-detail-label tool-output-label">Output</div>
+                            <pre class="tool-detail-content tool-live-output"></pre>
+                        </div>
                     </div>`;
-                stepsEl.appendChild(currentToolEl);
+                stepsEl.appendChild(toolEl);
+                toolElements.set(item.tool_call_id, toolEl);
 
                 scrollChatToBottom();
 
+            } else if (item.type === 'tool_progress') {
+                const toolEl = toolElements.get(item.tool_call_id);
+                if (toolEl) {
+                    if (toolEl.dataset.progressReceived !== 'true') {
+                        toolEl.classList.add('expanded');
+                        toolEl.dataset.progressReceived = 'true';
+                    }
+                    toolEl.querySelector('.tool-live-output').textContent = String(item.content || '');
+                    scrollChatToBottom();
+                }
+
             } else if (item.type === 'tool_end') {
-                if (currentToolEl) {
+                const toolEl = toolElements.get(item.tool_call_id);
+                if (toolEl) {
                     const isError = item.status !== 'success';
-                    const icon = currentToolEl.querySelector('.tool-icon');
+                    const icon = toolEl.querySelector('.tool-icon');
                     icon.className = isError
                         ? 'fas fa-times text-red-400 flex-shrink-0 tool-icon'
                         : 'fas fa-check text-primary-400 flex-shrink-0 tool-icon';
 
                     // Show execution time
-                    const nameEl = currentToolEl.querySelector('.tool-name');
+                    const nameEl = toolEl.querySelector('.tool-name');
                     if (item.execution_time !== undefined) {
                         nameEl.innerHTML += ` <span class="tool-time">${item.execution_time}s</span>`;
                     }
 
                     // Fill output section
-                    const outputSection = currentToolEl.querySelector('.tool-output-section');
-                    if (outputSection && item.result) {
-                        outputSection.innerHTML = `
-                            <div class="tool-detail-label">${isError ? 'Error' : 'Output'}</div>
-                            <pre class="tool-detail-content ${isError ? 'tool-error-text' : ''}">${escapeHtml(String(item.result))}</pre>`;
+                    const outputLabel = toolEl.querySelector('.tool-output-label');
+                    const outputEl = toolEl.querySelector('.tool-live-output');
+                    if (outputLabel) outputLabel.textContent = isError ? 'Error' : 'Output';
+                    if (outputEl) {
+                        outputEl.textContent = item.result ? String(item.result) : '';
+                        outputEl.classList.toggle('tool-error-text', isError);
                     }
 
-                    if (isError) currentToolEl.classList.add('tool-failed');
-                    currentToolEl = null;
+                    toolEl.classList.remove('tool-streaming');
+                    toolEl.classList.remove('expanded');
+                    if (!item.result) {
+                        const outputSection = toolEl.querySelector('.tool-output-section');
+                        if (outputSection) outputSection.remove();
+                    }
+                    if (isError) toolEl.classList.add('tool-failed');
+                    toolElements.delete(item.tool_call_id);
                 }
 
             } else if (item.type === 'image') {
@@ -2655,6 +2692,13 @@ function startSSE(requestId, loadingEl, timestamp, titleInfo, replayItems) {
 
             // Record every event for re-attach replay (capped to avoid
             // unbounded growth on very long streams).
+            if (item.type === 'tool_progress' && item.tool_call_id) {
+                const previousIndex = buffer.items.findIndex(
+                    buffered => buffered.type === 'tool_progress'
+                        && buffered.tool_call_id === item.tool_call_id
+                );
+                if (previousIndex >= 0) buffer.items.splice(previousIndex, 1);
+            }
             if (buffer.items.length < 5000) buffer.items.push(item);
 
             // Background session: keep the stream alive so the reply finishes
@@ -3290,6 +3334,7 @@ function loadHistory(page) {
             const sentinel = document.getElementById('history-load-more');
             const insertBefore = sentinel ? sentinel.nextSibling : messagesDiv.firstChild;
             messagesDiv.insertBefore(fragment, insertBefore);
+            updateEditButtonsState();
 
             // Manage the "load more" sentinel at the very top
             if (data.has_more) {
@@ -3745,6 +3790,7 @@ function switchSession(newSessionId) {
     // Switching back re-attaches and resumes live streaming.
 
     sessionId = newSessionId;
+    updateEditButtonsState();
     localStorage.setItem(SESSION_ID_KEY, sessionId);
 
     historyPage = 0;
@@ -4766,12 +4812,12 @@ function renderModelsView() {
     const container = document.getElementById('models-content');
     container.innerHTML = '';
     container.appendChild(renderVendorsSection());
-    container.appendChild(renderCustomProvidersSection());
     MODELS_CAPABILITY_DEFS.forEach(def => container.appendChild(renderCapabilityCard(def)));
 }
 
 // True when a provider card is one of the expanded custom (OpenAI-compatible)
-// providers — these are managed in their own section, not the vendor grid.
+// providers (id "custom:<id>") — shown in the vendor grid alongside built-in
+// vendors, but edited via the dedicated custom-provider modal.
 function isCustomProviderCard(p) {
     return !!(p && p.is_custom && p.custom_name);
 }
@@ -4782,10 +4828,9 @@ function renderVendorsSection() {
     const wrap = document.createElement('div');
     wrap.className = 'bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-white/10 p-6';
 
-    // Expanded custom providers live in their own section; keep the built-in
-    // vendor grid focused on the canonical (field-based) providers.
-    const builtinProviders = modelsState.providers.filter(p => !isCustomProviderCard(p));
-    const configured = builtinProviders.filter(p => p.configured);
+    // Custom providers always show once created (even without an api key,
+    // e.g. a local vLLM/Ollama endpoint); built-in vendors show when configured.
+    const configured = modelsState.providers.filter(p => p.configured || isCustomProviderCard(p));
 
     const header = `
         <div class="flex items-start gap-3 mb-5">
@@ -4796,7 +4841,6 @@ function renderVendorsSection() {
                 <h3 class="font-semibold text-slate-800 dark:text-slate-100">${t('models_section_vendors')}</h3>
                 <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">${t('models_section_vendors_desc')}</p>
             </div>
-            <span class="text-xs text-slate-400 dark:text-slate-500 mt-2 flex-shrink-0">${configured.length}/${builtinProviders.length}</span>
         </div>`;
 
     let body;
@@ -4822,8 +4866,13 @@ function renderVendorsSection() {
 function renderVendorChip(p) {
     // The masked API key is intentionally not surfaced here; it is shown
     // inside the edit modal so the chip stays uncluttered and scannable.
+    // Custom providers open their dedicated modal (name + base + key);
+    // their ids are server-generated hex, safe to inline.
+    const onclick = isCustomProviderCard(p)
+        ? `openCustomProviderModal('${escapeHtml(p.custom_id)}')`
+        : `openVendorModal('${escapeHtml(p.id)}')`;
     return `
-        <button onclick="openVendorModal('${escapeHtml(p.id)}')"
+        <button onclick="${onclick}"
                 class="group flex items-center gap-3 px-3 py-2.5 rounded-lg border border-slate-200 dark:border-white/10
                        bg-slate-50 dark:bg-white/5 hover:border-primary-300 dark:hover:border-primary-500/50
                        cursor-pointer transition-colors duration-150 text-left">
@@ -4856,110 +4905,8 @@ function renderProviderLogo(p, sizePx) {
         </span>`;
 }
 
-// ---------- Custom providers section (multiple OpenAI-compatible) -------
-// Renders the user-defined OpenAI-compatible providers as a dedicated,
-// independently managed list: add / edit / delete / activate. The backend
-// expands `custom_providers` into provider cards with id="custom:<id>",
-// is_custom=true, custom_id, custom_name and an `active` flag (see
-// ModelsHandler._custom_provider_cards / _provider_overview).
-// All button interactions use data-* attributes + event delegation (no inline
-// onclick) to avoid XSS via user-supplied names.
-
 function getCustomProviderCards() {
     return modelsState.providers.filter(isCustomProviderCard);
-}
-
-function renderCustomProvidersSection() {
-    const wrap = document.createElement('div');
-    wrap.className = 'bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-white/10 p-6';
-
-    const customs = getCustomProviderCards();
-
-    const header = `
-        <div class="flex items-start gap-3 mb-5">
-            <div class="w-9 h-9 rounded-lg bg-violet-50 dark:bg-violet-900/30 flex items-center justify-center flex-shrink-0">
-                <i class="fas fa-sliders text-violet-500 text-sm"></i>
-            </div>
-            <div class="flex-1 min-w-0">
-                <h3 class="font-semibold text-slate-800 dark:text-slate-100">${t('models_custom_section')}</h3>
-                <p class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">${t('models_custom_section_desc')}</p>
-            </div>
-            <button data-action="add-custom"
-                    class="mt-1 px-3 py-1.5 rounded-lg text-xs font-medium bg-violet-50 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400 hover:bg-violet-100 dark:hover:bg-violet-900/50 cursor-pointer transition-colors flex-shrink-0">
-                <i class="fas fa-plus text-[10px] mr-1"></i>${t('models_custom_add')}
-            </button>
-        </div>`;
-
-    let body;
-    if (customs.length === 0) {
-        body = `
-            <div class="flex flex-col items-center justify-center py-8 px-4 rounded-lg border border-dashed border-slate-200 dark:border-white/10">
-                <p class="text-sm text-slate-500 dark:text-slate-400 text-center">${t('models_custom_empty')}</p>
-            </div>`;
-    } else {
-        body = `<div class="space-y-2.5">
-            ${customs.map(renderCustomProviderRow).join('')}
-        </div>`;
-    }
-
-    wrap.innerHTML = header + body;
-    // Event delegation — handles all custom-provider actions via data-action attrs.
-    wrap.addEventListener('click', function(e) {
-        const btn = e.target.closest('[data-action]');
-        if (!btn) return;
-        const action = btn.getAttribute('data-action');
-        const providerId = btn.getAttribute('data-provider-id') || '';
-        if (action === 'add-custom') openCustomProviderModal('');
-        else if (action === 'edit-custom') openCustomProviderModal(providerId);
-        else if (action === 'delete-custom') deleteCustomProvider(providerId);
-        else if (action === 'set-active-custom') setActiveCustomProvider(providerId);
-    });
-    return wrap;
-}
-
-function renderCustomProviderRow(p) {
-    const id = p.custom_id || '';
-    const name = p.custom_name || '';
-    const nameEsc = escapeHtml(name);
-    // The active provider gets a highlighted ring + badge; others show a
-    // "set active" affordance via data-attributes (no inline onclick — XSS safe).
-    const activeBadge = p.active
-        ? `<span class="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-50 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400 flex-shrink-0">
-               <i class="fas fa-check text-[9px] mr-0.5"></i>${t('models_custom_active')}</span>`
-        : `<button data-action="set-active-custom" data-provider-id="${escapeHtml(id)}"
-                   class="px-2 py-0.5 rounded-full text-[10px] font-medium border border-slate-200 dark:border-white/10 text-slate-500 dark:text-slate-400 hover:border-emerald-300 hover:text-emerald-500 cursor-pointer transition-colors flex-shrink-0">
-               ${t('models_custom_set_active')}</button>`;
-
-    const ring = p.active
-        ? 'border-emerald-300 dark:border-emerald-500/40 bg-emerald-50/40 dark:bg-emerald-900/10'
-        : 'border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-white/5';
-
-    const model = p.model
-        ? `<span class="text-[11px] text-slate-400 dark:text-slate-500 font-mono truncate">${escapeHtml(p.model)}</span>`
-        : '';
-    const base = p.api_base
-        ? `<span class="text-[11px] text-slate-400 dark:text-slate-500 font-mono truncate">${escapeHtml(p.api_base)}</span>`
-        : '';
-
-    return `
-        <div class="flex items-center gap-3 px-3 py-2.5 rounded-lg border ${ring} transition-colors" data-provider-id="${escapeHtml(id)}">
-            ${renderProviderLogo(p, 28)}
-            <div class="flex-1 min-w-0">
-                <div class="flex items-center gap-2">
-                    <span class="text-sm font-medium text-slate-800 dark:text-slate-100 truncate">${nameEsc}</span>
-                    ${activeBadge}
-                </div>
-                <div class="flex items-center gap-2 mt-0.5">${base}${model ? '<span class="text-slate-300 dark:text-slate-600">·</span>' + model : ''}</div>
-            </div>
-            <button data-action="edit-custom" data-provider-id="${escapeHtml(id)}" title="${t('models_custom_edit_title')}"
-                    class="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 dark:text-slate-500 hover:text-primary-500 hover:bg-slate-100 dark:hover:bg-white/10 cursor-pointer transition-colors flex-shrink-0">
-                <i class="fas fa-pen-to-square text-[12px]"></i>
-            </button>
-            <button data-action="delete-custom" data-provider-id="${escapeHtml(id)}" title="${t('models_custom_delete')}"
-                    class="w-8 h-8 rounded-lg flex items-center justify-center text-slate-400 dark:text-slate-500 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 cursor-pointer transition-colors flex-shrink-0">
-                <i class="fas fa-trash-can text-[12px]"></i>
-            </button>
-        </div>`;
 }
 
 // ---------- Capability cards (Layer 2) ---------------------------------
@@ -5776,6 +5723,14 @@ function decorateVendorModalPicker(ddEl, opts) {
         // Tag the row so the global active-row ✓ rule is suppressed in CSS
         // (otherwise configured AND selected rows would render two checks).
         item.classList.add('vendor-picker-item');
+        if (opt._isAddNew) {
+            // "Custom" is an add-new action (multiple entries allowed),
+            // so show a trailing + instead of the configured ✓.
+            const plus = document.createElement('i');
+            plus.className = 'fas fa-plus vendor-picker-add-mark';
+            item.appendChild(plus);
+            return;
+        }
         if (!opt._configured) return;
         const check = document.createElement('i');
         check.className = 'fas fa-check vendor-picker-configured-mark';
@@ -6083,22 +6038,42 @@ function openVendorModal(providerId, onSaved) {
         // currently selected vendor via its own background highlight, so we
         // intentionally suppress the global active-row ✓ for this picker
         // (see CSS) — otherwise configured + selected rows would show two.
-        // Custom (OpenAI-compatible) providers are managed in their own
-        // section with a dedicated modal, so they are excluded from this
-        // built-in vendor picker.
+        // Expanded custom provider cards ("custom:<id>") are edited via their
+        // dedicated modal, so they are excluded from this picker. Picking the
+        // "custom" entry creates a *new* custom provider via that modal —
+        // this is how multiple OpenAI-compatible endpoints are added.
         const builtinProviders = modelsState.providers.filter(p => !isCustomProviderCard(p));
-        const unconfigured = builtinProviders.filter(p => !p.configured);
-        const defaultId = (unconfigured[0] && unconfigured[0].id) || (builtinProviders[0] && builtinProviders[0].id) || '';
-        pickerWrap.classList.remove('hidden');
-        const pickerEl = document.getElementById('vendor-modal-picker');
         const pickerOpts = builtinProviders.map(p => ({
             value: p.id,
             label: localizedLabel(p.label),
             _configured: !!p.configured,
         }));
-        initDropdown(pickerEl, pickerOpts, defaultId, (val) => fillVendorModalForProvider(val));
+        // In multi-provider mode the backend replaces the bare "custom" card
+        // with the expanded ones; re-add it here so the entry stays available.
+        if (!pickerOpts.some(o => o.value === 'custom')) {
+            pickerOpts.push({ value: 'custom', label: t('models_custom_vendor_label'), _configured: false });
+        }
+        // "Custom" always behaves as an add-new action (multiple entries
+        // allowed), so it shows a + mark instead of the configured ✓.
+        pickerOpts.forEach(o => { if (o.value === 'custom') { o._isAddNew = true; o._configured = false; } });
+        const unconfigured = builtinProviders.filter(p => !p.configured);
+        const defaultId = (unconfigured[0] && unconfigured[0].id) || (builtinProviders[0] && builtinProviders[0].id) || 'custom';
+        pickerWrap.classList.remove('hidden');
+        const pickerEl = document.getElementById('vendor-modal-picker');
+        const onPick = (val) => {
+            if (val === 'custom') {
+                // "Custom" in the add flow always creates a new
+                // OpenAI-compatible provider entry via the dedicated modal
+                // (name + base + key), supporting multiple custom endpoints.
+                closeVendorModal();
+                openCustomProviderModal('');
+                return;
+            }
+            fillVendorModalForProvider(val);
+        };
+        initDropdown(pickerEl, pickerOpts, defaultId, onPick);
         decorateVendorModalPicker(pickerEl, pickerOpts);
-        fillVendorModalForProvider(defaultId);
+        onPick(defaultId);
     } else {
         pickerWrap.classList.add('hidden');
         fillVendorModalForProvider(providerId);
@@ -6276,11 +6251,9 @@ function openCustomProviderModal(providerId) {
     const nameInput = document.getElementById('custom-provider-name');
     const baseInput = document.getElementById('custom-provider-base');
     const keyInput = document.getElementById('custom-provider-key');
-    const modelInput = document.getElementById('custom-provider-model');
 
     nameInput.value = card ? (card.custom_name || '') : '';
     baseInput.value = card ? (card.api_base || '') : '';
-    modelInput.value = card ? (card.model || '') : '';
 
     // Surface the masked key as the value for configured providers so the
     // "already set" state is unambiguous; an untouched masked value means
@@ -6307,6 +6280,13 @@ function openCustomProviderModal(providerId) {
     document.getElementById('custom-provider-modal-cancel').onclick = closeCustomProviderModal;
     document.getElementById('custom-provider-modal-save').onclick = saveCustomProviderModal;
 
+    // Delete is only available when editing an existing provider.
+    const deleteBtn = document.getElementById('custom-provider-modal-delete');
+    if (deleteBtn) {
+        deleteBtn.classList.toggle('hidden', !editing);
+        deleteBtn.onclick = editing ? () => deleteCustomProvider(providerId) : null;
+    }
+
     function onOverlayClick(e) {
         if (e.target === overlay) {
             closeCustomProviderModal();
@@ -6325,7 +6305,6 @@ function closeCustomProviderModal() {
 function saveCustomProviderModal() {
     const name = document.getElementById('custom-provider-name').value.trim();
     const apiBase = document.getElementById('custom-provider-base').value.trim();
-    const model = document.getElementById('custom-provider-model').value.trim();
     const keyInput = document.getElementById('custom-provider-key');
 
     if (!name) {
@@ -6350,7 +6329,6 @@ function saveCustomProviderModal() {
         action: 'set_custom_provider',
         name: name,
         api_base: apiBase,
-        model: model,
     };
     if (apiKey) payload.api_key = apiKey;
     if (editing) payload.id = customProviderModalState.editId;
@@ -6375,16 +6353,6 @@ function saveCustomProviderModal() {
     });
 }
 
-function setActiveCustomProvider(providerId) {
-    fetch('/api/models', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'set_active_custom_provider', id: providerId }),
-    }).then(r => r.json()).then(data => {
-        if (data.status === 'success') loadModelsView();
-    }).catch(() => { /* noop */ });
-}
-
 function deleteCustomProvider(providerId) {
     showConfirmDialog({
         title: t('models_custom_delete_confirm_title'),
@@ -6397,7 +6365,10 @@ function deleteCustomProvider(providerId) {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ action: 'delete_custom_provider', id: providerId }),
             }).then(r => r.json()).then(data => {
-                if (data.status === 'success') loadModelsView();
+                if (data.status === 'success') {
+                    closeCustomProviderModal();
+                    loadModelsView();
+                }
             }).catch(() => { /* noop */ });
         }
     });
