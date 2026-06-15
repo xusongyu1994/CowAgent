@@ -74,6 +74,13 @@ def _import_optional_tools():
     except Exception as e:
         logger.error(f"[Tools] WecomAppSend not loaded: {e}")
 
+    # WeCom Webhook Send Tool (企微机器人Webhook发送工具)
+    try:
+        from agent.tools.wechatcom.wecom_webhook_send import WecomWebhookSend
+        tools['WecomWebhookSend'] = WecomWebhookSend
+    except Exception as e:
+        logger.error(f"[Tools] WecomWebhookSend not loaded: {e}")
+
     # Vision Tool (conditionally loaded based on API key availability)
     try:
         from agent.tools.vision.vision import Vision
@@ -96,6 +103,7 @@ GoogleSearch = _optional_tools.get('GoogleSearch')
 FileSave = _optional_tools.get('FileSave')
 Terminal = _optional_tools.get('Terminal')
 WecomAppSend = _optional_tools.get('WecomAppSend')
+WecomWebhookSend = _optional_tools.get('WecomWebhookSend')
 
 
 # BrowserTool (requires playwright)
@@ -155,6 +163,7 @@ __all__ = [
     'BrowserTool',
     'McpTool',
     'WecomAppSend',
+    'WecomWebhookSend',
 ]
 
 """
