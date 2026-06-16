@@ -671,18 +671,47 @@ class AgentBridge:
             self._schedule_mcp_hot_reload(agent)
 
             # Check if there are files to send (from send/read tool)
+            # 安全开关：设置为 False 可快速回滚到单文件逻辑
+            SUPPORT_MULTI_FILE = True
+            
             if hasattr(agent, 'stream_executor') and hasattr(agent.stream_executor, 'files_to_send'):
                 files_to_send = agent.stream_executor.files_to_send
                 if files_to_send:
-                    # Send the first file (for now, handle one file at a time)
-                    file_info = files_to_send[0]
-                    logger.info(f"[AgentBridge] Sending file: {file_info.get('path')}")
+                    logger.info(f"[AgentBridge] Found {len(files_to_send)} file(s) to send")
                     
-                    # Clear files_to_send for next request
+                    # Web渠道：文件已通过SSE实时推送，跳过Reply文件发送避免重复
+                    is_web_channel = context and context.get("channel_type") == "web"
+                    if is_web_channel:
+                        logger.info("[AgentBridge] Web channel detected, skipping file reply (already pushed via SSE)")
+                        agent.stream_executor.files_to_send = []
+                        return Reply(ReplyType.TEXT, response)
+                    
+                    if not SUPPORT_MULTI_FILE:
+                        # 回滚模式：仅发送第一个文件（原有逻辑）
+                        file_info = files_to_send[0]
+                        logger.info(f"[AgentBridge] Sending single file (rollback mode): {file_info.get('path')}")
+                        agent.stream_executor.files_to_send = []
+                        return self._create_file_reply(file_info, response, context)
+                    
+                    # 多文件模式：构造多文件Reply
+                    first_file = files_to_send[0]
+                    reply = self._create_file_reply(first_file, response, context)
+                    
+                    # 将剩余文件添加到file_list
+                    if len(files_to_send) > 1:
+                        for file_info in files_to_send[1:]:
+                            reply.add_file(file_info)
+                        logger.info(f"[AgentBridge] Added {len(files_to_send)-1} additional file(s) to reply")
+                    
+                    # 多文件场景：清空附加文本，避免冗余
+                    # 单文件场景：保留原有文本逻辑
+                    if len(files_to_send) > 1:
+                        reply.text_content = None
+                    
+                    # 清空文件发送队列
                     agent.stream_executor.files_to_send = []
                     
-                    # Return file reply based on file type
-                    return self._create_file_reply(file_info, response, context)
+                    return reply
             
             return Reply(ReplyType.TEXT, response)
             

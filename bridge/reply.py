@@ -26,6 +26,25 @@ class Reply:
     def __init__(self, type: ReplyType = None, content=None):
         self.type = type
         self.content = content
+        self.file_list = []  # 多文件支持：存储多个文件信息
+        self.text_content = None  # 附加文本内容
+
+    def add_file(self, file_info: dict):
+        """
+        添加文件到发送列表
+        
+        Args:
+            file_info: 文件信息字典，包含 path, file_type, file_name 等字段
+        """
+        self.file_list.append(file_info)
+
+    def has_multiple_files(self) -> bool:
+        """检查是否包含多个文件"""
+        return len(self.file_list) > 0
 
     def __str__(self):
+        if self.file_list:
+            return "Reply(type={}, content={}, files={})".format(
+                self.type, self.content, len(self.file_list)
+            )
         return "Reply(type={}, content={})".format(self.type, self.content)

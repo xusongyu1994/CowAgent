@@ -305,6 +305,43 @@ class ChatChannel(Channel):
             if not e_context.is_pass() and reply and reply.type:
                 logger.debug("[chat_channel] sending reply: {}, context: {}".format(reply, context))
                 
+                # 多文件发送逻辑：如果有多个文件，逐个发送
+                if hasattr(reply, 'file_list') and reply.file_list:
+                    logger.info(f"[chat_channel] Sending {len(reply.file_list) + 1} file(s) (1 main + {len(reply.file_list)} additional)")
+                    
+                    # 先发送附加文本（如果有）
+                    if reply.text_content:
+                        text_reply = Reply(ReplyType.TEXT, reply.text_content)
+                        self._send(text_reply, context)
+                        time.sleep(0.3)
+                    
+                    # 发送主文件（已在reply中）
+                    self._send(reply, context)
+                    time.sleep(0.5)
+                    
+                    # 发送剩余文件
+                    for i, file_info in enumerate(reply.file_list):
+                        try:
+                            file_type = file_info.get("file_type", "file")
+                            file_path = file_info.get("path")
+                            
+                            if file_type == "image":
+                                file_reply = Reply(ReplyType.IMAGE_URL, f"file://{file_path}")
+                            else:
+                                file_reply = Reply(ReplyType.FILE, f"file://{file_path}")
+                                file_reply.file_name = file_info.get("file_name", os.path.basename(file_path))
+                            
+                            self._send(file_reply, context)
+                            logger.info(f"[chat_channel] Sent additional file {i+1}/{len(reply.file_list)}: {file_path}")
+                            
+                            if i < len(reply.file_list) - 1:
+                                time.sleep(0.5)
+                        except Exception as e:
+                            logger.error(f"[chat_channel] Failed to send additional file {file_info}: {e}")
+                    
+                    logger.info(f"[chat_channel] All files sent successfully")
+                    return
+                
                 # 如果是文本回复，尝试提取并发送图片
                 # Web channel renders images/videos inline via renderMarkdown,
                 # so skip the extract-and-send step to avoid duplicate media.
