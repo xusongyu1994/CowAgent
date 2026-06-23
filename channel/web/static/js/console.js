@@ -97,7 +97,7 @@ const I18N = {
         welcome_subtitle: '我可以帮你解答问题、管理计算机、创造和执行技能，并通过<br>长期记忆和知识库不断成长',
         example_sys_title: '系统管理', example_sys_text: '查看工作空间里有哪些文件',
         example_task_title: '定时任务', example_task_text: '1分钟后提醒我检查服务器',
-        example_code_title: '编程助手', example_code_text: '搜索AI资讯并生成可视化网页报告',
+        example_code_title: '工作助手', example_code_text: '搜索产品信息并生成可视化网页报告',
         example_knowledge_title: '知识库', example_knowledge_text: '查看知识库当前文档情况',
         example_skill_title: '技能系统', example_skill_text: '查看所有支持的工具和技能',
         example_web_title: '指令中心', example_web_text: '查看全部命令',
