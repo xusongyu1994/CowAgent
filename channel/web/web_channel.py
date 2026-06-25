@@ -24,7 +24,7 @@ from common import const
 from common import i18n
 from common.log import logger
 from common.singleton import singleton
-from config import conf
+from config import conf, get_data_root, get_weixin_credentials_path
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"}
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".avi", ".mov", ".mkv"}
@@ -179,6 +179,29 @@ def _read_uploaded_file_bytes(file_obj) -> bytes:
     if isinstance(content, str):
         return content.encode("utf-8")
     raise TypeError(f"Unsupported uploaded content type: {type(content).__name__}")
+
+
+def _read_uploaded_file_bytes_limited(file_obj, max_bytes: int) -> bytes:
+    """Read uploaded content and fail once it exceeds max_bytes."""
+    if isinstance(file_obj, bytes):
+        content = file_obj
+    elif isinstance(file_obj, str):
+        content = file_obj.encode("utf-8")
+    elif hasattr(file_obj, "file") and hasattr(file_obj.file, "read"):
+        content = file_obj.file.read(max_bytes + 1)
+    elif hasattr(file_obj, "read"):
+        content = file_obj.read(max_bytes + 1)
+    elif hasattr(file_obj, "value"):
+        content = file_obj.value
+    else:
+        raise ValueError("Unable to read uploaded file content")
+    if isinstance(content, str):
+        content = content.encode("utf-8")
+    if not isinstance(content, bytes):
+        raise TypeError(f"Unsupported uploaded content type: {type(content).__name__}")
+    if len(content) > max_bytes:
+        raise ValueError("file too large")
+    return content
 
 
 def _raw_web_input():
@@ -1116,18 +1139,25 @@ class WebChannel(ChatChannel):
         else:
             logger.info(f"[WebChannel] 🔒 Listening on {host} only (local access). For public access, set web_host to 0.0.0.0 and configure web_password")
 
-        try:
-            import webbrowser
-            webbrowser.open(f"http://localhost:{port}")
-            logger.debug(f"[WebChannel] Opened browser at http://localhost:{port}")
-        except Exception as e:
-            logger.debug(f"[WebChannel] Could not open browser: {e}")
+        # In desktop mode the Electron shell renders the UI, so don't pop a
+        # browser window (also avoids issues when running detached/headless).
+        if os.environ.get("COW_DESKTOP") != "1":
+            try:
+                import webbrowser
+                webbrowser.open(f"http://localhost:{port}")
+                logger.debug(f"[WebChannel] Opened browser at http://localhost:{port}")
+            except Exception as e:
+                logger.debug(f"[WebChannel] Could not open browser: {e}")
 
-        # 确保静态文件目录存在
+        # Ensure the static dir exists. In a packaged build it ships read-only
+        # inside the bundle, so swallow errors instead of failing startup.
         static_dir = os.path.join(os.path.dirname(__file__), 'static')
         if not os.path.exists(static_dir):
-            os.makedirs(static_dir)
-            logger.debug(f"[WebChannel] Created static directory: {static_dir}")
+            try:
+                os.makedirs(static_dir)
+                logger.debug(f"[WebChannel] Created static directory: {static_dir}")
+            except OSError as e:
+                logger.debug(f"[WebChannel] Skipped creating static dir (read-only bundle?): {e}")
 
         urls = (
             '/', 'RootHandler',
@@ -1157,6 +1187,7 @@ class WebChannel(ChatChannel):
             '/api/knowledge/read', 'KnowledgeReadHandler',
             '/api/knowledge/graph', 'KnowledgeGraphHandler',
             '/api/knowledge/action', 'KnowledgeActionHandler',
+            '/api/knowledge/import', 'KnowledgeImportHandler',
             '/api/scheduler', 'SchedulerHandler',
             '/api/scheduler/toggle', 'SchedulerToggleHandler',
             '/api/scheduler/update', 'SchedulerUpdateHandler',
@@ -1483,7 +1514,7 @@ class ConfigHandler:
         const.GPT_55, const.GPT_54, const.GPT_54_MINI, const.GPT_54_NANO, const.GPT_5, const.GPT_41, const.GPT_4o,
         const.GLM_5_2, const.GLM_5_1, const.GLM_5_TURBO, const.GLM_5, const.GLM_4_7,
         const.QWEN37_PLUS, const.QWEN37_MAX, const.QWEN36_PLUS,
-        const.DOUBAO_SEED_2_PRO, const.DOUBAO_SEED_2_CODE,
+        const.DOUBAO_SEED_2_1_PRO, const.DOUBAO_SEED_2_1_TURBO, const.DOUBAO_SEED_2_CODE,
         const.KIMI_K2_7_CODE, const.KIMI_K2_7_CODE_HIGHSPEED, const.KIMI_K2_6, const.KIMI_K2_5, const.KIMI_K2,
         const.ERNIE_5_1, const.ERNIE_5, const.ERNIE_X1_1, const.ERNIE_45_TURBO_128K, const.ERNIE_45_TURBO_32K,
         const.MIMO_V2_5_PRO, const.MIMO_V2_5,
@@ -1563,7 +1594,7 @@ class ConfigHandler:
             "api_base_key": "ark_base_url",
             "api_base_default": "https://ark.cn-beijing.volces.com/api/v3",
             "api_base_placeholder": _PLACEHOLDER_DOUBAO,
-            "models": [const.DOUBAO_SEED_2_PRO, const.DOUBAO_SEED_2_CODE],
+            "models": [const.DOUBAO_SEED_2_1_PRO, const.DOUBAO_SEED_2_1_TURBO, const.DOUBAO_SEED_2_PRO, const.DOUBAO_SEED_2_CODE],
         }),
         ("moonshot", {
             "label": "Kimi",
@@ -1732,8 +1763,7 @@ class ConfigHandler:
             if not applied:
                 return json.dumps({"status": "error", "message": "no valid keys to update"})
 
-            config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-                os.path.abspath(__file__)))), "config.json")
+            config_path = os.path.join(get_data_root(), "config.json")
             if os.path.exists(config_path):
                 with open(config_path, "r", encoding="utf-8") as f:
                     file_cfg = json.load(f)
@@ -2098,7 +2128,7 @@ class ModelsHandler:
             const.GPT_41_MINI,
             const.GPT_4o,
         ],
-        "doubao":    [const.DOUBAO_SEED_2_PRO],
+        "doubao":    [const.DOUBAO_SEED_2_1_PRO, const.DOUBAO_SEED_2_1_TURBO, const.DOUBAO_SEED_2_PRO],
         "moonshot":  [const.KIMI_K2_6],
         "dashscope": [const.QWEN37_PLUS, const.QWEN36_PLUS],
         "claudeAPI": [const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS],
@@ -2122,7 +2152,7 @@ class ModelsHandler:
             const.GPT_41_MINI,
             const.GPT_54_MINI,
             const.QWEN37_PLUS,
-            const.DOUBAO_SEED_2_PRO,
+            const.DOUBAO_SEED_2_1_PRO,
             const.KIMI_K2_6,
             const.CLAUDE_4_6_SONNET,
             const.GEMINI_31_FLASH_LITE_PRE,
@@ -2166,10 +2196,7 @@ class ModelsHandler:
 
     @staticmethod
     def _config_path() -> str:
-        return os.path.join(
-            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-            "config.json",
-        )
+        return os.path.join(get_data_root(), "config.json")
 
     @classmethod
     def _read_file_config(cls) -> dict:
@@ -3552,8 +3579,12 @@ class ChannelsHandler:
         try:
             local_config = conf()
             active_channels = self._active_channel_set()
+            # Desktop build ships without lark-oapi, so hide Feishu from the list.
+            desktop_mode = os.environ.get("COW_DESKTOP") == "1"
             channels = []
             for ch_name, ch_def in self.CHANNEL_DEFS.items():
+                if desktop_mode and ch_name == "feishu":
+                    continue
                 fields_out = []
                 for f in ch_def["fields"]:
                     raw_val = local_config.get(f["key"], f.get("default", ""))
@@ -3635,8 +3666,7 @@ class ChannelsHandler:
         if not applied:
             return json.dumps({"status": "error", "message": "no valid fields to update"})
 
-        config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__)))), "config.json")
+        config_path = os.path.join(get_data_root(), "config.json")
         if os.path.exists(config_path):
             with open(config_path, "r", encoding="utf-8") as f:
                 file_cfg = json.load(f)
@@ -3706,8 +3736,7 @@ class ChannelsHandler:
         new_channel_type = ",".join(existing)
         local_config["channel_type"] = new_channel_type
 
-        config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__)))), "config.json")
+        config_path = os.path.join(get_data_root(), "config.json")
         if os.path.exists(config_path):
             with open(config_path, "r", encoding="utf-8") as f:
                 file_cfg = json.load(f)
@@ -3762,8 +3791,7 @@ class ChannelsHandler:
         local_config = conf()
         local_config["channel_type"] = new_channel_type
 
-        config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
-            os.path.abspath(__file__)))), "config.json")
+        config_path = os.path.join(get_data_root(), "config.json")
         if os.path.exists(config_path):
             with open(config_path, "r", encoding="utf-8") as f:
                 file_cfg = json.load(f)
@@ -3913,9 +3941,7 @@ class WeixinQrHandler:
             if not bot_token or not bot_id:
                 return json.dumps({"status": "error", "message": "Login confirmed but missing token"})
 
-            cred_path = os.path.expanduser(
-                conf().get("weixin_credentials_path", "~/.weixin_cow_credentials.json")
-            )
+            cred_path = get_weixin_credentials_path()
             from channel.weixin.weixin_channel import _save_credentials
             _save_credentials(cred_path, {
                 "token": bot_token,
@@ -4579,8 +4605,7 @@ class LogsHandler:
         web.header('Cache-Control', 'no-cache')
         web.header('X-Accel-Buffering', 'no')
 
-        from config import get_root
-        log_path = os.path.join(get_root(), "run.log")
+        log_path = os.path.join(get_data_root(), "run.log")
 
         def generate():
             if not os.path.isfile(log_path):
@@ -4729,6 +4754,71 @@ class KnowledgeActionHandler:
             }, ensure_ascii=False)
         except Exception as e:
             logger.error(f"[WebChannel] Knowledge action error: {e}")
+            return json.dumps({"status": "error", "code": 500, "message": str(e), "payload": None})
+
+
+class KnowledgeImportHandler:
+    def POST(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            from agent.knowledge.service import KnowledgeService
+            content_length = int(getattr(web.ctx, "env", {}).get("CONTENT_LENGTH") or 0)
+            if content_length > KnowledgeService.MAX_IMPORT_TOTAL_SIZE:
+                return json.dumps({
+                    "status": "error",
+                    "code": 413,
+                    "message": "import batch too large",
+                    "payload": None,
+                })
+            params = _raw_web_input()
+            target_category = params.get("target_category", "")
+            conflict_strategy = params.get("conflict_strategy", "skip")
+            uploaded = _ensure_list(params.get("files"))
+            single = params.get("file")
+            if single is not None:
+                uploaded.append(single)
+            if not uploaded:
+                return json.dumps({"status": "error", "code": 400, "message": "No files uploaded", "payload": None})
+            if len(uploaded) > KnowledgeService.MAX_IMPORT_FILES:
+                return json.dumps({
+                    "status": "error",
+                    "code": 400,
+                    "message": f"too many files: max {KnowledgeService.MAX_IMPORT_FILES}",
+                    "payload": None,
+                })
+
+            files = []
+            total_size = 0
+            for file_obj in uploaded:
+                if file_obj is None:
+                    continue
+                filename = getattr(file_obj, "filename", "") or getattr(file_obj, "name", "")
+                content = _read_uploaded_file_bytes_limited(file_obj, KnowledgeService.MAX_IMPORT_FILE_SIZE)
+                total_size += len(content)
+                if total_size > KnowledgeService.MAX_IMPORT_TOTAL_SIZE:
+                    return json.dumps({
+                        "status": "error",
+                        "code": 413,
+                        "message": "import batch too large",
+                        "payload": None,
+                    })
+                files.append({
+                    "filename": filename,
+                    "content": content,
+                })
+
+            result = KnowledgeService(_get_workspace_root()).dispatch("import_documents", {
+                "target_category": target_category,
+                "conflict_strategy": conflict_strategy,
+                "files": files,
+            })
+            return json.dumps({
+                "status": "success" if result["code"] < 300 else "error",
+                **result,
+            }, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Knowledge import error: {e}", exc_info=True)
             return json.dumps({"status": "error", "code": 500, "message": str(e), "payload": None})
 
 
