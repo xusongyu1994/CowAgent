@@ -12,7 +12,17 @@ interface ChatPageProps {
   baseUrl: string
 }
 
-const SUGGESTIONS = ['example_sys', 'example_task', 'example_code'] as const
+// Welcome-screen suggestion cards (aligned with the web console: 6 cards).
+// `send` overrides the text dropped into the input (e.g. show "查看全部命令"
+// but fill "/help"); otherwise the card's *_text is used.
+const SUGGESTIONS: { key: string; send?: string }[] = [
+  { key: 'example_sys' },
+  { key: 'example_task' },
+  { key: 'example_code' },
+  { key: 'example_knowledge' },
+  { key: 'example_skill' },
+  { key: 'example_web', send: '/help' },
+]
 
 const ChatPage: React.FC<ChatPageProps> = ({ baseUrl }) => {
   const activeId = useSessionStore((s) => s.activeId)
@@ -51,14 +61,19 @@ const ChatPage: React.FC<ChatPageProps> = ({ baseUrl }) => {
   }, [activeId, ensureSession, loadHistory])
 
   const scrollToBottom = useCallback((smooth = true) => {
-    const el = scrollRef.current
-    if (!el) return
-    // Jump straight to the bottom; instant for session switches, smooth for streaming.
-    if (smooth) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-    } else {
-      el.scrollTop = el.scrollHeight
-    }
+    // Defer to the next frame so we read the height *after* the new content has
+    // been laid out (markdown/streaming renders a frame later than the effect).
+    requestAnimationFrame(() => {
+      const el = scrollRef.current
+      if (!el) return
+      // Smooth animations get interrupted by high-frequency streaming updates
+      // and never catch up, so jump instantly while following the stream.
+      if (smooth) {
+        bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+      } else {
+        el.scrollTop = el.scrollHeight
+      }
+    })
   }, [])
 
   // Snap to the bottom instantly when switching sessions (no top-to-bottom animation).
@@ -66,6 +81,13 @@ const ChatPage: React.FC<ChatPageProps> = ({ baseUrl }) => {
   const lastSessionRef = useRef('')
   const lastLenRef = useRef(0)
   const pendingSnapRef = useRef(false)
+  // True while we should keep the view pinned to the bottom (e.g. during
+  // streaming). Cleared when the user scrolls up to read earlier messages.
+  const followBottomRef = useRef(true)
+  // Tracks the previous streaming state so we can do one final snap to the
+  // bottom right when streaming ends (the last chunk of a long command output
+  // often lands together with isStreaming flipping to false).
+  const wasStreamingRef = useRef(false)
   useEffect(() => {
     const el = scrollRef.current
     if (!el) return
@@ -74,12 +96,13 @@ const ChatPage: React.FC<ChatPageProps> = ({ baseUrl }) => {
       lastSessionRef.current = activeId
       lastLenRef.current = messages.length
       pendingSnapRef.current = true
+      followBottomRef.current = true
     }
 
     if (pendingSnapRef.current) {
       // Instant snap on switch and on the first content that lands afterwards.
       lastLenRef.current = messages.length
-      requestAnimationFrame(() => scrollToBottom(false))
+      scrollToBottom(false)
       if (messages.length > 0) pendingSnapRef.current = false
       return
     }
@@ -87,8 +110,24 @@ const ChatPage: React.FC<ChatPageProps> = ({ baseUrl }) => {
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 160
     const grew = messages.length !== lastLenRef.current
     lastLenRef.current = messages.length
-    if (nearBottom || grew) scrollToBottom(true)
-  }, [messages, activeId, scrollToBottom])
+    // Follow the bottom when: a new message arrived, the user is already near
+    // the bottom, or we're streaming and the user hasn't scrolled up. This
+    // keeps long command/streaming output (where length is unchanged but the
+    // content keeps growing) glued to the latest line.
+    // One final snap right when streaming ends, so the tail of a long command
+    // output isn't left scrolled off-screen.
+    const justFinished = wasStreamingRef.current && !isStreaming
+    wasStreamingRef.current = isStreaming
+
+    const following = isStreaming && followBottomRef.current
+    if (grew || nearBottom || following || (justFinished && followBottomRef.current)) {
+      // Instant jump while streaming/new content (smooth animations get
+      // interrupted by rapid updates and never reach the bottom); smooth only
+      // for a lone increment when the user is already sitting near the bottom.
+      const smooth = nearBottom && !following && !grew && !justFinished
+      scrollToBottom(smooth)
+    }
+  }, [messages, activeId, isStreaming, scrollToBottom])
 
   const handleSend = useCallback(
     async (text: string, attachments: Attachment[]) => {
@@ -146,6 +185,9 @@ const ChatPage: React.FC<ChatPageProps> = ({ baseUrl }) => {
   const handleScroll = useCallback(
     async (e: React.UIEvent<HTMLDivElement>) => {
       const el = e.currentTarget
+      // Track whether the user wants to stay pinned to the bottom: scrolling up
+      // pauses auto-follow; returning near the bottom resumes it.
+      followBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 160
       const s = useChatStore.getState().sessions[activeId]
       if (el.scrollTop < 40 && s?.historyHasMore && !loadingMore && !isStreaming) {
         setLoadingMore(true)
@@ -178,11 +220,15 @@ const ChatPage: React.FC<ChatPageProps> = ({ baseUrl }) => {
             <h1 className="text-xl font-semibold text-content mb-2">{t('chat_welcome')}</h1>
             <p className="text-content-tertiary text-sm text-center max-w-md mb-8">{t('chat_empty_hint')}</p>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 w-full max-w-2xl">
-              {SUGGESTIONS.map((key) => (
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 w-full max-w-2xl">
+              {SUGGESTIONS.map(({ key, send }) => (
                 <button
                   key={key}
-                  onClick={() => handleSend(t(`${key}_text` as Parameters<typeof t>[0]), [])}
+                  onClick={() => {
+                    // Fill the input (don't auto-send) so the user can tweak it first.
+                    const draft = send ?? t(`${key}_text` as Parameters<typeof t>[0])
+                    inputResetRef.current?.(draft, [])
+                  }}
                   className="text-left bg-surface border border-default rounded-xl p-3.5 cursor-pointer hover:border-accent hover:shadow-sm transition-all"
                 >
                   <div className="font-medium text-sm text-content mb-1">

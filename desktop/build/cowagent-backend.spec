@@ -52,14 +52,35 @@ hiddenimports += collect_submodules('models')
 hiddenimports += collect_submodules('voice')
 hiddenimports += collect_submodules('bridge')
 
-# Plugin framework: WebChannel -> ChatChannel imports `from plugins import *`,
-# so the framework package must be present even though desktop mode never loads
-# actual plugins (it's only ~tens of KB of code).
+# Plugin framework + plugins. WebChannel -> ChatChannel imports
+# `from plugins import *`, and desktop mode loads plugins (in a background
+# thread) so command plugins like cow_cli/godcmd (/status, #help) work. Plugin
+# modules are imported dynamically by name in scan_plugins(), so list them
+# explicitly. The `cli` package is a cow_cli dependency (`from cli import ...`).
 hiddenimports += [
     'plugins',
     'plugins.event',
     'plugins.plugin',
     'plugins.plugin_manager',
+]
+hiddenimports += collect_submodules('plugins')
+
+# `cli` powers cow_cli's slash commands (`cow skill install`, `cow status`, …).
+# Its command modules are imported lazily inside functions, so static analysis
+# misses them. collect_submodules('cli') alone proved unreliable (a build can
+# end up with `cli` but not `cli.commands`), so list the command modules
+# explicitly AND ship the package as data (see datas) as a belt-and-suspenders.
+hiddenimports += collect_submodules('cli')
+hiddenimports += [
+    'cli',
+    'cli.cli',
+    'cli.utils',
+    'cli.commands',
+    'cli.commands.skill',
+    'cli.commands.process',
+    'cli.commands.context',
+    'cli.commands.install',
+    'cli.commands.knowledge',
 ]
 
 # Third-party SDKs that use lazy/conditional imports internally.
@@ -69,12 +90,34 @@ hiddenimports += [
     'tiktoken_ext.openai_public',
 ]
 
+# Document parsing libs. The read / web_fetch tools import these lazily inside
+# functions (e.g. `from pypdf import PdfReader`), so PyInstaller's static
+# analysis misses them and they'd be dropped from the bundle — leaving the
+# desktop client unable to read PDF/Word/Excel/PPT. List them explicitly.
+hiddenimports += [
+    'pypdf',
+    'docx',           # python-docx
+    'pptx',           # python-pptx
+    'openpyxl',
+]
+hiddenimports += collect_submodules('pypdf')
+hiddenimports += collect_submodules('docx')
+hiddenimports += collect_submodules('pptx')
+hiddenimports += collect_submodules('openpyxl')
+
 # --- Data files -----------------------------------------------------------
 # Runtime-read files/dirs that must travel with the executable. Paths are
 # (source, dest_dir_in_bundle).
 datas = [
     (rp('config-template.json'), '.'),
     (rp('skills'), 'skills'),
+    # PluginManager.scan_plugins() walks the on-disk ./plugins dir at runtime
+    # (it doesn't rely solely on imports), so ship the package directory too.
+    (rp('plugins'), 'plugins'),
+    # Ship the `cli` package as loose files too: onedir adds _internal to
+    # sys.path, so `import cli.commands.*` resolves even if PyInstaller's
+    # submodule collection misses the lazily-imported command modules.
+    (rp('cli'), 'cli'),
     # Web console served on the backend port: ship chat.html plus its static
     # assets (~1.9MB) so the browser-based console works as a debug/fallback
     # entry alongside the Electron UI.
@@ -84,6 +127,12 @@ datas = [
 
 # Some libraries (tiktoken encodings, etc.) ship data files.
 datas += collect_data_files('tiktoken_ext', include_py_files=False)
+
+# python-docx / python-pptx bundle template files (default.docx / default.pptx,
+# content-type XML) inside their packages; they're loaded at import/parse time,
+# so ship them or document parsing fails in the frozen build.
+datas += collect_data_files('docx')
+datas += collect_data_files('pptx')
 
 # --- Excludes -------------------------------------------------------------
 # Keep the bundle lean: drop Feishu's heavy SDK, plugins (disabled in desktop
