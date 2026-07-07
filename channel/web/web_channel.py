@@ -265,7 +265,13 @@ class WebChannel(ChatChannel):
         self.session_queues = {}  # session_id -> Queue (fallback polling)
         self.request_to_session = {}  # request_id -> session_id
         self.sse_queues = {}  # request_id -> Queue (SSE streaming)
+        # request_id -> last-active timestamp. Refreshed while the SSE
+        # generator is being consumed (client still connected). The janitor
+        # only reclaims queues whose generator stopped refreshing this, so a
+        # long-running but still-streaming reply is never wrongly killed.
+        self.sse_last_active = {}
         self._http_server = None
+        self._sse_janitor_started = False
 
     def _generate_msg_id(self):
         """生成唯一的消息ID"""
@@ -890,6 +896,7 @@ class WebChannel(ChatChannel):
 
             if use_sse:
                 self.sse_queues[request_id] = Queue()
+                self.sse_last_active[request_id] = time.time()
 
             trigger_prefixs = conf().get("single_chat_prefix", [""])
             if check_prefix(prompt, trigger_prefixs) is None:
@@ -904,8 +911,7 @@ class WebChannel(ChatChannel):
 
             if context is None:
                 logger.warning(f"[WebChannel] Context is None for session {session_id}, message may be filtered")
-                if request_id in self.sse_queues:
-                    del self.sse_queues[request_id]
+                self._drop_sse_request(request_id)
                 return json.dumps({"status": "error", "message": "Message was filtered"})
 
             context["session_id"] = session_id
@@ -927,6 +933,60 @@ class WebChannel(ChatChannel):
         except Exception as e:
             logger.error(f"Error processing message: {e}")
             return json.dumps({"status": "error", "message": str(e)})
+
+    def _drop_sse_request(self, request_id: str):
+        """Reclaim all state tied to an SSE request to prevent fd/memory leaks.
+
+        Removing the queue lets the WSGI generator and its socket be released,
+        and dropping request_to_session avoids unbounded map growth.
+        """
+        self.sse_queues.pop(request_id, None)
+        self.sse_last_active.pop(request_id, None)
+        self.request_to_session.pop(request_id, None)
+
+    def _start_sse_janitor(self):
+        """Start a background thread that reclaims orphaned SSE queues.
+
+        When a client disconnects before the "done" event arrives (browser
+        closed, session switched, network drop), the generator may keep the
+        queue around to allow reconnection. Without a sweep these orphans
+        accumulate, leaking file descriptors until cheroot raises
+        "[Errno 24] Too many open files".
+
+        Reclamation is based on idle time, not total age: an active stream
+        refreshes ``sse_last_active`` every second while its generator is being
+        consumed, so a long-running reply (even hours long) is never killed
+        while the client stays connected. Only queues that stopped refreshing
+        (client gone) past SSE_IDLE_TIMEOUT are reclaimed.
+        """
+        if self._sse_janitor_started:
+            return
+        self._sse_janitor_started = True
+
+        SSE_IDLE_TIMEOUT = 1800  # 30 minutes with no client consumption
+        SWEEP_INTERVAL = 60
+
+        def _sweep():
+            while True:
+                time.sleep(SWEEP_INTERVAL)
+                try:
+                    now = time.time()
+                    stale = [
+                        rid for rid, ts in list(self.sse_last_active.items())
+                        if now - ts > SSE_IDLE_TIMEOUT
+                    ]
+                    for rid in stale:
+                        self._drop_sse_request(rid)
+                    if stale:
+                        logger.info(
+                            f"[WebChannel] SSE janitor reclaimed {len(stale)} "
+                            f"idle stream(s)"
+                        )
+                except Exception as e:
+                    logger.warning(f"[WebChannel] SSE janitor error: {e}")
+
+        t = threading.Thread(target=_sweep, name="sse-janitor", daemon=True)
+        t.start()
 
     def stream_response(self, request_id: str):
         """
@@ -952,6 +1012,10 @@ class WebChannel(ChatChannel):
 
         try:
             while time.time() < deadline:
+                # Mark the stream alive on every loop. While the client keeps
+                # consuming, the generator runs and refreshes this, so the
+                # janitor won't reclaim a long-running but active stream.
+                self.sse_last_active[request_id] = time.time()
                 try:
                     item = q.get(timeout=1)
                 except Empty:
@@ -980,13 +1044,21 @@ class WebChannel(ChatChannel):
                     # voice_attach payload through to the browser.
                     post_done = True
                     post_deadline = time.time() + 2  # 2s post-attach tail
+        except GeneratorExit:
+            # Client disconnected (WSGI closed the generator). If the reply is
+            # already complete there is nothing to resume, so reclaim now to
+            # release the socket fd. Otherwise keep the queue briefly so a
+            # reconnect with the same request_id can resume; the janitor will
+            # reclaim it if no reconnect happens.
+            if post_done:
+                self._drop_sse_request(request_id)
+            raise
         finally:
-            # Only drop the queue once the reply is actually complete. If the
-            # client disconnected early (e.g. switched sessions and will
-            # re-attach with the same request_id), keep the queue so the new
-            # connection can resume reading the remaining events.
+            # Drop the queue once the reply is actually complete or the idle
+            # deadline has passed. Early client disconnects are handled by the
+            # GeneratorExit branch above and the background janitor.
             if post_done or time.time() >= deadline:
-                self.sse_queues.pop(request_id, None)
+                self._drop_sse_request(request_id)
 
     def cancel_request(self):
         """
@@ -1087,7 +1159,10 @@ class WebChannel(ChatChannel):
     def startup(self):
         configured_host = conf().get("web_host", "")
         host = configured_host or ("0.0.0.0" if _is_password_enabled() else "127.0.0.1")
-        port = conf().get("web_port", 9899)
+        # The desktop app passes its chosen port via COW_WEB_PORT so its backend
+        # never collides with a source-run web console (default 9899). This makes
+        # the port a single source of truth owned by the Electron shell.
+        port = int(os.environ.get("COW_WEB_PORT") or conf().get("web_port", 9899))
         is_public_bind = host in ("0.0.0.0", "::")
 
         self._cleanup_stale_voice_recordings()
@@ -1229,6 +1304,8 @@ class WebChannel(ChatChannel):
         server.requests.min = 20
         server.requests.max = 80
         self._http_server = server
+        # Reclaim orphaned SSE queues so disconnected clients don't leak fds.
+        self._start_sse_janitor()
         try:
             server.start()
         except (KeyboardInterrupt, SystemExit):
@@ -1512,9 +1589,9 @@ class ConfigHandler:
     _RECOMMENDED_MODELS = [
         const.DEEPSEEK_V4_FLASH, const.DEEPSEEK_V4_PRO,
         const.MINIMAX_M3, const.MINIMAX_M2_7_HIGHSPEED, const.MINIMAX_M2_7,
-        # claude-fable-5 is placed after claude-opus-4-7 (not as the Claude
-        # default) since it is often unavailable due to policy restrictions.
-        const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_FABLE_5, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS,
+        # claude-sonnet-5 is the Claude default; claude-fable-5 is dropped
+        # from this web console list for now.
+        const.CLAUDE_SONNET_5, const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS,
         const.GEMINI_35_FLASH, const.GEMINI_31_FLASH_LITE_PRE, const.GEMINI_31_PRO_PRE, const.GEMINI_3_FLASH_PRE,
         const.GPT_55, const.GPT_54, const.GPT_54_MINI, const.GPT_54_NANO, const.GPT_5, const.GPT_41, const.GPT_4o,
         const.GLM_5_2, const.GLM_5_1, const.GLM_5_TURBO, const.GLM_5, const.GLM_4_7,
@@ -1559,7 +1636,7 @@ class ConfigHandler:
             "api_base_key": "claude_api_base",
             "api_base_default": "https://api.anthropic.com/v1",
             "api_base_placeholder": _PLACEHOLDER_V1,
-            "models": [const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_FABLE_5, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS],
+            "models": [const.CLAUDE_SONNET_5, const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS],
         }),
         ("gemini", {
             "label": "Gemini",
@@ -2136,7 +2213,7 @@ class ModelsHandler:
         "doubao":    [const.DOUBAO_SEED_2_1_PRO, const.DOUBAO_SEED_2_1_TURBO, const.DOUBAO_SEED_2_PRO],
         "moonshot":  [const.KIMI_K2_6],
         "dashscope": [const.QWEN37_PLUS, const.QWEN36_PLUS],
-        "claudeAPI": [const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS],
+        "claudeAPI": [const.CLAUDE_SONNET_5, const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS],
         "gemini":    [const.GEMINI_35_FLASH, const.GEMINI_31_FLASH_LITE_PRE, const.GEMINI_31_PRO_PRE, const.GEMINI_3_FLASH_PRE],
         "qianfan":   [const.ERNIE_45_TURBO_VL],
         # Zhipu's bot hard-codes the call to glm-5v-turbo regardless of what
@@ -2159,7 +2236,7 @@ class ModelsHandler:
             const.QWEN37_PLUS,
             const.DOUBAO_SEED_2_1_PRO,
             const.KIMI_K2_6,
-            const.CLAUDE_4_6_SONNET,
+            const.CLAUDE_SONNET_5,
             const.GEMINI_31_FLASH_LITE_PRE,
         ],
         # Custom OpenAI-compatible providers have no preset list — model
@@ -2388,7 +2465,7 @@ class ModelsHandler:
         ("moonshot",  "moonshot_api_key",  const.KIMI_K2_6),
         ("doubao",    "ark_api_key",       const.DOUBAO_SEED_2_PRO),
         ("dashscope", "dashscope_api_key", const.QWEN37_PLUS),
-        ("claudeAPI", "claude_api_key",    const.CLAUDE_4_6_SONNET),
+        ("claudeAPI", "claude_api_key",    const.CLAUDE_SONNET_5),
         ("gemini",    "gemini_api_key",    const.GEMINI_35_FLASH),
         ("qianfan",   "qianfan_api_key",   const.ERNIE_45_TURBO_VL),
         ("zhipu",     "zhipu_ai_api_key",  const.GLM_5V_TURBO),
