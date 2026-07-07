@@ -22,10 +22,13 @@ import {
   Store,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+// The desktop app's own brand icon (transparent PNG), bundled by Vite.
+import brandLogo from '../assets/logo.png'
 import { t, getLang, setLang, Lang } from '../i18n'
 import { useUIStore } from '../store/uiStore'
 import { useTheme } from '../hooks/useTheme'
-import { useUpdateStore, hasPendingUpdate } from '../store/updateStore'
+import { usePlatform } from '../hooks/usePlatform'
+import { useUpdateStore, hasPendingUpdate, hasAvailableUpdate } from '../store/updateStore'
 import UpdateBanner from '../components/UpdateBanner'
 
 // Fallback shown when app.getVersion() is unavailable (dev/web preview). Keep
@@ -71,12 +74,20 @@ const NavRail: React.FC<NavRailProps> = ({ onLangChange }) => {
   const navigate = useNavigate()
   const { navCollapsed, toggleNav } = useUIStore()
   const { theme, toggleTheme } = useTheme()
+  // On macOS the top-left is occupied by the native traffic lights, so the
+  // brand mark is only shown on Windows/Linux where that corner is otherwise
+  // empty (mirrors the web console's sidebar logo).
+  const { isMac } = usePlatform()
 
   const collapsed = navCollapsed
   const width = collapsed ? 'w-[56px]' : 'w-[208px]'
 
   const updateState = useUpdateStore()
+  // Footer dot: hidden once dismissed for this version (user asked for this).
   const pendingUpdate = hasPendingUpdate(updateState)
+  // Menu "check for update" dot: stays as long as an update actually exists,
+  // even after dismissing the footer badge.
+  const availableUpdate = hasAvailableUpdate(updateState)
   const checking = updateState.status?.state === 'checking'
 
   const [menuOpen, setMenuOpen] = useState(false)
@@ -141,14 +152,32 @@ const NavRail: React.FC<NavRailProps> = ({ onLangChange }) => {
 
   const checkUpdate = () => {
     setCheckedManually(true)
-    window.electronAPI?.checkForUpdate?.()
+    // Re-open the update panel if an update is already known; also kicks a
+    // fresh check. Closing the menu so the re-opened panel is visible.
+    setMenuOpen(false)
+    updateState.recheck()
   }
 
   return (
     <aside className={`${width} flex flex-col flex-shrink-0 h-full bg-base transition-[width] duration-200`}>
       {/* Top: full-width drag strip; bottom border continues the header divider
-          across the whole window. No right border so it doesn't cut the lights. */}
-      <div className="titlebar-drag h-[44px] flex-shrink-0 border-b border-default" />
+          across the whole window. No right border so it doesn't cut the lights.
+          On Windows/Linux the top-left corner is empty (no traffic lights), so
+          we surface the brand mark here like the web console's sidebar. */}
+      <div
+        className={`titlebar-drag h-[44px] flex-shrink-0 border-b border-default flex items-center ${
+          collapsed ? 'justify-center px-0' : 'px-3'
+        }`}
+      >
+        {!isMac && (
+          <div className="flex items-center gap-2 min-w-0 select-none">
+            <BrandLogo />
+            {!collapsed && (
+              <span className="text-[14px] font-semibold text-content truncate">CowAgent</span>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Content area carries the right divider, starting below the titlebar */}
       <div className="flex-1 flex flex-col min-h-0 border-r border-default">
@@ -189,8 +218,8 @@ const NavRail: React.FC<NavRailProps> = ({ onLangChange }) => {
           <FooterMenu
             theme={theme}
             checking={checking}
-            pendingUpdate={pendingUpdate}
-            upToDate={checkedManually && updateStatusState === 'not-available'}
+            pendingUpdate={availableUpdate}
+            upToDate={checkedManually && updateStatusState === 'not-available' && !availableUpdate}
             onLogs={() => {
               setMenuOpen(false)
               navigate('/logs')
@@ -237,6 +266,18 @@ const NavRail: React.FC<NavRailProps> = ({ onLangChange }) => {
     </aside>
   )
 }
+
+// Brand mark for the top-left corner (Windows/Linux). Uses the desktop app's
+// own icon (transparent PNG with its own rounded shape), so it sits cleanly on
+// both light and dark backgrounds without extra styling.
+const BrandLogo: React.FC = () => (
+  <img
+    src={brandLogo}
+    alt="CowAgent"
+    draggable={false}
+    className="flex-shrink-0 w-7 h-7 object-contain"
+  />
+)
 
 const FooterBtn: React.FC<{
   collapsed: boolean

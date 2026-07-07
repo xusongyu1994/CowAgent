@@ -1,5 +1,6 @@
 # encoding:utf-8
 
+import ast
 import copy
 import json
 import logging
@@ -264,6 +265,8 @@ available_setting = {
     "self_evolution_enabled": False,        # switch to enable/disable self-evolution
     "self_evolution_idle_minutes": 10,      # idle time before a session is reviewed
     "self_evolution_min_turns": 6,          # min user turns (or context pressure) to trigger
+    # Deep Dream: nightly memory distillation into MEMORY.md + dream diary.
+    "deep_dream_enabled": True,             # scheduled deep dream switch; manual /memory dream is unaffected
     "skill": {},  # Per-skill runtime config; nested keys flatten to SKILL_<NAME>_<KEY> env vars at startup
     "mcp_servers": [],  # MCP server list; each entry supports type "stdio" (local process) or "sse" (remote URL)
 }
@@ -307,6 +310,12 @@ class Config(dict):
             self.user_datas[user] = {}
         return self.user_datas[user]
 
+    # SECURITY NOTE: pickle.load() can execute arbitrary code during
+    # deserialization. This is safe as long as user_datas.pkl is trusted
+    # (local app data directory, written only by this process). For a future
+    # hardening pass, consider migrating to JSON (json.load/json.dump) if the
+    # data structures are JSON-serializable, or adding an HMAC signature to
+    # detect tampering of the pickle file.
     def load_user_datas(self):
         try:
             with open(os.path.join(get_appdata_dir(), "user_datas.pkl"), "rb") as f:
@@ -320,6 +329,8 @@ class Config(dict):
 
     def save_user_datas(self):
         try:
+            # SECURITY: pickle.dump output should only be loaded by this same
+            # process. See note on load_user_datas() above.
             with open(os.path.join(get_appdata_dir(), "user_datas.pkl"), "wb") as f:
                 pickle.dump(self.user_datas, f)
                 logger.info("[Config] User datas saved.")
@@ -415,11 +426,19 @@ def load_config():
         if name in available_setting:
             logger.info("[INIT] override config by environ args: {}={}".format(name, value))
             try:
-                config[name] = eval(value)
+                # SECURITY: Use ast.literal_eval instead of eval().
+                # ast.literal_eval only parses Python literals (strings, numbers,
+                # tuples, lists, dicts, booleans, None) and CANNOT execute
+                # arbitrary code, preventing environment-variable injection.
+                config[name] = ast.literal_eval(value)
             except Exception:
-                if value == "false":
+                # literal_eval can raise ValueError/SyntaxError for non-literal
+                # strings, but also TypeError/RecursionError on malformed input
+                # (e.g. unhashable dict keys); catch broadly to avoid crashing
+                # startup, and fall back to treating the value as a plain string.
+                if value.lower() == "false":
                     config[name] = False
-                elif value == "true":
+                elif value.lower() == "true":
                     config[name] = True
                 else:
                     config[name] = value
