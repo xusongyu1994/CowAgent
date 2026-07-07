@@ -142,6 +142,27 @@ class Agent:
                     # Ensure channel is a string, not an object
                     channel_str = self.current_channel if isinstance(self.current_channel, str) else str(self.current_channel)
                     user_identity["notes"] = f"来自{channel_str}渠道"
+
+                # 加入用户权限信息
+                try:
+                    from common.permission_checker import (
+                        is_permissions_enabled,
+                        check_knowledge_permission,
+                        check_kingdee_permission,
+                        get_user_accessible_folders,
+                    )
+                    if is_permissions_enabled():
+                        # 知识库权限
+                        accessible = get_user_accessible_folders(self.current_user_id)
+                        if accessible and accessible != ['*']:
+                            user_identity["knowledge_folders"] = accessible
+                        # 金蝶权限
+                        kd_allowed, kd_scope, _ = check_kingdee_permission(self.current_user_id)
+                        if kd_allowed:
+                            user_identity["kingdee_enabled"] = True
+                except Exception as e:
+                    logger.debug(f"[Agent] Failed to add permission info: {e}")
+
                 logger.info(f"[Agent] Built user_identity: {user_identity}")
             else:
                 logger.warning("[Agent] current_user_id is None, cannot build user_identity!")

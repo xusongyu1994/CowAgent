@@ -126,8 +126,18 @@ def _is_channel_ready(channel_type: str, receiver: str) -> bool:
 
         if channel_type == "web":
             queues = getattr(channel, "session_queues", None)
-            if not queues or receiver not in queues:
+            if not queues:
                 return False
+            # If the receiver's session queue doesn't exist yet (e.g. after restart,
+            # before any inbound message), create one so scheduled messages can be
+            # queued for delivery when the user next polls.
+            if receiver not in queues:
+                from queue import Queue
+                queues[receiver] = Queue()
+                logger.info(
+                    f"[Scheduler] Created session queue for {receiver} "
+                    f"(deferred scheduled task delivery)"
+                )
             return True
 
         return True

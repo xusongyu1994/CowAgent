@@ -1200,6 +1200,11 @@ class WebChannel(ChatChannel):
             '/api/messages/delete', 'MessageDeleteHandler',
             '/api/logs', 'LogsHandler',
             '/api/version', 'VersionHandler',
+            '/api/permissions/config', 'PermissionsConfigHandler',
+            '/api/permissions/users', 'PermissionsUsersHandler',
+            '/api/permissions/folders', 'PermissionsFoldersHandler',
+            '/api/permissions/sync-users', 'PermissionsSyncUsersHandler',
+            '/api/permissions/audit-log', 'PermissionsAuditLogHandler',
             '/assets/(.*)', 'AssetsHandler',
         )
         app = web.application(urls, globals(), autoreload=False)
@@ -4827,3 +4832,433 @@ class VersionHandler:
         web.header('Content-Type', 'application/json; charset=utf-8')
         from cli import __version__
         return json.dumps({"version": __version__})
+
+
+class PermissionsConfigHandler:
+    """API for managing permission configuration."""
+
+    def GET(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            config = self._load_config()
+            return json.dumps({"status": "success", "data": config}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[PermissionsConfigHandler] GET error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+    def POST(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            data = json.loads(web.data())
+            config = self._load_config()
+
+            # Update permissions enabled state
+            if 'enabled' in data:
+                config['enabled'] = data['enabled']
+
+            # Update knowledge permissions
+            if 'knowledge_permissions' in data:
+                config['knowledge_permissions'] = data['knowledge_permissions']
+
+            # Update kingdee permissions
+            if 'kingdee_permissions' in data:
+                config['kingdee_permissions'] = data['kingdee_permissions']
+
+            # Update folder permissions
+            if 'folder_permissions' in data:
+                config['folder_permissions'] = data['folder_permissions']
+
+            # Audit log: copy from frontend if present (frontend sends entire audit_log array)
+            if 'audit_log' in data:
+                config['audit_log'] = data['audit_log']
+            # 兼容旧的 audit_entry 单条追加方式
+            elif 'audit_entry' in data:
+                if 'audit_log' not in config:
+                    config['audit_log'] = []
+                config['audit_log'].append(data['audit_entry'])
+
+            # 限制审计日志容量，保留最近 1000 条
+            if config.get('audit_log'):
+                config['audit_log'] = config['audit_log'][-1000:]
+
+            self._save_config(config)
+            return json.dumps({"status": "success"}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[PermissionsConfigHandler] POST error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+    def _load_config(self):
+        config_path = self._get_config_path()
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {
+            "knowledge_permissions": {"folder_permissions": {}},
+            "kingdee_permissions": {"default_strategy": "deny", "user_permissions": {}},
+            "folder_permissions": {},
+            "audit_log": []
+        }
+
+    def _save_config(self, config):
+        config_path = self._get_config_path()
+        with open(config_path, 'w', encoding='utf-8') as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
+
+    def _get_config_path(self):
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        tmp_dir = os.path.join(project_root, "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        return os.path.join(tmp_dir, "permission_config.json")
+
+
+class PermissionsUsersHandler:
+    """API for getting user list."""
+
+    def GET(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            params = web.input(department='')
+            department = params.department.strip()
+
+            users = self._load_users()
+            departments = set()
+            user_list = []
+
+            for userid, info in users.items():
+                dept = info.get('department', '')
+                departments.add(dept)
+                if department and dept != department:
+                    continue
+                user_list.append({
+                    'name': info.get('name', userid),  # 使用中文名，如果没有则使用userid
+                    'userid': userid,
+                    'department': dept,
+                    'leader_userid': info.get('leader_userid', ''),
+                    'leader_name': info.get('leader_name', '')  # 如果有上级中文名也一并返回
+                })
+
+            return json.dumps({
+                "status": "success",
+                "data": {
+                    "users": user_list,
+                    "departments": sorted(list(departments))
+                }
+            }, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[PermissionsUsersHandler] GET error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+    def _load_users(self):
+        """Load users from permission_config.json (synced by PermissionsSyncUsersHandler)."""
+        config_path = self._get_config_path()
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    return config.get('users', {})
+            except Exception as e:
+                logger.error(f"[PermissionsUsersHandler] Failed to load users from config: {e}")
+                # Fallback to wecom_user_details.json
+                return self._load_users_from_wecom()
+        # Fallback to wecom_user_details.json if permission_config.json doesn't exist
+        return self._load_users_from_wecom()
+
+    def _load_users_from_wecom(self):
+        """Fallback: load users directly from wecom_user_details.json."""
+        wecom_path = self._get_wecom_path()
+        if os.path.exists(wecom_path):
+            try:
+                with open(wecom_path, 'r', encoding='utf-8') as f:
+                    users_data = json.load(f)
+                    # Convert to same format as permission_config.json users field
+                    converted = {}
+                    for name, info in users_data.items():
+                        userid = info.get('userid', '')
+                        if userid:
+                            converted[userid] = {
+                                'name': name,
+                                'userid': userid,
+                                'department': info.get('department', ''),
+                                'leader_userid': info.get('leader_userid', '')
+                            }
+                    return converted
+            except Exception as e:
+                logger.error(f"[PermissionsUsersHandler] Failed to load users from wecom: {e}")
+        return {}
+
+    def _get_config_path(self):
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        tmp_dir = os.path.join(project_root, "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        return os.path.join(tmp_dir, "permission_config.json")
+
+    def _get_wecom_path(self):
+        from common.utils import expand_path
+        ws_root = expand_path(conf().get("agent_workspace", "~/cow"))
+        tmp_dir = os.path.join(ws_root, "tmp")
+        return os.path.join(tmp_dir, "wecom_user_details.json")
+
+
+class PermissionsFoldersHandler:
+    """API for getting knowledge base folder list."""
+
+    def GET(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            folders = self._get_knowledge_folders()
+            return json.dumps({
+                "status": "success",
+                "data": {"folders": folders}
+            }, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[PermissionsFoldersHandler] GET error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+    def _get_knowledge_folders(self):
+        from common.utils import expand_path
+        ws_root = expand_path(conf().get("agent_workspace", "~/cow"))
+        knowledge_dir = os.path.join(ws_root, "knowledge")
+        folders = []
+        if os.path.exists(knowledge_dir):
+            for item in os.listdir(knowledge_dir):
+                item_path = os.path.join(knowledge_dir, item)
+                if os.path.isdir(item_path):
+                    folders.append(item)
+        return sorted(folders)
+
+
+class PermissionsSyncUsersHandler:
+    """API for syncing users from WeCom API."""
+
+    def POST(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            logger.info("[PermissionsSyncUsersHandler] Syncing users from WeCom API")
+            
+            # Read wecom_user_details.json - try multiple possible paths
+            users_path = self._get_users_path()
+            if not os.path.exists(users_path):
+                # Fallback: try local tmp directory (relative to project)
+                fallback_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "tmp", "wecom_user_details.json")
+                if os.path.exists(fallback_path):
+                    users_path = fallback_path
+                else:
+                    return json.dumps({
+                        "status": "error",
+                        "message": f"用户数据文件不存在 (tried: {users_path}, {fallback_path})"
+                    }, ensure_ascii=False)
+            
+            with open(users_path, 'r', encoding='utf-8') as f:
+                users_data = json.load(f)
+            
+            # Try to enrich department info with full paths from WeCom API
+            enriched_dept = self._fetch_full_department_paths()
+            
+            # Convert to permission config format
+            # wecom_user_details.json format: { "name": { "userid": "...", "department": "..." } }
+            # permission config format: { "userid": { "name": "...", "department": "...", "userid": "..." } }
+            converted_users = {}
+            for name, info in users_data.items():
+                userid = info.get('userid', '')
+                if userid:
+                    department = info.get('department', '')
+                    # 如果从 API 获取到了完整路径，则覆盖当前部门名
+                    if enriched_dept and userid in enriched_dept:
+                        department = enriched_dept[userid]
+                    converted_users[userid] = {
+                        'name': name,
+                        'userid': userid,
+                        'department': department,
+                        'leader_userid': info.get('leader_userid', '')
+                    }
+            
+            # 从 API 获取了活跃用户数据时，过滤掉已离职/禁用的用户
+            if enriched_dept:
+                before_count = len(converted_users)
+                converted_users = {uid: info for uid, info in converted_users.items() if uid in enriched_dept}
+                removed_count = before_count - len(converted_users)
+                if removed_count > 0:
+                    logger.info(f"[PermissionsSyncUsersHandler] 过滤掉 {removed_count} 个离职/禁用用户")
+            
+            # Save to permission config
+            config_path = self._get_config_path()
+            config = {}
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+            
+            config['users'] = converted_users
+            
+            with open(config_path, 'w', encoding='utf-8') as f:
+                json.dump(config, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"[PermissionsSyncUsersHandler] Synced {len(converted_users)} users")
+            
+            return json.dumps({
+                "status": "success",
+                "message": f"成功同步 {len(converted_users)} 个用户",
+                "data": {"count": len(converted_users)}
+            }, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[PermissionsSyncUsersHandler] POST error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+    def _fetch_full_department_paths(self) -> dict:
+        """
+        从企微 API 获取部门树和用户详情，
+        构建 userid -> 完整部门路径 的映射。
+        返回 dict，key=userid, value=完整路径（如 "揽盛电气/研发中心"）。
+        如果获取失败，返回空 dict。
+        """
+        try:
+            from channel.wechatcom.wechatcomapp_channel import WechatComAppChannel
+            ch = WechatComAppChannel()
+            if ch.client is None:
+                logger.warning("[PermissionsSyncUsersHandler] WeCom client 不可用，跳过部门路径增强")
+                return {}
+
+            # 1. 获取全量部门列表
+            dept_list = ch.client.department.get()
+            if not dept_list:
+                return {}
+
+            # 2. 构建 dept_id -> {name, parentid} 映射
+            dept_map = {}
+            for dept in dept_list:
+                dept_id = dept.get('id')
+                if dept_id:
+                    dept_map[dept_id] = {
+                        'name': dept.get('name', ''),
+                        'parentid': dept.get('parentid', 0)
+                    }
+
+            # 3. 构建 dept_id -> 完整部门路径（如 "揽盛电气/研发中心"）
+            dept_paths = {}
+            for dept_id in dept_map:
+                parts = []
+                current = dept_id
+                visited = set()
+                while current and current in dept_map and current not in visited:
+                    visited.add(current)
+                    parts.insert(0, dept_map[current]['name'])
+                    parent = dept_map[current]['parentid']
+                    if parent == 0 or parent == current:
+                        break
+                    current = parent
+                dept_paths[dept_id] = '/'.join(parts)
+
+            # 4. 获取活跃用户列表（status=1 只返回已激活成员，排除离职/禁用）
+            root_dept_id = self._find_root_department_id(dept_list)
+            if not root_dept_id:
+                return {}
+            user_list = ch.client.user.list(root_dept_id, fetch_child=True, simple=False, status=1)
+
+            # 5. 为每个用户构建完整部门路径
+            result = {}
+            for user in user_list:
+                uid = user.get('userid', '')
+                if not uid:
+                    continue
+                dept_ids = user.get('department', [])
+                if dept_ids:
+                    paths = [dept_paths.get(did, '') for did in dept_ids if dept_paths.get(did)]
+                    result[uid] = paths[0] if paths else ''  # 取第一个部门的完整路径
+                else:
+                    result[uid] = ''
+
+            logger.info(f"[PermissionsSyncUsersHandler] 从企微 API 获取到 {len(result)} 个用户的部门路径")
+            return result
+
+        except Exception as e:
+            logger.warning(f"[PermissionsSyncUsersHandler] 获取部门路径失败: {e}")
+            return {}
+
+    def _find_root_department_id(self, dept_list: list) -> int:
+        """从部门列表中找到根部门 ID。"""
+        for dept in dept_list:
+            if dept.get("parentid", 0) == 0:
+                return dept["id"]
+        return dept_list[0]["id"] if dept_list else None
+
+    def _get_users_path(self):
+        """Get path to wecom_user_details.json, checking multiple possible locations."""
+        from common.utils import expand_path
+        
+        # First try configured agent_workspace
+        ws_root = expand_path(conf().get("agent_workspace", "~/cow"))
+        tmp_dir = os.path.join(ws_root, "tmp")
+        path = os.path.join(tmp_dir, "wecom_user_details.json")
+        if os.path.exists(path):
+            return path
+        
+        # Fallback: try local tmp directory (relative to project root)
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        fallback_path = os.path.join(project_root, "tmp", "wecom_user_details.json")
+        if os.path.exists(fallback_path):
+            return fallback_path
+        
+        # Return the configured path as default (caller will handle missing file)
+        return path
+
+    def _get_config_path(self):
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        tmp_dir = os.path.join(project_root, "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        return os.path.join(tmp_dir, "permission_config.json")
+
+
+class PermissionsAuditLogHandler:
+    """API for getting audit log."""
+
+    def GET(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            params = web.input(permission_type='', search='', limit='500')
+            permission_type = params.permission_type.strip()
+            search = params.search.strip()
+            limit = int(params.limit)
+
+            config = self._load_config()
+            audit_log = config.get('audit_log', [])
+
+            if permission_type:
+                audit_log = [entry for entry in audit_log if entry.get('permission_type') == permission_type]
+
+            if search:
+                search_lower = search.lower()
+                audit_log = [
+                    entry for entry in audit_log
+                    if search_lower in (entry.get('operator', '') or '').lower()
+                    or search_lower in (entry.get('target', '') or '').lower()
+                    or search_lower in (entry.get('details', '') or '').lower()
+                    or search_lower in (entry.get('action', '') or '').lower()
+                ]
+
+            audit_log = audit_log[-limit:]
+
+            return json.dumps({
+                "status": "success",
+                "data": {"audit_log": audit_log}
+            }, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[PermissionsAuditLogHandler] GET error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+    def _load_config(self):
+        config_path = self._get_config_path()
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {"audit_log": []}
+
+    def _get_config_path(self):
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        tmp_dir = os.path.join(project_root, "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        return os.path.join(tmp_dir, "permission_config.json")

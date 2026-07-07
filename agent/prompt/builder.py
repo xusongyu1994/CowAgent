@@ -583,6 +583,28 @@ def _build_user_identity_section(user_identity: Dict[str, str], language: str) -
     if user_identity.get("notes"):
         lines.append(f"**{'Notes' if is_en else '备注'}**: {user_identity['notes']}")
 
+    # 权限信息
+    has_permission_info = False
+    if user_identity.get("knowledge_folders"):
+        folders = user_identity["knowledge_folders"]
+        folders_str = "、".join(folders)
+        if is_en:
+            lines.append(f"**Knowledge base access**: authorized folders - {folders_str}")
+        else:
+            lines.append(f"**知识库权限**: 可访问的文件夹 - {folders_str}")
+        has_permission_info = True
+    if user_identity.get("kingdee_enabled"):
+        if is_en:
+            lines.append("**Kingdee access**: enabled")
+        else:
+            lines.append("**金蝶权限**: 已启用")
+        has_permission_info = True
+    if user_identity.get("knowledge_folders") is None and user_identity.get("kingdee_enabled") is None:
+        if is_en:
+            lines.append("**Permissions**: default - no special access")
+        else:
+            lines.append("**权限**: 默认 - 无特殊权限")
+
     lines.append("")
 
     return lines

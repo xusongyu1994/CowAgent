@@ -1171,6 +1171,31 @@ class AgentStreamExecutor:
             if not tool:
                 raise ValueError(self._build_tool_not_found_message(tool_name))
 
+            # 金蝶 MCP 工具权限检查
+            if getattr(tool, 'server_name', None) == 'kingdee-k3cloud':
+                user_id = getattr(self.agent, 'current_user_id', None)
+                if user_id:
+                    from common.permission_checker import is_permissions_enabled, check_kingdee_permission
+                    if is_permissions_enabled():
+                        allowed, scope, message = check_kingdee_permission(user_id)
+                        if not allowed:
+                            logger.warning(f"[Permission] 用户 {user_id} 无金蝶权限，拦截工具调用: {tool_name}")
+                            return {
+                                "status": "error",
+                                "result": f"权限不足：{message}",
+                                "execution_time": 0
+                            }
+
+            # 知识库工具权限检查（对所有可能访问 knowledge/ 的工具）
+            user_id = getattr(self.agent, 'current_user_id', None)
+            if user_id and self._check_knowledge_tool_permission(tool, tool_name, arguments, user_id):
+                logger.warning(f"[Permission] 用户 {user_id} 无知识库权限，拦截工具调用: {tool_name}")
+                return {
+                    "status": "error",
+                    "result": "权限不足：您没有访问知识库的权限",
+                    "execution_time": 0
+                }
+
             # Set tool context
             tool.model = self.model
             tool.context = self.agent
@@ -1233,6 +1258,82 @@ class AgentStreamExecutor:
                 **error_result
             })
             return error_result
+
+    def _check_knowledge_tool_permission(self, tool, tool_name: str, arguments: dict, user_id: str) -> bool:
+        """
+        检查用户是否有权使用知识库工具。
+        
+        Args:
+            tool: 工具实例
+            tool_name: 工具名称
+            arguments: 工具参数
+            user_id: 用户ID
+        
+        Returns:
+            bool: True 表示需要拦截（无权限），False 表示允许执行
+        """
+        try:
+            from common.permission_checker import is_permissions_enabled, check_knowledge_permission
+
+            if not is_permissions_enabled():
+                return False
+
+            # memory_search：用户没有任何知识库权限时拦截
+            if tool_name == 'memory_search':
+                allowed, _ = check_knowledge_permission(user_id)
+                return not allowed
+
+            # 文件系统工具（ls, read, write, edit, cat, cp, mv, grep, send, memory_get, vision 等）访问 knowledge/ 路径时按文件夹检查
+            if tool_name in ('ls', 'read', 'write', 'edit', 'cat', 'cp', 'mv', 'grep', 'send', 'memory_get', 'vision'):
+                path = arguments.get('path', '') or arguments.get('image', '') or arguments.get('src', '') or arguments.get('include', '') or ''
+                folder = self._extract_knowledge_folder(path)
+                if folder:
+                    allowed, _ = check_knowledge_permission(user_id, folder)
+                    return not allowed
+
+            # wecom_app_send 通过 file_path 发送知识库文件时检查
+            if tool_name == 'wecom_app_send':
+                path = arguments.get('file_path', '') or ''
+                folder = self._extract_knowledge_folder(path)
+                if folder:
+                    allowed, _ = check_knowledge_permission(user_id, folder)
+                    return not allowed
+
+            # bash 命令中引用 knowledge/ 路径时检查
+            if tool_name == 'bash':
+                command = arguments.get('command', '') or ''
+                folder = self._extract_knowledge_folder(command)
+                if folder:
+                    allowed, _ = check_knowledge_permission(user_id, folder)
+                    return not allowed
+
+            return False
+        except Exception as e:
+            from common.log import logger
+            logger.error(f"[Permission] 知识库权限检查异常: {e}")
+            return False
+
+    @staticmethod
+    def _extract_knowledge_folder(text: str) -> Optional[str]:
+        """
+        从路径或命令文本中提取知识库文件夹名。
+        如 "knowledge/产品中心/xxx" → "产品中心"
+        如 "C:/Users/揽盛/cow/knowledge/产品中心/xxx" → "产品中心"
+        如 'dir knowledge\\产品中心' → "产品中心"
+        """
+        if not text:
+            return None
+        normalized = text.replace('\\', '/')
+        idx = normalized.find('/knowledge/')
+        if idx < 0 and normalized.startswith('knowledge/'):
+            idx = -1  # 从开头匹配
+        elif idx < 0:
+            return None
+        rel = normalized[idx + 1:] if idx >= 0 else normalized
+        parts = rel.split('/')
+        if len(parts) >= 2:
+            return parts[1]
+        return None
 
     def _build_tool_not_found_message(self, tool_name: str) -> str:
         """Build a helpful error message when a tool is not found.

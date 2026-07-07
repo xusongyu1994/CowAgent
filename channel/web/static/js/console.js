@@ -16,7 +16,11 @@ const I18N = {
         nav_chat: '对话', nav_manage: '管理', nav_monitor: '监控',
         menu_chat: '对话', menu_config: '配置', menu_models: '模型', menu_skills: '技能',
         menu_memory: '记忆', menu_knowledge: '知识', menu_channels: '通道', menu_tasks: '定时',
-        menu_logs: '日志',
+        menu_logs: '日志', menu_permissions: '权限',
+        permissions_title: '权限管理', permissions_desc: '管理用户访问知识库和使用金蝶的权限',
+        permissions_sync_users: '同步用户', permissions_knowledge: '知识库权限', permissions_kingdee: '金蝶权限',
+        permissions_enabled_label: '启用权限管理',
+        permissions_audit: '审计日志',
         models_title: '模型管理',
         models_desc: '统一管理对话、图像、语音、向量、搜索能力',
         models_section_vendors: '厂商凭据',
@@ -260,7 +264,11 @@ const I18N = {
         nav_chat: 'Chat', nav_manage: 'Management', nav_monitor: 'Monitor',
         menu_chat: 'Chat', menu_config: 'Config', menu_models: 'Models', menu_skills: 'Skills',
         menu_memory: 'Memory', menu_knowledge: 'Knowledge', menu_channels: 'Channels', menu_tasks: 'Tasks',
-        menu_logs: 'Logs',
+        menu_logs: 'Logs', menu_permissions: 'Permissions',
+        permissions_title: 'Permissions Management', permissions_desc: 'Manage user access to knowledge base and Kingdee',
+        permissions_sync_users: 'Sync Users', permissions_knowledge: 'Knowledge Permissions', permissions_kingdee: 'Kingdee Permissions',
+        permissions_enabled_label: 'Enable Permissions',
+        permissions_audit: 'Audit Log',
         models_title: 'Models',
         models_desc: 'Manage chat, image, voice, embedding and search capabilities in one place',
         models_section_vendors: 'Provider Credentials',
@@ -712,6 +720,7 @@ const VIEW_META = {
     channels: { group: 'nav_manage',  page: 'menu_channels' },
     tasks:    { group: 'nav_manage',  page: 'menu_tasks' },
     logs:     { group: 'nav_monitor', page: 'menu_logs' },
+    permissions: { group: 'nav_manage', page: 'menu_permissions' },
 };
 
 let currentView = 'chat';
@@ -7760,6 +7769,12 @@ navigateTo = function(viewId) {
     else if (viewId === 'channels') loadChannelsView();
     else if (viewId === 'tasks') loadTasksView();
     else if (viewId === 'logs') startLogStream();
+    else if (viewId === 'permissions') {
+        // Initialize permissions view - load default tab data
+        if (typeof switchPermissionsTab === 'function') {
+            switchPermissionsTab('knowledge');
+        }
+    }
 };
 
 // =====================================================================

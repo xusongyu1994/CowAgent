@@ -41,5 +41,6 @@
   "enable_thinking": false,
   "reasoning_effort": "high",
   "knowledge": true,
-  "self_evolution_enabled": true
+  "self_evolution_enabled": true,
+  "permissions_enabled": false
 }

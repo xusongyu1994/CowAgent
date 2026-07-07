@@ -186,6 +186,11 @@
                             <i class="fas fa-clock item-icon text-xs w-5 text-center"></i>
                             <span data-i18n="menu_tasks">定时</span>
                         </a>
+                        <a class="sidebar-item flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition-all duration-150 hover:bg-white/5 hover:text-neutral-200 text-[14px]"
+                           data-view="permissions">
+                            <i class="fas fa-user-shield item-icon text-xs w-5 text-center"></i>
+                            <span data-i18n="menu_permissions">权限</span>
+                        </a>
                     </div>
                 </div>
 
@@ -1038,6 +1043,209 @@
                 </div>
 
                 <!-- ====================================================== -->
+                <!-- VIEW: Permissions                                        -->
+                <!-- ====================================================== -->
+                <div id="view-permissions" class="view">
+                    <div class="flex-1 min-h-0 overflow-y-auto p-4 md:p-8 lg:p-10">
+                        <div class="max-w-7xl mx-auto">
+                            <!-- Header -->
+                            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
+                                <div>
+                                    <h2 class="text-xl font-bold text-slate-800 dark:text-slate-100" data-i18n="permissions_title">权限管理</h2>
+                                    <p class="text-sm text-slate-500 dark:text-slate-400 mt-1" data-i18n="permissions_desc">管理用户访问知识库和使用金蝶的权限</p>
+                                </div>
+                                <div class="flex items-center gap-4">
+                                    <!-- 权限管理开关 -->
+                                    <label class="flex items-center gap-2 cursor-pointer">
+                                        <div class="relative">
+                                            <input type="checkbox" id="permissions-enabled-toggle" onchange="togglePermissionsEnabled()"
+                                                   class="sr-only">
+                                            <div class="block bg-slate-300 dark:bg-slate-600 w-10 h-6 rounded-full"></div>
+                                            <div class="dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition transform duration-200"></div>
+                                        </div>
+                                        <span class="text-sm text-slate-600 dark:text-slate-400 whitespace-nowrap" data-i18n="permissions_enabled_label">启用权限管理</span>
+                                    </label>
+                                    <button id="permissions-sync-users" onclick="syncWecomUsers()"
+                                            class="px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors cursor-pointer">
+                                        <i class="fas fa-sync-alt mr-1"></i>
+                                        <span data-i18n="permissions_sync_users">同步用户</span>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <!-- Tabs -->
+                            <div class="flex gap-1 mb-6 border-b border-slate-200 dark:border-slate-700">
+                                <button id="permissions-tab-knowledge" onclick="switchPermissionsTab('knowledge')"
+                                        class="px-4 py-2 text-sm font-medium border-b-2 border-primary-500 text-primary-600 dark:text-primary-400 transition-colors cursor-pointer">
+                                    <i class="fas fa-book mr-2"></i>
+                                    <span data-i18n="permissions_knowledge">知识库权限</span>
+                                </button>
+                                <button id="permissions-tab-kingdee" onclick="switchPermissionsTab('kingdee')"
+                                        class="px-4 py-2 text-sm font-medium border-b-2 border-transparent hover:text-slate-700 dark:hover:text-slate-300 text-slate-500 dark:text-slate-400 transition-colors cursor-pointer">
+                                    <i class="fas fa-database mr-2"></i>
+                                    <span data-i18n="permissions_kingdee">金蝶权限</span>
+                                </button>
+                                <button id="permissions-tab-audit" onclick="switchPermissionsTab('audit')"
+                                        class="px-4 py-2 text-sm font-medium border-b-2 border-transparent hover:text-slate-700 dark:hover:text-slate-300 text-slate-500 dark:text-slate-400 transition-colors cursor-pointer">
+                                    <i class="fas fa-history mr-2"></i>
+                                    <span data-i18n="permissions_audit">审计日志</span>
+                                </button>
+                            </div>
+
+                            <!-- Knowledge Permissions Tab -->
+                            <div id="permissions-knowledge-panel">
+                                <div class="flex flex-col sm:flex-row gap-4 mb-4">
+                                    <div class="flex-1">
+                                        <div class="relative">
+                                            <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                                            <input id="permissions-knowledge-search" type="text" placeholder="搜索用户或文件夹..."
+                                                   class="w-full pl-9 pr-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-[#1A1A1A] text-sm focus:outline-none focus:border-primary-500">
+                                        </div>
+                                    </div>
+                                    <div class="flex items-center gap-2">
+                                        <select id="permissions-knowledge-department-filter"
+                                                class="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-[#1A1A1A] text-sm focus:outline-none focus:border-primary-500">
+                                            <option value="">所有部门</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <!-- View Mode Toggle -->
+                                <div class="flex gap-2 mb-4">
+                                    <button id="permissions-knowledge-view-folder" onclick="switchKnowledgeViewMode('folder')"
+                                            class="px-3 py-1.5 text-xs font-medium rounded-lg bg-primary-500 text-white transition-colors cursor-pointer">
+                                        <i class="fas fa-folder mr-1"></i>按文件夹查看
+                                    </button>
+                                    <button id="permissions-knowledge-view-user" onclick="switchKnowledgeViewMode('user')"
+                                            class="px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors cursor-pointer">
+                                        <i class="fas fa-user mr-1"></i>按用户查看
+                                    </button>
+                                </div>
+
+                                <!-- Folder-based View -->
+                                <div id="permissions-knowledge-folder-view">
+                                    <div class="bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+                                        <div class="overflow-x-auto">
+                                            <table class="w-full text-sm">
+                                                <thead>
+                                                    <tr class="bg-slate-50 dark:bg-slate-800/50 text-left text-slate-500 dark:text-slate-400">
+                                                        <th class="px-4 py-3 font-medium">文件夹</th>
+                                                        <th class="px-4 py-3 font-medium">可访问用户</th>
+                                                        <th class="px-4 py-3 font-medium text-right">操作</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody id="permissions-knowledge-folder-tbody">
+                                                    <!-- Dynamic content -->
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- User-based View -->
+                                <div id="permissions-knowledge-user-view" class="hidden">
+                                    <div class="bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+                                        <div class="overflow-x-auto">
+                                            <table class="w-full text-sm">
+                                                <thead>
+                                                    <tr class="bg-slate-50 dark:bg-slate-800/50 text-left text-slate-500 dark:text-slate-400">
+                                                        <th class="px-4 py-3 font-medium">用户</th>
+                                                        <th class="px-4 py-3 font-medium">部门</th>
+                                                        <th class="px-4 py-3 font-medium">可访问文件夹</th>
+                                                        <th class="px-4 py-3 font-medium text-right">操作</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody id="permissions-knowledge-user-tbody">
+                                                    <!-- Dynamic content -->
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Kingdee Permissions Tab -->
+                            <div id="permissions-kingdee-panel" class="hidden">
+                                <div class="flex flex-col sm:flex-row gap-4 mb-4">
+                                    <div class="flex-1">
+                                        <div class="relative">
+                                            <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                                            <input id="permissions-kingdee-search" type="text" placeholder="搜索用户..."
+                                                   class="w-full pl-9 pr-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-[#1A1A1A] text-sm focus:outline-none focus:border-primary-500">
+                                        </div>
+                                    </div>
+                                    <div class="flex items-center gap-2">
+                                        <select id="permissions-kingdee-department-filter"
+                                                class="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-[#1A1A1A] text-sm focus:outline-none focus:border-primary-500">
+                                            <option value="">所有部门</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <div class="bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+                                    <div class="overflow-x-auto">
+                                        <table class="w-full text-sm">
+                                            <thead>
+                                                <tr class="bg-slate-50 dark:bg-slate-800/50 text-left text-slate-500 dark:text-slate-400">
+                                                    <th class="px-4 py-3 font-medium">用户</th>
+                                                    <th class="px-4 py-3 font-medium">部门</th>
+                                                    <th class="px-4 py-3 font-medium">启用金蝶</th>
+                                                    <th class="px-4 py-3 font-medium text-right">操作</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="permissions-kingdee-tbody">
+                                                <!-- Dynamic content -->
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Audit Log Tab -->
+                            <div id="permissions-audit-panel" class="hidden">
+                                <div class="flex flex-col sm:flex-row gap-4 mb-4">
+                                    <div class="flex-1">
+                                        <div class="relative">
+                                            <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-xs"></i>
+                                            <input id="permissions-audit-search" type="text" placeholder="搜索审计日志..."
+                                                   class="w-full pl-9 pr-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-[#1A1A1A] text-sm focus:outline-none focus:border-primary-500">
+                                        </div>
+                                    </div>
+                                    <div class="flex items-center gap-2">
+                                        <select id="permissions-audit-type-filter"
+                                                class="px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-[#1A1A1A] text-sm focus:outline-none focus:border-primary-500">
+                                            <option value="">所有类型</option>
+                                            <option value="knowledge">知识库权限</option>
+                                            <option value="kingdee">金蝶权限</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <div class="bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
+                                    <div class="overflow-x-auto">
+                                        <table class="w-full text-sm">
+                                            <thead>
+                                                <tr class="bg-slate-50 dark:bg-slate-800/50 text-left text-slate-500 dark:text-slate-400">
+                                                    <th class="px-4 py-3 font-medium">时间</th>
+                                                    <th class="px-4 py-3 font-medium">操作人</th>
+                                                    <th class="px-4 py-3 font-medium">操作类型</th>
+                                                    <th class="px-4 py-3 font-medium">权限类型</th>
+                                                    <th class="px-4 py-3 font-medium">操作对象</th>
+                                                    <th class="px-4 py-3 font-medium">详情</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="permissions-audit-tbody">
+                                                <!-- Dynamic content -->
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- ====================================================== -->
                 <!-- VIEW: Logs                                              -->
                 <!-- ====================================================== -->
                 <div id="view-logs" class="view">
@@ -1485,6 +1693,138 @@
         </div>
     </div>
 
+    <!-- Permission Edit Modal (Folder-based) -->
+    <div id="permissions-folder-modal-overlay" class="fixed inset-0 bg-black/50 z-[100] hidden flex items-center justify-center">
+        <div class="bg-white dark:bg-[#1A1A1A] rounded-2xl border border-slate-200 dark:border-white/10 shadow-xl w-full max-w-lg mx-4">
+            <div class="p-6">
+                <div class="flex items-center gap-3 mb-5">
+                    <div class="w-10 h-10 rounded-xl bg-primary-500/10 flex items-center justify-center flex-shrink-0">
+                        <i class="fas fa-folder text-primary-500"></i>
+                    </div>
+                    <div class="min-w-0 flex-1">
+                        <h3 id="permissions-folder-modal-title" class="font-semibold text-slate-800 dark:text-slate-100 text-base">编辑文件夹权限</h3>
+                        <p id="permissions-folder-modal-subtitle" class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">选择可以访问此文件夹的用户</p>
+                    </div>
+                </div>
+
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-1.5">文件夹</label>
+                        <div id="permissions-folder-modal-folder-name" class="px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800 text-sm text-slate-700 dark:text-slate-300"></div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-1.5">
+                            可访问用户
+                            <span id="permissions-folder-modal-count" class="text-xs text-slate-400 ml-1"></span>
+                        </label>
+                        <div class="mb-2">
+                            <input id="permissions-folder-modal-search" type="text" placeholder="搜索用户..."
+                                   class="w-full px-3 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-[#1A1A1A] text-slate-700 dark:text-slate-300 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-primary-500">
+                        </div>
+                        <div id="permissions-folder-modal-users" class="max-h-60 overflow-y-auto space-y-2 border border-slate-200 dark:border-slate-600 rounded-lg p-3">
+                            <!-- Dynamic user checkboxes -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-100 dark:border-white/5 rounded-b-2xl">
+                <button onclick="closePermissionsFolderModal()"
+                        class="px-4 py-2 rounded-lg border border-slate-200 dark:border-white/10 text-slate-600 dark:text-slate-300 text-sm font-medium hover:bg-slate-50 dark:hover:bg-white/5 cursor-pointer transition-colors duration-150">
+                    取消
+                </button>
+                <button onclick="savePermissionsFolderModal()"
+                        class="px-4 py-2 rounded-lg bg-primary-500 hover:bg-primary-600 text-white text-sm font-medium cursor-pointer transition-colors duration-150">
+                    保存
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Permission Edit Modal (User-based) -->
+    <div id="permissions-user-modal-overlay" class="fixed inset-0 bg-black/50 z-[100] hidden flex items-center justify-center">
+        <div class="bg-white dark:bg-[#1A1A1A] rounded-2xl border border-slate-200 dark:border-white/10 shadow-xl w-full max-w-lg mx-4">
+            <div class="p-6">
+                <div class="flex items-center gap-3 mb-5">
+                    <div class="w-10 h-10 rounded-xl bg-primary-500/10 flex items-center justify-center flex-shrink-0">
+                        <i class="fas fa-user text-primary-500"></i>
+                    </div>
+                    <div class="min-w-0 flex-1">
+                        <h3 id="permissions-user-modal-title" class="font-semibold text-slate-800 dark:text-slate-100 text-base">编辑用户知识库权限</h3>
+                        <p id="permissions-user-modal-subtitle" class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">选择用户可以访问的文件夹</p>
+                    </div>
+                </div>
+
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-1.5">用户</label>
+                        <div id="permissions-user-modal-user-name" class="px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800 text-sm text-slate-700 dark:text-slate-300"></div>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-1.5">可访问文件夹</label>
+                        <div class="mb-2">
+                            <input id="permissions-user-modal-search" type="text" placeholder="搜索文件夹..."
+                                   class="w-full px-3 py-1.5 text-xs rounded-lg border border-slate-200 dark:border-slate-600 bg-white dark:bg-[#1A1A1A] text-slate-700 dark:text-slate-300 placeholder-slate-400 dark:placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-primary-500">
+                        </div>
+                        <div id="permissions-user-modal-folders" class="max-h-60 overflow-y-auto space-y-2 border border-slate-200 dark:border-slate-600 rounded-lg p-3">
+                            <!-- Dynamic folder checkboxes -->
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-100 dark:border-white/5 rounded-b-2xl">
+                <button onclick="closePermissionsUserModal()"
+                        class="px-4 py-2 rounded-lg border border-slate-200 dark:border-white/10 text-slate-600 dark:text-slate-300 text-sm font-medium hover:bg-slate-50 dark:hover:bg-white/5 cursor-pointer transition-colors duration-150">
+                    取消
+                </button>
+                <button onclick="savePermissionsUserModal()"
+                        class="px-4 py-2 rounded-lg bg-primary-500 hover:bg-primary-600 text-white text-sm font-medium cursor-pointer transition-colors duration-150">
+                    保存
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Kingdee Permission Edit Modal -->
+    <div id="permissions-kingdee-modal-overlay" class="fixed inset-0 bg-black/50 z-[100] hidden flex items-center justify-center">
+        <div class="bg-white dark:bg-[#1A1A1A] rounded-2xl border border-slate-200 dark:border-white/10 shadow-xl w-full max-w-lg mx-4">
+            <div class="p-6">
+                <div class="flex items-center gap-3 mb-5">
+                    <div class="w-10 h-10 rounded-xl bg-primary-500/10 flex items-center justify-center flex-shrink-0">
+                        <i class="fas fa-database text-primary-500"></i>
+                    </div>
+                    <div class="min-w-0 flex-1">
+                        <h3 class="font-semibold text-slate-800 dark:text-slate-100 text-base">编辑金蝶权限</h3>
+                        <p id="permissions-kingdee-modal-subtitle" class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">配置用户的金蝶访问权限</p>
+                    </div>
+                </div>
+
+                <div class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-1.5">用户</label>
+                        <div id="permissions-kingdee-modal-user-name" class="px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800 text-sm text-slate-700 dark:text-slate-300"></div>
+                    </div>
+                    <div>
+                        <label class="flex items-center gap-2 cursor-pointer">
+                            <input id="permissions-kingdee-modal-enabled" type="checkbox" class="rounded border-slate-300 dark:border-slate-600 text-primary-500 focus:ring-primary-500">
+                            <span class="text-sm text-slate-700 dark:text-slate-300">启用金蝶权限</span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-100 dark:border-white/5 rounded-b-2xl">
+                <button onclick="closePermissionsKingdeeModal()"
+                        class="px-4 py-2 rounded-lg border border-slate-200 dark:border-white/10 text-slate-600 dark:text-slate-300 text-sm font-medium hover:bg-slate-50 dark:hover:bg-white/5 cursor-pointer transition-colors duration-150">
+                    取消
+                </button>
+                <button onclick="savePermissionsKingdeeModal()"
+                        class="px-4 py-2 rounded-lg bg-primary-500 hover:bg-primary-600 text-white text-sm font-medium cursor-pointer transition-colors duration-150">
+                    保存
+                </button>
+            </div>
+        </div>
+    </div>
+
     <script defer src="assets/js/console.js"></script>
+    <script defer src="assets/js/permissions.js"></script>
 </body>
 </html>

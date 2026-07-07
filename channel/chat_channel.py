@@ -4,6 +4,7 @@ import threading
 import time
 from asyncio import CancelledError
 from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Optional
 
 from bridge.context import *
 from bridge.reply import *
@@ -185,6 +186,13 @@ class ChatChannel(Channel):
     def _handle(self, context: Context):
         if context is None or not context.content:
             return
+        
+        # 检查权限管理（知识库和金蝶）
+        permission_reply = self._check_permissions(context)
+        if permission_reply:
+            self._send_reply(context, permission_reply)
+            return
+        
         logger.debug("[chat_channel] handling context: {}".format(context))
         # reply的构建步骤
         reply = self._generate_reply(context)
@@ -440,6 +448,51 @@ class ChatChannel(Channel):
         else:
             # 没有媒体文件，正常发送文本
                 self._send(reply, context)
+
+    def _check_permissions(self, context: Context) -> Optional[Reply]:
+        """
+        检查用户是否有权使用知识库或金蝶。
+        
+        Returns:
+            Reply: 如果没有权限，返回权限拒绝消息；否则返回 None
+        """
+        try:
+            from common.permission_checker import (
+                is_permissions_enabled,
+                check_knowledge_permission,
+                check_kingdee_permission
+            )
+            from bridge.reply import Reply, ReplyType
+            
+            # 如果权限管理未启用，不检查
+            if not is_permissions_enabled():
+                return None
+            
+            userid = context.get("msg").from_user_id if context.get("msg") else None
+            if not userid:
+                return None
+            
+            content = context.content.lower() if context.content else ""
+            
+            # 检查是否是知识库查询
+            if any(keyword in content for keyword in ["知识库", "knowledge", "知识", "查询知识",
+                                                       "产品线", "规格书", "PDF", "说明书",
+                                                       "产品资料", "技术参数", "选型"]):
+                allowed, message = check_knowledge_permission(userid)
+                if not allowed:
+                    return Reply(ReplyType.TEXT, message)
+            
+            # 检查是否是金蝶查询
+            if any(keyword in content for keyword in ["金蝶", "kingdee", "销售订单", "客户", "物料", "库存"]):
+                allowed, scope, message = check_kingdee_permission(userid)
+                if not allowed:
+                    return Reply(ReplyType.TEXT, message)
+            
+        except Exception as e:
+            from common.log import logger
+            logger.error(f"[chat_channel] Permission check error: {e}")
+        
+        return None
 
     def _send(self, reply: Reply, context: Context, retry_cnt=0):
         try:
