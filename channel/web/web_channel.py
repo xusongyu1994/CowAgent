@@ -1295,6 +1295,9 @@ class WebChannel(ChatChannel):
             '/api/permissions/folders', 'PermissionsFoldersHandler',
             '/api/permissions/sync-users', 'PermissionsSyncUsersHandler',
             '/api/permissions/audit-log', 'PermissionsAuditLogHandler',
+            '/api/kingdee/kanban', 'KingdeeKanbanHandler',
+            '/api/kingdee/bill-detail', 'KingdeeBillDetailHandler',
+            '/api/projects/analyze', 'ProjectAnalyzeHandler',
             '/assets/(.*)', 'AssetsHandler',
         )
         app = web.application(urls, globals(), autoreload=False)
@@ -4316,6 +4319,235 @@ class SkillsHandler:
             return json.dumps({"status": "error", "message": str(e)})
 
 
+class KingdeeKanbanHandler:
+    """金蝶云星空订单审批看板 — 按单据类型+状态分组返回看板数据。只读，不走Agent推理链路。"""
+    def GET(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            params = web.input(form_id='SAL_SaleOrder', days='30',
+                               start_date='', end_date='', search='')
+            form_id = params.form_id.strip()
+            try:
+                days = max(1, min(int(params.days), 365))
+            except (ValueError, TypeError):
+                days = 30
+
+            # 构建过滤条件
+            filter_parts = []
+            sd = params.start_date.strip()
+            ed = params.end_date.strip()
+            if sd:
+                filter_parts.append(f"FDate >= '{sd[:10]}'")
+            elif ed:
+                # 仅结束日期: 从30天前到结束
+                fallback = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%Y-%m-%d')
+                filter_parts.append(f"FDate >= '{fallback}'")
+            else:
+                start_date = (datetime.datetime.now() - datetime.timedelta(days=days)).strftime('%Y-%m-%d')
+                filter_parts.append(f"FDate >= '{start_date}'")
+
+            if ed:
+                filter_parts.append(f"FDate <= '{ed[:10]}'")
+
+            search_keyword = params.search.strip()
+            if search_keyword:
+                # 搜索单据编号/客户名称/供应商名称（根据单据类型选择对应字段）
+                search_escaped = search_keyword.replace("'", "''")
+                if form_id == 'PUR_PurchaseOrder':
+                    filter_parts.append(
+                        f"(FBillNo LIKE '%{search_escaped}%' "
+                        f"OR FSupplierId.FName LIKE '%{search_escaped}%')"
+                    )
+                else:
+                    filter_parts.append(
+                        f"(FBillNo LIKE '%{search_escaped}%' "
+                        f"OR FCustId.FName LIKE '%{search_escaped}%')"
+                    )
+
+            filter_string = " AND ".join(filter_parts)
+
+            # 销售订单 / 采购订单用不同字段
+            if form_id == 'PUR_PurchaseOrder':
+                field_keys = "FBillNo,FDate,FCreateDate,FDocumentStatus,FSupplierId.FName,FCreatorId.FName,FAllAmount"
+            else:
+                field_keys = "FBillNo,FDate,FCreateDate,FDocumentStatus,FCustId.FName,FCreatorId.FName,FAllAmount"
+
+            from agent.tools.tool_manager import ToolManager
+            tm = ToolManager()
+            tool = tm._mcp_tool_instances.get("query_bill_json")
+            if not tool:
+                # MCP 可能还在加载中
+                mcp_status = dict(tm._mcp_status)
+                return json.dumps({
+                    "status": "error",
+                    "message": "金蝶MCP工具尚未就绪",
+                    "mcp_status": mcp_status,
+                })
+
+            # 先 count 估算
+            count_tool = tm._mcp_tool_instances.get("count_bill")
+            total_count = None
+            if count_tool:
+                try:
+                    count_result = count_tool.execute({"form_id": form_id, "filter_string": filter_string})
+                    if count_result.status == "success" and count_result.result:
+                        data = count_result.result
+                        if isinstance(data, dict) and "total_count" in data:
+                            total_count = int(data["total_count"])
+                        elif isinstance(data, (int, float)):
+                            total_count = int(data)
+                except Exception:
+                    pass
+
+            top_count = min(total_count if total_count and total_count < 2000 else 2000, 2000)
+            result = tool.execute({
+                "form_id": form_id,
+                "field_keys": field_keys,
+                "filter_string": filter_string,
+                "top_count": top_count,
+            })
+
+            if result.status != "success" or not result.result:
+                return json.dumps({"status": "error", "message": "查询金蝶数据失败"})
+
+            raw = result.result
+
+            # MCP 返回可能是 JSON 字符串或已解析的 dict
+            if isinstance(raw, str):
+                try:
+                    raw = json.loads(raw)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            rows = raw
+            if isinstance(rows, dict):
+                rows = rows.get("rows", rows.get("data", rows.get("result", [])))
+                if isinstance(rows, dict):
+                    rows = [rows]
+            if not isinstance(rows, list):
+                rows = [rows] if rows else []
+
+            # 状态码 → 看板列元数据
+            STATUS_COLUMNS = {
+                "Z": {"title": "kanban_col_draft", "cls": "draft"},
+                "A": {"title": "kanban_col_pending", "cls": "pending"},
+                "B": {"title": "kanban_col_review", "cls": "review"},
+                "C": {"title": "kanban_col_approved", "cls": "approved"},
+                "D": {"title": "kanban_col_rejected", "cls": "rejected"},
+            }
+
+            # 按 FDocumentStatus 分组
+            grouped = {}
+            for col_key in STATUS_COLUMNS:
+                grouped[col_key] = []
+
+            for row in rows:
+                if isinstance(row, dict):
+                    status = row.get("FDocumentStatus", "").strip().upper()
+                    if status not in grouped:
+                        status = "Z"  # 未知状态归入草稿
+                    amount = row.get("FAllAmount", 0)
+                    try:
+                        amount = float(amount) if amount else 0
+                    except (ValueError, TypeError):
+                        amount = 0
+                    card = {
+                        "bill_no": row.get("FBillNo", ""),
+                        "date": row.get("FDate", ""),
+                        "create_date": row.get("FCreateDate", ""),
+                        "customer": row.get("FCustId.FName") or row.get("FSupplierId.FName") or "",
+                        "creator": row.get("FCreatorId.FName", ""),
+                        "amount": amount,
+                        "status": status,
+                    }
+                    grouped[status].append(card)
+
+            columns = []
+            for key, meta in STATUS_COLUMNS.items():
+                cards = grouped.get(key, [])
+                columns.append({
+                    "id": "col-" + key,
+                    "title": meta["title"],
+                    "status": key,
+                    "cls": meta["cls"],
+                    "count": len(cards),
+                    "cards": cards,
+                    "total_amount": round(sum(c["amount"] for c in cards), 2),
+                })
+
+            return json.dumps({
+                "status": "success",
+                "form_id": form_id,
+                "days": days,
+                "start_date": sd or None,
+                "end_date": ed or None,
+                "search": search_keyword or None,
+                "total_count": total_count or len(rows),
+                "columns": columns,
+            }, ensure_ascii=False)
+        except Exception as e:
+            logger.exception(f"[KingdeeKanbanHandler] error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+
+class KingdeeBillDetailHandler:
+    """金蝶单据详情 — 只读，调用 view_bill 获取完整详情"""
+    def GET(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            params = web.input(form_id='', number='')
+            form_id = params.form_id.strip()
+            number = params.number.strip()
+            if not form_id or not number:
+                return json.dumps({"status": "error", "message": "form_id 和 number 为必填"})
+
+            from agent.tools.tool_manager import ToolManager
+            tm = ToolManager()
+            tool = tm._mcp_tool_instances.get("view_bill")
+            if not tool:
+                return json.dumps({"status": "error", "message": "金蝶MCP工具 view_bill 尚未就绪"})
+
+            result = tool.execute({"form_id": form_id, "number": number})
+            if result.status != "success":
+                return json.dumps({"status": "error", "message": "查看单据详情失败"})
+
+            bill_data = result.result
+            if isinstance(bill_data, str):
+                try:
+                    bill_data = json.loads(bill_data)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            # view_bill 返回 Kingdee 标准包装: {"Result": {"ResponseStatus": {...}, "Result": {...实际数据...}}}
+            # 也可能直接返回实际数据，需要兼容
+            if isinstance(bill_data, dict):
+                if bill_data.get("status") == "error":
+                    return json.dumps({"status": "error", "message": bill_data.get("message", "查看单据详情失败")})
+                # 解包第一层 Result
+                inner = bill_data.get("Result", bill_data)
+                if isinstance(inner, dict):
+                    # 检查是否有 ResponseStatus
+                    resp_status = inner.get("ResponseStatus", {})
+                    if isinstance(resp_status, dict) and resp_status.get("IsSuccess") is False:
+                        return json.dumps({"status": "error", "message": resp_status.get("Errors", "查看单据详情失败")})
+                    # 解包第二层 Result
+                    if "Result" in inner:
+                        bill_data = inner["Result"]
+                    else:
+                        bill_data = inner
+
+            return json.dumps({
+                "status": "success",
+                "form_id": form_id,
+                "bill": bill_data,
+            }, ensure_ascii=False)
+        except Exception as e:
+            logger.exception(f"[KingdeeBillDetailHandler] error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+
 class MemoryHandler:
     def GET(self):
         _require_auth()
@@ -5354,3 +5586,281 @@ class PermissionsAuditLogHandler:
         tmp_dir = os.path.join(project_root, "tmp")
         os.makedirs(tmp_dir, exist_ok=True)
         return os.path.join(tmp_dir, "permission_config.json")
+
+
+class ProjectAnalyzeHandler:
+    """接收 Excel 项目文件，解析并分析项目进度。"""
+    MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+
+    def POST(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            import openpyxl
+
+            params = _raw_web_input()
+            file_obj = params.get("file")
+            if file_obj is None or not getattr(file_obj, 'filename', ''):
+                return json.dumps({"status": "error", "message": "未上传文件"})
+
+            content = _read_uploaded_file_bytes_limited(file_obj, self.MAX_FILE_SIZE)
+            if len(content) > self.MAX_FILE_SIZE:
+                return json.dumps({"status": "error", "message": "文件大小不能超过 10MB"})
+
+            workspace_root = _get_workspace_root()
+            tmp_dir = os.path.join(workspace_root, "tmp")
+            os.makedirs(tmp_dir, exist_ok=True)
+
+            filename = getattr(file_obj, "filename", "") or getattr(file_obj, "name", "") or "project.xlsx"
+            tmp_path = os.path.join(tmp_dir, "project_upload_" + str(int(time.time())) + "_" + filename)
+            with open(tmp_path, "wb") as f:
+                f.write(content)
+
+            wb = openpyxl.load_workbook(tmp_path, read_only=True, data_only=True)
+            ws = wb.active
+            if ws is None:
+                wb.close()
+                os.remove(tmp_path)
+                return json.dumps({"status": "error", "message": "无法读取工作表"})
+
+            rows_iter = ws.iter_rows(values_only=True)
+            # 跳过标题行和空行，寻找真正的表头行（支持多级表头合并）
+            header_rows = []
+            for row in rows_iter:
+                processed = [str(h).strip() if h is not None else "" for h in row]
+                non_empty = sum(1 for c in processed if c)
+                # 跳过标题行（仅少数非空单元格，如标题+说明）和全空行
+                if non_empty <= 2:
+                    continue
+                header_rows.append(processed)
+                if len(header_rows) >= 2:
+                    break
+
+            # 合并多级表头：子行有值则覆盖父行
+            headers = []
+            if len(header_rows) >= 2:
+                headers = header_rows[0][:]
+                for i in range(len(headers)):
+                    if i < len(header_rows[1]) and header_rows[1][i]:
+                        headers[i] = header_rows[1][i]
+            elif len(header_rows) == 1:
+                headers = header_rows[0]
+
+            if not headers:
+                wb.close()
+                os.remove(tmp_path)
+                return json.dumps({"status": "error", "message": "Excel 文件为空或表头缺失"})
+
+            col_mapping = self._detect_columns(headers)
+
+            data_rows = []
+            for row in rows_iter:
+                data_row = []
+                for i, cell in enumerate(row):
+                    if cell is not None:
+                        if isinstance(cell, datetime.datetime):
+                            data_row.append(cell.strftime("%Y-%m-%d"))
+                        elif isinstance(cell, datetime.date):
+                            data_row.append(cell.strftime("%Y-%m-%d"))
+                        else:
+                            data_row.append(str(cell))
+                    else:
+                        data_row.append("")
+                data_rows.append(data_row)
+
+            wb.close()
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+            name_col = col_mapping.get("name_column")
+            date_col = col_mapping.get("date_column")
+            prog_col = col_mapping.get("progress_column")
+            resp_col = col_mapping.get("responsible_column")
+
+            # 检测额外有用列（城市、行业、评级、项目节点、半年度目标、本月目标、行动计划）
+            extra_cols = {}
+            extra_keywords = {
+                "city": ["所在城市", "城市", "地区"],
+                "industry": ["行业", "属性"],
+                "rating": ["评级", "客户评级", "客户等级"],
+                "milestone": ["项目节点", "节点"],
+                "halfyear_goal": ["半年度开发目标"],
+                "monthly_goal": ["本月开发目标", "本月目标"],
+                "action_plan": ["行动计划", "本月行动"],
+            }
+            for key, keywords in extra_keywords.items():
+                for i, h in enumerate(headers):
+                    if any(kw.lower() in h.lower().strip() for kw in keywords):
+                        extra_cols[key] = i
+                        break
+
+            def _get_extra(row, key):
+                idx = extra_cols.get(key)
+                return row[idx] if idx is not None and idx < len(row) else ""
+
+            stalled = []
+            now = datetime.datetime.now()
+            stats = {
+                "total": len(data_rows),
+                "stalled": 0,
+                "healthy_rate": 100,
+                "no_date_column": date_col is None,
+                "no_progress_column": prog_col is None,
+                "no_name_column": name_col is None,
+            }
+
+            import re as _re
+
+            _DATE_FORMATS = [
+                "%Y-%m-%d", "%Y/%m/%d", "%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S",
+                "%Y.%m.%d", "%Y年%m月%d日", "%m/%d/%Y", "%d/%m/%Y",
+            ]
+
+            def _parse_date(val):
+                s = str(val).strip()
+                # 1) 标准日期格式
+                for fmt in _DATE_FORMATS:
+                    try:
+                        return datetime.datetime.strptime(s, fmt)
+                    except ValueError:
+                        pass
+
+                # 2) "M.dd" 格式（例如 "3.16" = 3月16日）
+                try:
+                    parts = s.split(".")
+                    if len(parts) == 2:
+                        month, day = int(parts[0]), int(parts[1])
+                        if 1 <= month <= 12 and 1 <= day <= 31:
+                            return datetime.datetime(now.year, month, day)
+                except (ValueError, IndexError):
+                    pass
+
+                # 3) Excel 日期序列号（例如 "46152"）
+                try:
+                    serial = float(s)
+                    if 40000 < serial < 200000:
+                        return datetime.datetime(1899, 12, 30) + datetime.timedelta(days=serial)
+                except (ValueError, TypeError):
+                    pass
+
+                # 4) 中文日期格式 "X月X号"（例如 "5月18号"、"3月16号"）
+                m = _re.match(r"(\d+)月(\d+)号?", s)
+                if m:
+                    month, day = int(m.group(1)), int(m.group(2))
+                    if 1 <= month <= 12 and 1 <= day <= 31:
+                        return datetime.datetime(now.year, month, day)
+
+                # 5) 仅月份 "X月"（例如 "2月"、"3月"，默认当月1号）
+                m = _re.match(r"(\d+)月", s)
+                if m:
+                    month = int(m.group(1))
+                    if 1 <= month <= 12:
+                        return datetime.datetime(now.year, month, 1)
+
+                return None
+
+            for row in data_rows:
+                if date_col is not None and prog_col is not None:
+                    date_val = row[date_col] if date_col < len(row) else ""
+                    prog_val = row[prog_col] if prog_col < len(row) else "0"
+                    if date_val:
+                        dt = _parse_date(date_val)
+                        if dt:
+                            days_diff = (now - dt).days
+                            if days_diff > 30 and not self._is_complete(prog_val):
+                                stats["stalled"] += 1
+                                stalled.append({
+                                    "name": row[name_col] if name_col is not None and name_col < len(row) else "",
+                                    "owner": row[resp_col] if resp_col is not None and resp_col < len(row) else "",
+                                    "days": days_diff,
+                                    "progress": prog_val,
+                                    "city": _get_extra(row, "city"),
+                                    "industry": _get_extra(row, "industry"),
+                                    "rating": _get_extra(row, "rating"),
+                                    "milestone": _get_extra(row, "milestone"),
+                                    "halfyear_goal": _get_extra(row, "halfyear_goal"),
+                                    "monthly_goal": _get_extra(row, "monthly_goal"),
+                                    "action_plan": _get_extra(row, "action_plan"),
+                                })
+                elif date_col is not None and prog_col is None:
+                    date_val = row[date_col] if date_col < len(row) else ""
+                    if date_val:
+                        dt = _parse_date(date_val)
+                        if dt:
+                            days_diff = (now - dt).days
+                            if days_diff > 30:
+                                stats["stalled"] += 1
+                                stalled.append({
+                                    "name": row[name_col] if name_col is not None and name_col < len(row) else "",
+                                    "owner": row[resp_col] if resp_col is not None and resp_col < len(row) else "",
+                                    "days": days_diff,
+                                    "progress": None,
+                                    "city": _get_extra(row, "city"),
+                                    "industry": _get_extra(row, "industry"),
+                                    "rating": _get_extra(row, "rating"),
+                                    "milestone": _get_extra(row, "milestone"),
+                                    "halfyear_goal": _get_extra(row, "halfyear_goal"),
+                                    "monthly_goal": _get_extra(row, "monthly_goal"),
+                                    "action_plan": _get_extra(row, "action_plan"),
+                                })
+
+            if prog_col is not None and not stats["no_progress_column"]:
+                total = max(len(data_rows), 1)
+                stalled_count = stats["stalled"]
+                healthy_count = total - stalled_count
+                stats["healthy_rate"] = round(healthy_count / total * 100)
+
+            logger.info(
+                f"[ProjectAnalyzeHandler] 解析完成: {stats['total']} 行, "
+                f"停滞 {stats['stalled']}, 健康率 {stats['healthy_rate']}%"
+            )
+
+            return json.dumps({
+                "status": "success",
+                "columns": headers,
+                "rows": data_rows,
+                "stalled": stalled,
+                "stats": stats,
+                "column_mapping": col_mapping,
+            }, ensure_ascii=False)
+
+        except ImportError:
+            return json.dumps({"status": "error", "message": "缺少 openpyxl 依赖，请安装: pip install openpyxl"})
+        except Exception as e:
+            logger.exception(f"[ProjectAnalyzeHandler] {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+    def _detect_columns(self, headers):
+        """自动识别各列含义，返回列索引映射。"""
+        mapping = {}
+        patterns = {
+            "name_column": ["项目名称", "项目", "名称", "project", "项目名", "工程名称", "工程"],
+            "progress_column": ["进度", "完成率", "完成度", "progress", "完成比例", "百分比", "完成%"],
+            "responsible_column": ["负责人", "责任人", "所有者", "owner", "assignee", "经办人", "项目经理", "执行人"],
+            "date_column": ["更新时间", "更新日期", "最后更新", "date", "time", "update", "日期", "创建日期", "创建时间", "完成日期", "填写时间"],
+            "status_column": ["状态", "阶段", "status", "state", "当前状态", "项目状态", "阶段状态"],
+        }
+
+        for idx, header in enumerate(headers):
+            h_lower = header.lower().strip()
+            for col_type, keywords in patterns.items():
+                if col_type in mapping:
+                    continue
+                for kw in keywords:
+                    if kw.lower() in h_lower:
+                        mapping[col_type] = idx
+                        break
+
+        return mapping
+
+    @staticmethod
+    def _is_complete(prog_val):
+        """判断进度值是否表示已完成。"""
+        try:
+            prog_str = str(prog_val).strip().replace("%", "")
+            prog_float = float(prog_str)
+            return prog_float >= 100
+        except (ValueError, TypeError):
+            return False

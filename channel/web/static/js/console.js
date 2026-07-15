@@ -16,7 +16,7 @@ const I18N = {
         nav_chat: '对话', nav_manage: '管理', nav_monitor: '监控',
         menu_chat: '对话', menu_config: '配置', menu_models: '模型', menu_skills: '技能',
         menu_memory: '记忆', menu_knowledge: '知识', menu_channels: '通道', menu_tasks: '定时',
-        menu_logs: '日志', menu_permissions: '权限',
+        menu_logs: '日志', menu_permissions: '权限', menu_kanban: '看板', menu_projects: '项目',
         permissions_title: '权限管理', permissions_desc: '管理用户访问知识库和使用金蝶的权限',
         permissions_sync_users: '同步用户', permissions_knowledge: '知识库权限', permissions_kingdee: '金蝶权限',
         permissions_enabled_label: '启用权限管理',
@@ -222,6 +222,34 @@ const I18N = {
         task_delete_confirm_msg: '确定删除该定时任务吗？此操作无法撤销。',
         logs_title: '日志', logs_desc: '实时日志输出 (run.log)',
         logs_live: '实时', logs_coming_msg: '日志流即将在此提供。将连接 run.log 实现类似 tail -f 的实时输出。',
+        kanban_title: '金蝶看板', kanban_desc: '金蝶云星空订单审批状态一览',
+        kanban_sale: '销售订单', kanban_purchase: '采购订单',
+        kanban_loading: '加载看板数据...', kanban_error: '加载失败',
+        kanban_col_draft: '草稿', kanban_col_pending: '待提交', kanban_col_review: '待审核',
+        kanban_col_approved: '已审核', kanban_col_rejected: '重新审核',
+        kanban_total: '合计', kanban_detail_title: '单据详情',
+        kanban_detail_loading: '加载详情中...',
+        kanban_no_data: '暂无数据',
+        kanban_close: '关闭',
+        kanban_view_board: '看板', kanban_view_table: '表格',
+        kanban_view_pie: '饼图', kanban_view_bar: '柱状图', kanban_view_line: '折线图',
+        kanban_filter_placeholder: '搜索企业名称或单据编号...',
+        kanban_table_summary: '共 {count} 条记录，合计金额: ¥{amount}',
+        projects_title: '项目管理', projects_desc: '上传项目 Excel 文件，自动分析进度并检测停滞项目',
+        projects_upload_title: '上传项目文件', projects_upload_hint: '拖拽 Excel 文件到此处，或点击上传',
+        projects_upload_supported: '支持 .xlsx 格式', projects_upload_btn: '选择文件',
+        projects_upload_loading: '正在解析和分析数据...',
+        projects_stats_total: '项目总数', projects_stats_stalled: '停滞项目', projects_stats_healthy: '项目健康率',
+        projects_stalled_title: '停滞项目预警', projects_stalled_desc: '以下项目已超过 30 天未更新进度',
+        projects_stalled_days: '天未更新',
+        projects_table_title: '全部项目数据',
+        projects_error_upload: '上传失败',
+        projects_error_no_date: '未检测到日期列，无法分析停滞项目',
+        projects_error_no_progress: '未检测到进度列，无法计算健康率',
+        projects_error_no_name: '未检测到项目名列',
+        projects_halfyear_goal: '半年度目标',
+        projects_monthly_goal: '本月目标',
+        projects_action_plan: '行动计划',
         new_chat: '新对话',
         session_history: '历史会话',
         today: '今天', yesterday: '昨天', earlier: '更早',
@@ -264,7 +292,7 @@ const I18N = {
         nav_chat: 'Chat', nav_manage: 'Management', nav_monitor: 'Monitor',
         menu_chat: 'Chat', menu_config: 'Config', menu_models: 'Models', menu_skills: 'Skills',
         menu_memory: 'Memory', menu_knowledge: 'Knowledge', menu_channels: 'Channels', menu_tasks: 'Tasks',
-        menu_logs: 'Logs', menu_permissions: 'Permissions',
+        menu_logs: 'Logs', menu_permissions: 'Permissions', menu_kanban: 'Kanban', menu_projects: 'Projects',
         permissions_title: 'Permissions Management', permissions_desc: 'Manage user access to knowledge base and Kingdee',
         permissions_sync_users: 'Sync Users', permissions_knowledge: 'Knowledge Permissions', permissions_kingdee: 'Kingdee Permissions',
         permissions_enabled_label: 'Enable Permissions',
@@ -470,6 +498,34 @@ const I18N = {
         task_delete_confirm_msg: 'Delete this scheduled task? This action cannot be undone.',
         logs_title: 'Logs', logs_desc: 'Real-time log output (run.log)',
         logs_live: 'Live', logs_coming_msg: 'Log streaming will be available here. Connects to run.log for real-time output similar to tail -f.',
+        kanban_title: 'Kingdee Kanban', kanban_desc: 'Kingdee Cloud order approval status at a glance',
+        kanban_sale: 'Sales Order', kanban_purchase: 'Purchase Order',
+        kanban_loading: 'Loading kanban data...', kanban_error: 'Failed to load',
+        kanban_col_draft: 'Draft', kanban_col_pending: 'Pending Submit', kanban_col_review: 'Pending Review',
+        kanban_col_approved: 'Approved', kanban_col_rejected: 'Re-review',
+        kanban_total: 'Total', kanban_detail_title: 'Bill Detail',
+        kanban_detail_loading: 'Loading details...',
+        kanban_no_data: 'No Data',
+        kanban_close: 'Close',
+        kanban_view_board: 'Board', kanban_view_table: 'Table',
+        kanban_view_pie: 'Pie', kanban_view_bar: 'Bar', kanban_view_line: 'Line',
+        kanban_filter_placeholder: 'Search enterprise name or bill no...',
+        kanban_table_summary: '{count} records, total: ¥{amount}',
+        projects_title: 'Project Management', projects_desc: 'Upload project Excel files to analyze progress and detect stalled items',
+        projects_upload_title: 'Upload Project File', projects_upload_hint: 'Drag & drop Excel file here, or click to upload',
+        projects_upload_supported: 'Supports .xlsx format', projects_upload_btn: 'Select File',
+        projects_upload_loading: 'Parsing and analyzing data...',
+        projects_stats_total: 'Total Projects', projects_stats_stalled: 'Stalled Projects', projects_stats_healthy: 'Health Rate',
+        projects_stalled_title: 'Stalled Projects Alert', projects_stalled_desc: 'The following projects haven\'t been updated for over 30 days',
+        projects_stalled_days: ' days without update',
+        projects_table_title: 'All Project Data',
+        projects_error_upload: 'Upload failed',
+        projects_error_no_date: 'No date column detected, unable to analyze stalled projects',
+        projects_error_no_progress: 'No progress column detected, unable to calculate health rate',
+        projects_error_no_name: 'No project name column detected',
+        projects_halfyear_goal: 'Half-Year Goal',
+        projects_monthly_goal: 'Monthly Goal',
+        projects_action_plan: 'Action Plan',
         new_chat: 'New Chat',
         session_history: 'History',
         today: 'Today', yesterday: 'Yesterday', earlier: 'Earlier',
@@ -721,6 +777,8 @@ const VIEW_META = {
     tasks:    { group: 'nav_manage',  page: 'menu_tasks' },
     logs:     { group: 'nav_monitor', page: 'menu_logs' },
     permissions: { group: 'nav_manage', page: 'menu_permissions' },
+    kanban:    { group: 'nav_manage', page: 'menu_kanban' },
+    projects:  { group: 'nav_manage', page: 'menu_projects' },
 };
 
 let currentView = 'chat';
@@ -739,6 +797,8 @@ function navigateTo(viewId) {
     document.getElementById('breadcrumb-page').textContent = t(meta.page);
     document.getElementById('breadcrumb-page').dataset.i18n = meta.page;
     currentView = viewId;
+    if (viewId === 'kanban') loadKanbanView();
+    if (viewId === 'projects') loadProjectsView();
     if (window.innerWidth < 1024) closeSidebar();
 }
 
@@ -7775,7 +7835,1041 @@ navigateTo = function(viewId) {
             switchPermissionsTab('knowledge');
         }
     }
+    else if (viewId === 'kanban') loadKanbanView();
 };
+
+// =====================================================================
+// Kingdee Kanban View
+// =====================================================================
+let _kanbanCurrentForm = 'SAL_SaleOrder';
+let _kanbanColumns = [];
+let _kanbanViewMode = 'kanban';  // kanban | table | pie | bar | line
+let _kanbanChartInstance = null;
+let _kanbanChartAmountInstance = null;
+let _kanbanAllData = null;  // cached raw data for re-render
+
+function _kanbanBuildUrl() {
+    var params = 'form_id=' + encodeURIComponent(_kanbanCurrentForm) + '&days=30';
+    var dateFrom = document.getElementById('kanban-date-from');
+    var dateTo = document.getElementById('kanban-date-to');
+    var searchInput = document.getElementById('kanban-search');
+    if (dateFrom && dateFrom.value) params += '&start_date=' + encodeURIComponent(dateFrom.value);
+    if (dateTo && dateTo.value) params += '&end_date=' + encodeURIComponent(dateTo.value);
+    if (searchInput && searchInput.value.trim()) params += '&search=' + encodeURIComponent(searchInput.value.trim());
+    return '/api/kingdee/kanban?' + params;
+}
+
+function loadKanbanView() {
+    var board = document.getElementById('kanban-board');
+    var tableContainer = document.getElementById('kanban-table-container');
+    var chartContainer = document.getElementById('kanban-chart-container');
+    var loading = document.getElementById('kanban-loading');
+    var errorEl = document.getElementById('kanban-error');
+    var errorMsg = document.getElementById('kanban-error-msg');
+    var columnsEl = document.getElementById('kanban-columns');
+
+    loading.classList.remove('hidden');
+    if (board) board.classList.add('hidden');
+    if (tableContainer) tableContainer.classList.add('hidden');
+    if (chartContainer) chartContainer.classList.add('hidden');
+    errorEl.classList.add('hidden');
+
+    // Update form tab active state
+    document.querySelectorAll('.kanban-tab').forEach(function(btn) {
+        btn.classList.toggle('kanban-tab-active', btn.dataset.form === _kanbanCurrentForm);
+    });
+
+    // Update view mode tab active state
+    document.querySelectorAll('.kanban-view-tab').forEach(function(btn) {
+        btn.classList.toggle('kanban-view-active', btn.dataset.view === _kanbanViewMode);
+    });
+
+    fetch(_kanbanBuildUrl())
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            loading.classList.add('hidden');
+            if (data.status !== 'success') {
+                errorMsg.textContent = data.message || t('kanban_error');
+                errorEl.classList.remove('hidden');
+                return;
+            }
+
+            _kanbanAllData = data;
+            _kanbanColumns = data.columns || [];
+            var totalCount = data.total_count || 0;
+
+            if (totalCount === 0) {
+                if (_kanbanViewMode === 'kanban') {
+                    columnsEl.innerHTML = '<div class="flex items-center justify-center w-full py-20 text-slate-400 dark:text-slate-500 text-sm">暂无数据</div>';
+                    board.classList.remove('hidden');
+                } else if (_kanbanViewMode === 'table') {
+                    document.getElementById('kanban-table-body').innerHTML =
+                        '<tr><td colspan="6" class="text-center py-12 text-slate-400 text-sm">暂无数据</td></tr>';
+                    tableContainer.classList.remove('hidden');
+                } else {
+                    if (chartContainer) {
+                        chartContainer.innerHTML = '<div class="flex items-center justify-center py-20 text-slate-400 text-sm">暂无数据</div>';
+                        chartContainer.classList.remove('hidden');
+                    }
+                }
+                return;
+            }
+
+            // Render based on current view mode
+            if (_kanbanViewMode === 'kanban') {
+                _renderKanbanBoard(columnsEl, board);
+            } else if (_kanbanViewMode === 'table') {
+                _renderKanbanTable(tableContainer);
+            } else {
+                _renderKanbanChart(chartContainer);
+            }
+        })
+        .catch(function(err) {
+            loading.classList.add('hidden');
+            errorMsg.textContent = '网络错误: ' + (err.message || '未知错误');
+            errorEl.classList.remove('hidden');
+        });
+}
+
+function _renderKanbanBoard(columnsEl, board) {
+    columnsEl.innerHTML = '';
+    _kanbanColumns.forEach(function(col, _colIdx) {
+        var colDiv = document.createElement('div');
+        colDiv.className = 'flex-shrink-0 w-72';
+        var accentColor = '';
+        switch (col.cls) {
+            case 'draft':    accentColor = '#94a3b8'; break;
+            case 'pending':  accentColor = '#f59e0b'; break;
+            case 'review':   accentColor = '#3b82f6'; break;
+            case 'approved': accentColor = '#35A85B'; break;
+            case 'rejected': accentColor = '#ef4444'; break;
+        }
+        var html = '<div class="bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-white/10 shadow-sm overflow-hidden">';
+        html += '<div class="px-4 pt-3 pb-2" style="border-top: 3px solid ' + accentColor + '">';
+        html += '  <div class="flex items-center justify-between">';
+        html += '    <div class="flex items-center gap-2">';
+        html += '      <span class="w-2.5 h-2.5 rounded-full" style="background:' + accentColor + '"></span>';
+        html += '      <span class="text-sm font-semibold text-slate-700 dark:text-slate-200">' + t(col.title) + '</span>';
+        html += '    </div>';
+        html += '    <span class="text-xs font-medium px-2 py-0.5 rounded-full bg-slate-100 dark:bg-white/10 text-slate-500 dark:text-slate-400">' + col.count + '</span>';
+        html += '  </div>';
+        if (col.total_amount > 0) {
+            html += '  <div class="mt-1.5 text-[11px] text-slate-400 dark:text-slate-500">' +
+                t('kanban_total') + ': <span class="font-semibold text-emerald-600 dark:text-emerald-400">¥' +
+                Number(col.total_amount).toLocaleString('zh-CN', {minimumFractionDigits:2, maximumFractionDigits:2}) + '</span></div>';
+        }
+        html += '</div>';
+        html += '<div class="border-t border-slate-100 dark:border-white/5"></div>';
+        html += '<div class="kanban-column-body p-3 space-y-2">';
+        col.cards.forEach(function(card) {
+            var amountStr = card.amount
+                ? '¥' + Number(card.amount).toLocaleString('zh-CN', {minimumFractionDigits:2, maximumFractionDigits:2})
+                : '';
+            var label = t(col.title);
+            var name = escapeHtml(card.customer || '');
+            var date = escapeHtml(card.date || card.create_date || '');
+            var billNo = escapeHtml(card.bill_no);
+            html += '<div class="kanban-card bg-slate-50 dark:bg-white/5 rounded-lg p-3 cursor-pointer hover:shadow-md hover:-translate-y-0.5 transition-all duration-150"' +
+                ' onclick="openKanbanDetail(\'' + billNo.replace(/'/g, "\\'") + '\')">' +
+                '  <div class="flex items-start justify-between gap-2 mb-1">' +
+                '    <span class="text-sm font-semibold text-slate-800 dark:text-slate-100 truncate">' + billNo + '</span>';
+            if (amountStr) {
+                html += '    <span class="text-xs font-semibold text-emerald-600 dark:text-emerald-400 whitespace-nowrap">' + amountStr + '</span>';
+            }
+            html += '  </div>';
+            if (name) {
+                html += '  <p class="text-xs text-slate-500 dark:text-slate-400 truncate mb-1">' + name + '</p>';
+            }
+            html += '  <div class="flex items-center justify-between">' +
+                '    <span class="text-[11px] text-slate-400 dark:text-slate-500">' + date + '</span>' +
+                '    <div class="flex items-center gap-1">' +
+                '      <span class="w-1.5 h-1.5 rounded-full" style="background:' + accentColor + '"></span>' +
+                '      <span class="text-[10px] text-slate-400 dark:text-slate-500">' + label + '</span>' +
+                '    </div>' +
+                '  </div>' +
+                '</div>';
+        });
+        html += '</div></div>';
+        colDiv.innerHTML = html;
+        columnsEl.appendChild(colDiv);
+    });
+    board.classList.remove('hidden');
+}
+
+function _renderKanbanTable(container) {
+    container.classList.remove('hidden');
+    var tbody = document.getElementById('kanban-table-body');
+    var summary = document.getElementById('kanban-table-summary');
+    var rows = [];
+    var totalAmount = 0;
+    _kanbanColumns.forEach(function(col) {
+        col.cards.forEach(function(card) {
+            rows.push(card);
+            totalAmount += card.amount || 0;
+        });
+    });
+    var STATUS_LABELS = {
+        'Z': t('kanban_col_draft'),
+        'A': t('kanban_col_pending'),
+        'B': t('kanban_col_review'),
+        'C': t('kanban_col_approved'),
+        'D': t('kanban_col_rejected'),
+    };
+    var statusColors = {'Z':'#94a3b8','A':'#f59e0b','B':'#3b82f6','C':'#35A85B','D':'#ef4444'};
+    tbody.innerHTML = rows.map(function(card) {
+        var s = card.status || 'Z';
+        var amt = card.amount ? '¥' + Number(card.amount).toLocaleString('zh-CN', {minimumFractionDigits:2, maximumFractionDigits:2}) : '';
+        return '<tr class="cursor-pointer hover:bg-slate-50 dark:hover:bg-white/5 transition-colors" ' +
+            'onclick="openKanbanDetail(\'' + escapeHtml(card.bill_no).replace(/'/g, "\\'") + '\')">' +
+            '<td class="font-medium text-slate-700 dark:text-slate-200">' + escapeHtml(card.bill_no) + '</td>' +
+            '<td class="text-slate-500">' + escapeHtml(card.customer) + '</td>' +
+            '<td><span class="inline-flex items-center gap-1"><span class="w-2 h-2 rounded-full" style="background:' + (statusColors[s] || '#94a3b8') + '"></span><span class="text-slate-600 dark:text-slate-300">' + (STATUS_LABELS[s] || s) + '</span></span></td>' +
+            '<td class="font-medium text-emerald-600 dark:text-emerald-400">' + amt + '</td>' +
+            '<td class="text-slate-500">' + escapeHtml(card.creator) + '</td>' +
+            '<td class="text-slate-400 text-[11px]">' + escapeHtml(card.date || card.create_date || '') + '</td>' +
+            '</tr>';
+    }).join('');
+    summary.textContent = t('kanban_table_summary').replace('{count}', rows.length).replace('{amount}',
+        totalAmount.toLocaleString('zh-CN', {minimumFractionDigits:2, maximumFractionDigits:2}));
+}
+
+// Chart.js data label plugin — draws values and percentages on charts
+var _dataLabelPlugin = {
+    id: 'customDataLabels',
+    afterDraw: function(chart) {
+        var ctx = chart.ctx;
+        chart.data.datasets.forEach(function(dataset, i) {
+            var meta = chart.getDatasetMeta(i);
+            if (!meta || !meta.data) return;
+            var isPie = chart.config.type === 'pie';
+            var total = dataset.data.reduce(function(a, b) { return a + b; }, 0);
+            meta.data.forEach(function(element, index) {
+                var value = dataset.data[index];
+                if (value === 0) return;
+                var position = element.tooltipPosition();
+                var label;
+                if (isPie) {
+                    var pct = total > 0 ? (value / total * 100) : 0;
+                    label = pct >= 5 ? Math.round(pct) + '%' : '';
+                } else {
+                    label = value.toLocaleString('zh-CN');
+                }
+                if (!label) return;
+                ctx.fillStyle = isPie ? '#ffffff' : '#475569';
+                ctx.font = isPie ? 'bold 13px sans-serif' : '11px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                if (isPie) {
+                    // Draw background pill for readability
+                    var tw = ctx.measureText(label).width;
+                    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+                    var rx = position.x, ry = position.y;
+                    var r = 12;
+                    // Rounded rect background
+                    ctx.beginPath();
+                    ctx.roundRect(rx - tw/2 - 6, ry - r, tw + 12, r * 2, 6);
+                    ctx.fill();
+                    ctx.fillStyle = '#ffffff';
+                    ctx.fillText(label, rx, ry);
+                } else {
+                    ctx.fillText(label, position.x, position.y - 8);
+                }
+            });
+        });
+    }
+};
+
+function _renderKanbanChart(container) {
+    container.classList.remove('hidden');
+    // Destroy previous charts
+    if (_kanbanChartInstance) { _kanbanChartInstance.destroy(); _kanbanChartInstance = null; }
+    if (_kanbanChartAmountInstance) { _kanbanChartAmountInstance.destroy(); _kanbanChartAmountInstance = null; }
+
+    // Format amount helper
+    function fmtAmt(v) {
+        return '¥' + Number(v || 0).toLocaleString('zh-CN', {minimumFractionDigits:2, maximumFractionDigits:2});
+    }
+
+    var labels = [];
+    var counts = [];
+    var amounts = [];
+    var colors = [];
+    var colRefs = [];
+    _kanbanColumns.forEach(function(col) {
+        if (col.count === 0) return;
+        var c;
+        switch (col.cls) {
+            case 'draft':    c = '#94a3b8'; break;
+            case 'pending':  c = '#f59e0b'; break;
+            case 'review':   c = '#3b82f6'; break;
+            case 'approved': c = '#35A85B'; break;
+            case 'rejected': c = '#ef4444'; break;
+            default: c = '#94a3b8';
+        }
+        labels.push(t(col.title));
+        counts.push(col.count);
+        amounts.push(col.total_amount);
+        colors.push(c);
+        colRefs.push(col);
+    });
+
+    if (labels.length === 0) {
+        container.innerHTML = '<div class="flex items-center justify-center py-20 text-slate-400 text-sm">' + t('kanban_no_data') + '</div>';
+        return;
+    }
+
+    var mainCanvas = document.getElementById('kanban-chart-main');
+    var amountCanvas = document.getElementById('kanban-chart-amount');
+    var ctx1 = mainCanvas ? mainCanvas.getContext('2d') : null;
+    var ctx2 = amountCanvas ? amountCanvas.getContext('2d') : null;
+
+    if (!ctx1 || !ctx2 || typeof Chart === 'undefined') {
+        container.innerHTML = '<div class="flex items-center justify-center py-20 text-slate-400 text-sm">图表库未加载</div>';
+        return;
+    }
+
+    var chartType = _kanbanViewMode;
+    if (chartType === 'kanban' || chartType === 'table') chartType = 'bar';
+
+    // Build common options
+    var totalCount = counts.reduce(function(a, b) { return a + b; }, 0);
+    var totalAmount = amounts.reduce(function(a, b) { return a + b; }, 0);
+
+    function makeOpts(titleText, dataArr, isAmount) {
+        var opts = {
+            responsive: true,
+            maintainAspectRatio: true,
+            plugins: {
+                legend: {
+                    position: chartType === 'pie' ? 'right' : 'top',
+                    labels: { color: '#64748b', font: { size: 11 }, padding: 12 }
+                },
+                title: {
+                    display: true,
+                    text: titleText,
+                    color: '#64748b',
+                    font: { size: 13, weight: '600' }
+                },
+                tooltip: {
+                    backgroundColor: 'rgba(30,41,59,0.9)',
+                    titleFont: { size: 12 },
+                    bodyFont: { size: 11 },
+                    padding: 10,
+                    cornerRadius: 8,
+                    callbacks: {
+                        label: function(context) {
+                            var idx = context.dataIndex;
+                            var col = colRefs[idx];
+                            var val = context.raw;
+                            var pct = totalCount > 0 ? (counts[idx] / totalCount * 100) : 0;
+                            var lines = [];
+                            lines.push('  ' + t(col.title) + ': ' + val.toLocaleString('zh-CN'));
+                            if (!isAmount && totalCount > 0) {
+                                lines.push('  占比: ' + pct.toFixed(1) + '%');
+                            }
+                            if (isAmount && totalAmount > 0) {
+                                lines.push('  金额占比: ' + (val / totalAmount * 100).toFixed(1) + '%');
+                            }
+                            return lines;
+                        },
+                        afterBody: function(context) {
+                            var idx = context[0].dataIndex;
+                            var col = colRefs[idx];
+                            var cards = col.cards || [];
+                            var topCustomers = [];
+                            var seen = {};
+                            cards.forEach(function(c) {
+                                var n = c.customer || '';
+                                if (n && !seen[n] && topCustomers.length < 3) {
+                                    seen[n] = true;
+                                    topCustomers.push(n);
+                                }
+                            });
+                            if (topCustomers.length > 0) {
+                                return ['  主要客户: ' + topCustomers.join(', ')];
+                            }
+                            return [];
+                        }
+                    }
+                }
+            }
+        };
+        if (chartType !== 'pie') {
+            opts.scales = {
+                y: { beginAtZero: true, ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { color: 'rgba(148,163,184,0.12)' } },
+                x: { ticks: { color: '#94a3b8', font: { size: 10 } }, grid: { display: false } }
+            };
+        }
+        if (chartType === 'bar') {
+            opts.plugins.datalabels = undefined;
+        }
+        return opts;
+    }
+
+    // Register custom data label plugin if not already
+    if (!Chart.registry.plugins.get('customDataLabels')) {
+        Chart.register(_dataLabelPlugin);
+    }
+
+    _kanbanChartInstance = new Chart(ctx1, {
+        type: chartType,
+        data: {
+            labels: labels,
+            datasets: [{
+                label: '数量',
+                data: counts,
+                backgroundColor: chartType === 'pie' ? colors : colors.map(function(c) { return c + '80'; }),
+                borderColor: colors,
+                borderWidth: chartType === 'pie' ? 1 : 2,
+                borderRadius: chartType !== 'pie' ? 4 : 0,
+            }]
+        },
+        options: makeOpts('各状态订单数分布', counts, false),
+        plugins: [_dataLabelPlugin]
+    });
+
+    _kanbanChartAmountInstance = new Chart(ctx2, {
+        type: chartType,
+        data: {
+            labels: labels,
+            datasets: [{
+                label: '金额 (¥)',
+                data: amounts,
+                backgroundColor: chartType === 'pie' ? colors : colors.map(function(c) { return c + '80'; }),
+                borderColor: colors,
+                borderWidth: chartType === 'pie' ? 1 : 2,
+                borderRadius: chartType !== 'pie' ? 4 : 0,
+            }]
+        },
+        options: makeOpts('各状态金额汇总', amounts, true),
+        plugins: [_dataLabelPlugin]
+    });
+
+    // ========== Render Data Analysis Panel ==========
+    var analysisEl = document.getElementById('kanban-analysis');
+    if (!analysisEl) return;
+    analysisEl.classList.remove('hidden');
+
+    // KPI Cards
+    var kpiEl = document.getElementById('kanban-analysis-kpi');
+    kpiEl.innerHTML = '';
+    var kpis = [
+        { label: t('kanban_total'), value: totalCount.toLocaleString('zh-CN') + ' 笔', icon: 'fa-file-invoice', color: 'text-blue-500', bg: 'bg-blue-50 dark:bg-blue-900/20' },
+        { label: '总金额', value: fmtAmt(totalAmount), icon: 'fa-money-bill-wave', color: 'text-emerald-500', bg: 'bg-emerald-50 dark:bg-emerald-900/20' },
+        { label: '平均金额', value: fmtAmt(totalCount > 0 ? totalAmount / totalCount : 0), icon: 'fa-chart-line', color: 'text-purple-500', bg: 'bg-purple-50 dark:bg-purple-900/20' },
+        { label: '最大金额', value: fmtAmt(Math.max.apply(null, amounts)), icon: 'fa-arrow-up', color: 'text-amber-500', bg: 'bg-amber-50 dark:bg-amber-900/20' },
+    ];
+    kpis.forEach(function(k) {
+        var card = document.createElement('div');
+        card.className = 'bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-white/10 p-3 flex items-center gap-3';
+        card.innerHTML =
+            '<div class="' + k.bg + ' w-9 h-9 rounded-lg flex items-center justify-center ' + k.color + '"><i class="fas ' + k.icon + ' text-sm"></i></div>' +
+            '<div><div class="text-xs text-slate-400 dark:text-slate-500">' + k.label + '</div><div class="text-sm font-bold text-slate-700 dark:text-slate-200">' + k.value + '</div></div>';
+        kpiEl.appendChild(card);
+    });
+
+    // Status Detail Breakdown
+    var detailEl = document.getElementById('kanban-analysis-detail');
+    detailEl.innerHTML = '';
+    colRefs.forEach(function(col, idx) {
+        var pct = totalCount > 0 ? (col.count / totalCount * 100) : 0;
+        var amtPct = totalAmount > 0 ? (col.total_amount / totalAmount * 100) : 0;
+        var barColor;
+        switch (col.cls) {
+            case 'draft':    barColor = '#94a3b8'; break;
+            case 'pending':  barColor = '#f59e0b'; break;
+            case 'review':   barColor = '#3b82f6'; break;
+            case 'approved': barColor = '#35A85B'; break;
+            case 'rejected': barColor = '#ef4444'; break;
+            default: barColor = '#94a3b8';
+        }
+        var row = document.createElement('div');
+        row.className = 'flex items-center gap-3 py-1.5';
+        row.innerHTML =
+            '<span class="w-2 h-2 rounded-full flex-shrink-0" style="background:' + barColor + '"></span>' +
+            '<span class="text-xs text-slate-600 dark:text-slate-300 w-20 flex-shrink-0">' + t(col.title) + '</span>' +
+            '<div class="flex-1">' +
+                '<div class="h-2 rounded-full bg-slate-100 dark:bg-white/5 overflow-hidden">' +
+                    '<div class="h-full rounded-full transition-all" style="width:' + pct + '%;background:' + barColor + '"></div>' +
+                '</div>' +
+            '</div>' +
+            '<span class="text-xs text-slate-500 dark:text-slate-400 w-16 text-right flex-shrink-0">' + col.count + ' 笔</span>' +
+            '<span class="text-xs text-slate-500 dark:text-slate-400 w-10 text-right flex-shrink-0">' + pct.toFixed(1) + '%</span>' +
+            '<span class="text-xs font-medium text-emerald-600 dark:text-emerald-400 w-28 text-right flex-shrink-0">' + fmtAmt(col.total_amount) + '</span>' +
+            '<span class="text-xs text-slate-400 dark:text-slate-500 w-12 text-right flex-shrink-0">' + amtPct.toFixed(1) + '%</span>';
+        detailEl.appendChild(row);
+    });
+
+    // Summary total row
+    var totalRow = document.createElement('div');
+    totalRow.className = 'flex items-center gap-3 pt-2 mt-1 border-t border-slate-100 dark:border-white/5';
+    totalRow.innerHTML =
+        '<span class="w-2 h-2 rounded-full flex-shrink-0" style="background:#64748b"></span>' +
+        '<span class="text-xs font-semibold text-slate-700 dark:text-slate-200 w-20 flex-shrink-0">合计</span>' +
+        '<div class="flex-1"></div>' +
+        '<span class="text-xs font-semibold text-slate-700 dark:text-slate-200 w-16 text-right flex-shrink-0">' + totalCount + ' 笔</span>' +
+        '<span class="text-xs text-slate-400 w-10 text-right flex-shrink-0">100%</span>' +
+        '<span class="text-xs font-semibold text-emerald-600 dark:text-emerald-400 w-28 text-right flex-shrink-0">' + fmtAmt(totalAmount) + '</span>' +
+        '<span class="text-xs text-slate-400 w-12 text-right flex-shrink-0">100%</span>';
+    detailEl.appendChild(totalRow);
+}
+
+// Tab switching via event delegation
+document.addEventListener('click', function(e) {
+    var tab = e.target.closest('.kanban-tab');
+    if (tab && !tab.classList.contains('kanban-tab-active')) {
+        _kanbanCurrentForm = tab.dataset.form;
+        if (document.getElementById('view-kanban').classList.contains('active')) {
+            loadKanbanView();
+        }
+        return;
+    }
+    // View mode tab switching
+    var viewTab = e.target.closest('.kanban-view-tab');
+    if (viewTab && !viewTab.classList.contains('kanban-view-active')) {
+        _kanbanViewMode = viewTab.dataset.view;
+        if (document.getElementById('view-kanban').classList.contains('active')) {
+            loadKanbanView();
+        }
+        return;
+    }
+});
+
+// Filter button handler
+document.addEventListener('click', function(e) {
+    var filterBtn = e.target.closest('#kanban-filter-btn');
+    if (filterBtn && document.getElementById('view-kanban').classList.contains('active')) {
+        loadKanbanView();
+    }
+});
+
+// Enter key on search field
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+        var searchInput = document.getElementById('kanban-search');
+        if (searchInput && document.contains(e.target) && (e.target === searchInput || searchInput.contains(e.target))) {
+            if (document.getElementById('view-kanban').classList.contains('active')) {
+                loadKanbanView();
+            }
+        }
+    }
+});
+
+// =====================================================================
+// Projects View
+// =====================================================================
+
+var _projectsData = null;
+
+function loadProjectsView() {
+    var uploadArea = document.getElementById('projects-upload-area');
+    var fileInput = document.getElementById('projects-file-input');
+    if (!uploadArea) return;
+
+    var newUploadArea = uploadArea.cloneNode(true);
+    uploadArea.parentNode.replaceChild(newUploadArea, uploadArea);
+    uploadArea = newUploadArea;
+    fileInput = document.getElementById('projects-file-input');
+
+    uploadArea.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        uploadArea.classList.add('drag-over');
+    });
+    uploadArea.addEventListener('dragleave', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        uploadArea.classList.remove('drag-over');
+    });
+    uploadArea.addEventListener('drop', function(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        uploadArea.classList.remove('drag-over');
+        var files = e.dataTransfer.files;
+        if (files.length > 0) handleProjectFile(files[0]);
+    });
+    uploadArea.addEventListener('click', function() {
+        fileInput.click();
+    });
+    fileInput.addEventListener('change', function(e) {
+        if (e.target.files.length > 0) handleProjectFile(e.target.files[0]);
+        fileInput.value = '';
+    });
+}
+
+function handleProjectFile(file) {
+    var ext = file.name.split('.').pop().toLowerCase();
+    if (ext !== 'xlsx' && ext !== 'xls') {
+        showProjectError(t('projects_error_upload') + ': ' + t('projects_upload_supported'));
+        return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+        showProjectError(t('projects_error_upload') + ': 文件大小不能超过 10MB');
+        return;
+    }
+
+    document.getElementById('projects-upload-idle').classList.add('hidden');
+    document.getElementById('projects-upload-loading').classList.remove('hidden');
+    document.getElementById('projects-error').classList.add('hidden');
+    document.getElementById('projects-stats').classList.add('hidden');
+    document.getElementById('projects-stalled-section').classList.add('hidden');
+    document.getElementById('projects-no-date-hint').classList.add('hidden');
+    document.getElementById('projects-table-section').classList.add('hidden');
+    document.getElementById('projects-empty-tip').classList.add('hidden');
+
+    var formData = new FormData();
+    formData.append('file', file);
+
+    fetch('/api/projects/analyze', { method: 'POST', body: formData })
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            document.getElementById('projects-upload-idle').classList.remove('hidden');
+            document.getElementById('projects-upload-loading').classList.add('hidden');
+            if (data.status !== 'success') {
+                showProjectError(data.message || t('projects_error_upload'));
+                return;
+            }
+            _projectsData = data;
+            renderProjectResults(data);
+        })
+        .catch(function(err) {
+            document.getElementById('projects-upload-idle').classList.remove('hidden');
+            document.getElementById('projects-upload-loading').classList.add('hidden');
+            showProjectError(t('projects_error_upload') + ': ' + (err.message || ''));
+        });
+}
+
+function showProjectError(msg) {
+    var errorEl = document.getElementById('projects-error');
+    var errorMsg = document.getElementById('projects-error-msg');
+    errorMsg.textContent = msg;
+    errorEl.classList.remove('hidden');
+}
+
+function renderProjectResults(data) {
+    var stats = data.stats || {};
+    var colMap = data.column_mapping || {};
+
+    renderProjectStats(stats, colMap);
+
+    if (data.stalled && data.stalled.length > 0) {
+        renderProjectStalled(data.stalled, colMap);
+    }
+
+    if (stats.no_date_column) {
+        document.getElementById('projects-no-date-hint').classList.remove('hidden');
+    }
+
+    if (data.rows && data.rows.length > 0) {
+        renderProjectTable(data.columns || [], data.rows, colMap);
+    } else {
+        document.getElementById('projects-empty-tip').classList.remove('hidden');
+    }
+
+    applyI18n();
+}
+
+function renderProjectStats(stats, colMap) {
+    var container = document.getElementById('projects-stats');
+    container.innerHTML = '';
+    container.classList.remove('hidden');
+
+    var totalCard = document.createElement('div');
+    totalCard.className = 'projects-stat-card';
+    totalCard.innerHTML =
+        '<div class="flex items-center gap-3">' +
+            '<div class="projects-stat-icon bg-blue-50 dark:bg-blue-900/20 text-blue-500"><i class="fas fa-tasks"></i></div>' +
+            '<div>' +
+                '<div class="projects-stat-value">' + (stats.total || 0) + '</div>' +
+                '<div class="projects-stat-label">' + t('projects_stats_total') + '</div>' +
+            '</div>' +
+        '</div>';
+    container.appendChild(totalCard);
+
+    var stalledCard = document.createElement('div');
+    stalledCard.className = 'projects-stat-card';
+    stalledCard.innerHTML =
+        '<div class="flex items-center gap-3">' +
+            '<div class="projects-stat-icon bg-red-50 dark:bg-red-900/20 text-red-500"><i class="fas fa-exclamation-circle"></i></div>' +
+            '<div>' +
+                '<div class="projects-stat-value text-red-500">' + (stats.stalled || 0) + '</div>' +
+                '<div class="projects-stat-label">' + t('projects_stats_stalled') + '</div>' +
+            '</div>' +
+        '</div>';
+    container.appendChild(stalledCard);
+
+    if (!stats.no_progress_column) {
+        var rate = stats.healthy_rate !== undefined ? stats.healthy_rate : 100;
+        var color = rate >= 80 ? 'text-emerald-500' : (rate >= 50 ? 'text-amber-500' : 'text-red-500');
+        var healthCard = document.createElement('div');
+        healthCard.className = 'projects-stat-card';
+        healthCard.innerHTML =
+            '<div class="flex items-center gap-3">' +
+                '<div class="projects-stat-icon bg-emerald-50 dark:bg-emerald-900/20 text-emerald-500"><i class="fas fa-heartbeat"></i></div>' +
+                '<div>' +
+                    '<div class="projects-stat-value ' + color + '">' + rate + '%</div>' +
+                    '<div class="projects-stat-label">' + t('projects_stats_healthy') + '</div>' +
+                '</div>' +
+            '</div>';
+        container.appendChild(healthCard);
+    }
+}
+
+function renderProjectStalled(stalled, colMap) {
+    var container = document.getElementById('projects-stalled-list');
+    var section = document.getElementById('projects-stalled-section');
+    container.innerHTML = '';
+    section.classList.remove('hidden');
+
+    var progKey = colMap.progress_column;
+
+    stalled.forEach(function(item) {
+        var card = document.createElement('div');
+        card.className = 'projects-stalled-item';
+
+        // 名称 + 责任人 + 停滞天数
+        var headerHtml =
+            '<div class="projects-stalled-header">' +
+                '<span class="projects-stalled-name">' + escapeHtml(item.name || '') + '</span>' +
+                '<span class="projects-stalled-days"><i class="fas fa-clock text-xs mr-1"></i>' + (item.days || 0) + t('projects_stalled_days') + '</span>' +
+            '</div>';
+
+        // 标签行：城市、行业、评级、责任人
+        var tagsHtml = '<div class="projects-stalled-tags">';
+        if (item.owner) {
+            tagsHtml += '<span class="projects-stalled-tag tag-owner"><i class="fas fa-user text-xs mr-1"></i>' + escapeHtml(item.owner) + '</span>';
+        }
+        if (item.city) {
+            tagsHtml += '<span class="projects-stalled-tag tag-city"><i class="fas fa-map-marker-alt text-xs mr-1"></i>' + escapeHtml(item.city) + '</span>';
+        }
+        if (item.industry) {
+            tagsHtml += '<span class="projects-stalled-tag tag-industry"><i class="fas fa-industry text-xs mr-1"></i>' + escapeHtml(item.industry) + '</span>';
+        }
+        if (item.rating) {
+            tagsHtml += '<span class="projects-stalled-tag tag-rating"><i class="fas fa-star text-xs mr-1"></i>' + escapeHtml(item.rating) + '</span>';
+        }
+        if (item.milestone) {
+            tagsHtml += '<span class="projects-stalled-tag tag-milestone"><i class="fas fa-flag text-xs mr-1"></i>' + escapeHtml(item.milestone) + '</span>';
+        }
+        tagsHtml += '</div>';
+
+        // 进度条
+        var progressHtml = '';
+        if (progKey && item.progress !== undefined) {
+            var p = Math.min(100, Math.max(0, parseFloat(item.progress) || 0));
+            var bc = p < 30 ? '#ef4444' : (p < 70 ? '#f59e0b' : '#22c55e');
+            progressHtml =
+                '<div class="projects-stalled-progress">' +
+                    '<div class="projects-progress-bar">' +
+                        '<div class="projects-progress-fill" style="width:' + p + '%;background:' + bc + '"></div>' +
+                    '</div>' +
+                    '<div class="text-xs text-right text-slate-400 mt-0.5">' + Math.round(p) + '%</div>' +
+                '</div>';
+        }
+
+        // 额外信息：半年度目标 / 本月目标 / 行动计划
+        var extraHtml = '';
+        if (item.halfyear_goal || item.monthly_goal || item.action_plan) {
+            extraHtml = '<div class="projects-stalled-extra">';
+            if (item.halfyear_goal) {
+                extraHtml += '<div class="projects-extra-line"><span class="projects-extra-label">' + t('projects_halfyear_goal') + '</span><span class="projects-extra-value">' + escapeHtml(item.halfyear_goal) + '</span></div>';
+            }
+            if (item.monthly_goal) {
+                extraHtml += '<div class="projects-extra-line"><span class="projects-extra-label">' + t('projects_monthly_goal') + '</span><span class="projects-extra-value">' + escapeHtml(item.monthly_goal) + '</span></div>';
+            }
+            if (item.action_plan) {
+                extraHtml += '<div class="projects-extra-line"><span class="projects-extra-label">' + t('projects_action_plan') + '</span><span class="projects-extra-value">' + escapeHtml(item.action_plan) + '</span></div>';
+            }
+            extraHtml += '</div>';
+        }
+
+        card.innerHTML = headerHtml + tagsHtml + progressHtml + extraHtml;
+        container.appendChild(card);
+    });
+}
+
+function renderProjectTable(cols, rows, colMap) {
+    var thead = document.getElementById('projects-table-head');
+    var tbody = document.getElementById('projects-table-body');
+    var section = document.getElementById('projects-table-section');
+    thead.innerHTML = '';
+    tbody.innerHTML = '';
+    section.classList.remove('hidden');
+
+    var headerRow = '<tr>';
+    cols.forEach(function(col) {
+        headerRow += '<th>' + escapeHtml(col) + '</th>';
+    });
+    headerRow += '</tr>';
+    thead.innerHTML = headerRow;
+
+    rows.forEach(function(row) {
+        var tr = '<tr>';
+        cols.forEach(function(col, idx) {
+            var val = row[idx] !== undefined && row[idx] !== null ? String(row[idx]) : '';
+            tr += '<td>' + escapeHtml(val) + '</td>';
+        });
+        tr += '</tr>';
+        tbody.innerHTML += tr;
+    });
+}
+
+function openKanbanDetail(billNo) {
+    var overlay = document.getElementById('kanban-detail-overlay');
+    var titleEl = document.getElementById('kanban-detail-title');
+    var formIdEl = document.getElementById('kanban-detail-form-id');
+    var bodyEl = document.getElementById('kanban-detail-body');
+
+    titleEl.textContent = billNo;
+    formIdEl.textContent = _kanbanCurrentForm + ' · ' + billNo;
+    bodyEl.innerHTML = '<div class="flex items-center justify-center py-12"><i class="fas fa-spinner fa-spin text-2xl text-primary-500"></i><span class="ml-3 text-sm text-slate-400 dark:text-slate-500">' + t('kanban_detail_loading') + '</span></div>';
+    overlay.classList.remove('hidden');
+
+    fetch('/api/kingdee/bill-detail?form_id=' + encodeURIComponent(_kanbanCurrentForm) + '&number=' + encodeURIComponent(billNo))
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (data.status !== 'success') {
+                bodyEl.innerHTML = '<div class="text-center py-12 text-red-500 text-sm">' + escapeHtml(data.message || '加载失败') + '</div>';
+                return;
+            }
+            var bill = data.bill || {};
+            // view_bill 返回嵌套对象，可能是单条或多条（含表体行）
+            // 统一成数组处理
+            var items = Array.isArray(bill) ? bill : (bill.rows ? bill.rows : [bill]);
+
+            var html = '';
+
+            // ---------- 摘要卡片 (只显示关键字段) ----------
+            var headerItem = items[0] || {};
+            html += '<div class="bg-slate-50 dark:bg-white/5 rounded-xl p-4 mb-6">';
+            html += '  <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">';
+
+            // 关键字段白名单：字段名(兼容F前缀/无F前缀) → 中文标签
+            var KEY_FIELDS = [
+                // view_bill格式(无F) → query_bill格式(有F) → 标签
+                {keys: ['BillNo','FBillNo'],             label: '单据编号',    type: 'text'},
+                {keys: ['Date','FDate'],                 label: '单据日期',    type: 'date'},
+                {keys: ['CreateDate','FCreateDate'],     label: '创建时间',    type: 'date'},
+                {keys: ['DocumentStatus','FDocumentStatus'], label: '单据状态', type: 'status'},
+                {keys: ['CustId','FCustId'],             label: '客户',        type: 'name'},
+                {keys: ['SupplierId','FSupplierId'],     label: '供应商',      type: 'name'},
+                {keys: ['SaleOrgId','FSaleOrgId'],       label: '销售组织',    type: 'name'},
+                {keys: ['SalerId','FSalerId'],           label: '业务员',      type: 'name'},
+                {keys: ['CreatorId','FCreatorId'],       label: '创建人',      type: 'name'},
+                {keys: ['ApproverId','FApproverId'],     label: '审核人',      type: 'name'},
+                {keys: ['ApproveDate','FApproveDate'],   label: '审核日期',    type: 'date'},
+                {keys: ['BillTypeID','FBillTypeID'],     label: '单据类型',    type: 'text'},
+                {keys: ['AllAmount','FAllAmount'],       label: '含税合计',    type: 'money'},
+                {keys: ['Amount','FAmount'],             label: '金额',        type: 'money'},
+                {keys: ['DeliveryDate','FDeliveryDate'], label: '交货日期',    type: 'date'},
+                {keys: ['Note','FNote'],                 label: '备注',        type: 'text'},
+                {keys: ['SettleTypeId','FSettleTypeId'], label: '结算方式',    type: 'name'},
+                {keys: ['ReceiverId','FReceiverId'],     label: '收货方',      type: 'name'},
+                {keys: ['CurrencyId','FCurrencyId'],     label: '币别',        type: 'name'},
+                {keys: ['ExchangeRate','FExchangeRate'], label: '汇率',        type: 'text'},
+            ];
+
+            KEY_FIELDS.forEach(function(fieldInfo) {
+                var val = null;
+                for (var i = 0; i < fieldInfo.keys.length; i++) {
+                    var k = fieldInfo.keys[i];
+                    if (headerItem[k] !== undefined && headerItem[k] !== null) {
+                        val = headerItem[k];
+                        break;
+                    }
+                }
+                if (val === null) return;
+                if (Array.isArray(val)) return;
+
+                var displayVal = _formatDetailValue(fieldInfo.type, val);
+                if (displayVal === '') return;
+
+                html += '    <div class="flex flex-col">' +
+                    '      <span class="text-[11px] text-slate-400 dark:text-slate-500 mb-0.5">' + escapeHtml(fieldInfo.label) + '</span>' +
+                    '      <span class="text-sm text-slate-700 dark:text-slate-200 break-all">' + displayVal + '</span>' +
+                    '    </div>';
+            });
+
+            // 显示白名单之外的其他非数组、非ID字段
+            var SKIP_KEYS = ['Id','FFormId','FormId','SaleOrgId_Id','Entity','Entity_1','FEntity','FEntity_1',
+                             'ResponseStatus'];
+            Object.keys(headerItem).forEach(function(key) {
+                // 已通过白名单展示的跳过
+                for (var i = 0; i < KEY_FIELDS.length; i++) {
+                    for (var j = 0; j < KEY_FIELDS[i].keys.length; j++) {
+                        if (KEY_FIELDS[i].keys[j] === key) return;
+                    }
+                }
+                // 跳过内部字段
+                if (SKIP_KEYS.indexOf(key) >= 0) return;
+                var val = headerItem[key];
+                if (val === null || val === undefined) return;
+                if (Array.isArray(val)) return;
+
+                var displayVal = _formatDetailValue('text', val);
+                if (displayVal === '') return;
+
+                html += '    <div class="flex flex-col">' +
+                    '      <span class="text-[11px] text-slate-400 dark:text-slate-500 mb-0.5">' + escapeHtml(key) + '</span>' +
+                    '      <span class="text-sm text-slate-700 dark:text-slate-200 break-all">' + displayVal + '</span>' +
+                    '    </div>';
+            });
+
+            html += '  </div></div>';
+
+            // ---------- 表体明细行 (检测所有项中是否有数组字段) ----------
+            var bodyRows = [];
+            // 从 headerItem 中找数组字段 (表体明细行)
+            Object.keys(headerItem).forEach(function(key) {
+                var val = headerItem[key];
+                if (Array.isArray(val) && val.length > 0) {
+                    bodyRows = bodyRows.concat(val);
+                }
+            });
+
+            if (bodyRows.length > 0) {
+                html += '<div class="mb-4">';
+                html += '  <h4 class="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-3">物料明细 (' + bodyRows.length + ' 行)</h4>';
+                html += '  <div class="overflow-x-auto rounded-xl border border-slate-200 dark:border-white/10">';
+                html += '    <table class="w-full text-xs">';
+                html += '      <thead><tr class="bg-slate-100 dark:bg-white/10 text-left text-slate-500 dark:text-slate-400">';
+                html += '        <th class="px-3 py-2.5 font-medium">行号</th>';
+                html += '        <th class="px-3 py-2.5 font-medium">物料编码</th>';
+                html += '        <th class="px-3 py-2.5 font-medium">物料名称</th>';
+                html += '        <th class="px-3 py-2.5 font-medium">规格型号</th>';
+                html += '        <th class="px-3 py-2.5 font-medium text-right">数量</th>';
+                html += '        <th class="px-3 py-2.5 font-medium">单位</th>';
+                html += '        <th class="px-3 py-2.5 font-medium text-right">单价</th>';
+                html += '        <th class="px-3 py-2.5 font-medium text-right">金额</th>';
+                html += '      </tr></thead><tbody>';
+                bodyRows.forEach(function(row, idx) {
+                    if (typeof row !== 'object' || row === null) return;
+                    // 兼容 F前缀 和 无F前缀
+                    var fMatNum = _tryField(row, 'MaterialId', 'FMaterialId', 'FNumber');
+                    var fMatName = _tryField(row, 'MaterialId', 'FMaterialId', 'FName');
+                    var fModel = row.Model || row.FModel || '';
+                    var fQty = row.Qty || row.FQty || '';
+                    var fUnit = _tryField(row, 'UnitId', 'FUnitId', 'FName');
+                    var fPrice = _tryField(row, 'Price', 'FPrice', null);
+                    // 金额字段可能叫 AllAmount / Amount / FAllAmount / FAmount
+                    var fAmt = row.AllAmount || row.Amount || row.FAllAmount || row.FAmount || '';
+                    html += '<tr class="border-t border-slate-100 dark:border-white/5 hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">' +
+                        '  <td class="px-3 py-2.5 text-slate-500">' + (idx + 1) + '</td>' +
+                        '  <td class="px-3 py-2.5 text-slate-600 dark:text-slate-300 font-mono">' + escapeHtml(String(fMatNum)) + '</td>' +
+                        '  <td class="px-3 py-2.5 text-slate-700 dark:text-slate-200">' + escapeHtml(String(fMatName)) + '</td>' +
+                        '  <td class="px-3 py-2.5 text-slate-500">' + escapeHtml(String(fModel)) + '</td>' +
+                        '  <td class="px-3 py-2.5 text-right text-slate-600 dark:text-slate-300">' + escapeHtml(_formatNumStr(fQty)) + '</td>' +
+                        '  <td class="px-3 py-2.5 text-slate-500">' + escapeHtml(String(fUnit)) + '</td>' +
+                        '  <td class="px-3 py-2.5 text-right text-slate-600 dark:text-slate-300">' + _formatNumStr(fPrice) + '</td>' +
+                        '  <td class="px-3 py-2.5 text-right font-medium text-emerald-600 dark:text-emerald-400">' + _formatNumStr(fAmt) + '</td>' +
+                        '</tr>';
+                });
+                html += '    </tbody></table>';
+                html += '  </div></div>';
+            }
+
+            bodyEl.innerHTML = html;
+        })
+        .catch(function(err) {
+            bodyEl.innerHTML = '<div class="text-center py-12 text-red-500 text-sm">网络错误: ' + escapeHtml(err.message || '') + '</div>';
+        });
+}
+
+// 格式化详情中的单个字段值（type: text/date/status/money/name）
+function _formatDetailValue(type, val) {
+    if (val === null || val === undefined) return '';
+
+    // 嵌套对象处理（必须在字符串之前处理）
+    if (typeof val === 'object') {
+        // SaleOrgId/FCustId 等关联对象：优先取 Name 数组中的中文值
+        if (Array.isArray(val.Name) && val.Name.length > 0) {
+            for (var i = 0; i < val.Name.length; i++) {
+                var entry = val.Name[i];
+                if (entry && (entry.Key === 2052 || entry.LocaleId === 2052)) {
+                    return escapeHtml(String(entry.Value || entry.Name || ''));
+                }
+            }
+            var first = val.Name[0];
+            if (first) return escapeHtml(String(first.Value || first.Name || ''));
+        }
+        // 标准嵌套：FName / FNumber
+        if (val.FName !== undefined) return escapeHtml(String(val.FName));
+        if (val.FNumber !== undefined) return escapeHtml(String(val.FNumber));
+        if (val.FValue !== undefined) return escapeHtml(String(val.FValue));
+        if (val.Number !== undefined) return escapeHtml(String(val.Number));
+        return '';
+    }
+
+    // 字符串/数字
+    if (typeof val === 'string' || typeof val === 'number') {
+        var s = String(val);
+        // 根据 type 格式化
+        if (type === 'money') {
+            var n = parseFloat(s);
+            if (!isNaN(n)) {
+                return '<span class="font-semibold text-emerald-600 dark:text-emerald-400">¥' +
+                    n.toLocaleString('zh-CN', {minimumFractionDigits:2, maximumFractionDigits:2}) + '</span>';
+            }
+        } else if (type === 'status') {
+            var MAP = {'Z': '草稿', 'A': '待提交', 'B': '审核中', 'C': '已审核', 'D': '重新审核'};
+            return '<span class="font-medium text-primary-600 dark:text-primary-400">' +
+                escapeHtml(MAP[s.trim()] || s) + '</span>';
+        } else if (type === 'date') {
+            if (s.indexOf('T') > 0) s = s.split('T')[0];
+        }
+        return escapeHtml(s);
+    }
+
+    return '';
+}
+
+// 从表体行对象中提取字段值，兼容 F前缀 和 无F前缀 两种格式
+function _tryField(row, fieldNoF, fieldWithF, subField) {
+    if (!row || typeof row !== 'object') return '';
+    // 先尝试无 F 前缀，再试有 F 前缀
+    var val = row[fieldNoF];
+    if (val === undefined || val === null) val = row[fieldWithF];
+    if (val === undefined || val === null) return '';
+
+    // 如果是嵌套对象（如 MaterialId 下有 FNumber/Name）
+    if (subField && typeof val === 'object') {
+        if (val.FNumber !== undefined && subField === 'FNumber') return String(val.FNumber);
+        if (val.Number !== undefined && subField === 'FNumber') return String(val.Number);
+        if (val.FName !== undefined && subField === 'FName') return String(val.FName);
+        // view_bill 中 Name 是数组
+        if (subField === 'FName' && Array.isArray(val.Name)) {
+            for (var i = 0; i < val.Name.length; i++) {
+                var entry = val.Name[i];
+                if (entry && (entry.Key === 2052 || entry.LocaleId === 2052)) {
+                    return String(entry.Value || entry.Name || '');
+                }
+            }
+            if (val.Name.length > 0 && val.Name[0]) return String(val.Name[0].Value || val.Name[0].Name || '');
+        }
+        return '';
+    }
+    return String(val);
+}
+
+function _formatNumStr(val) {
+    if (val === null || val === undefined || val === '') return '';
+    var n = parseFloat(String(val));
+    if (isNaN(n)) return escapeHtml(String(val));
+    return n.toLocaleString('zh-CN', {minimumFractionDigits:2, maximumFractionDigits:4});
+}
+
+function _formatQty(val) {
+    if (val === null || val === undefined || val === '') return '';
+    var n = parseFloat(String(val));
+    if (isNaN(n)) return escapeHtml(String(val));
+    return n.toLocaleString('zh-CN', {minimumFractionDigits:0, maximumFractionDigits:4});
+}
+
+function closeKanbanDetail() {
+    document.getElementById('kanban-detail-overlay').classList.add('hidden');
+}
+
+
 
 // =====================================================================
 // Knowledge View

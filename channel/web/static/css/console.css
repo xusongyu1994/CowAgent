@@ -307,6 +307,188 @@
 .dark .context-divider::before, .dark .context-divider::after {
     background: linear-gradient(to right, transparent, rgba(255,255,255,0.12), transparent);
 }
+
+/* =====================================================================
+   Kanban Board Styles
+   ===================================================================== */
+
+/* Kanban card - subtle lift on hover */
+.kanban-card {
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+.kanban-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+.dark .kanban-card:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* Status dot colors */
+.kanban-dot-draft { background: #94a3b8; }
+.kanban-dot-pending { background: #f59e0b; }
+.kanban-dot-review { background: #3b82f6; }
+.kanban-dot-approved { background: #35A85B; }
+.kanban-dot-rejected { background: #ef4444; }
+
+/* Column scroll fade overlay */
+.kanban-scroll-fade {
+    position: relative;
+}
+.kanban-scroll-fade::after {
+    content: '';
+    position: absolute;
+    right: 0;
+    top: 0;
+    bottom: 0;
+    width: 32px;
+    background: linear-gradient(to right, transparent, rgba(255,255,255,0.95));
+    pointer-events: none;
+    z-index: 1;
+}
+.dark .kanban-scroll-fade::after {
+    background: linear-gradient(to right, transparent, rgba(17,17,17,0.95));
+}
+
+/* Kanban column fixed body height */
+.kanban-column-body {
+    max-height: calc(100vh - 300px);
+    overflow-y: auto;
+}
+
+/* Card enter animation */
+@keyframes kanbanFadeInScale {
+    from { opacity: 0; transform: scale(0.95); }
+    to { opacity: 1; transform: scale(1); }
+}
+.kanban-card-enter {
+    animation: kanbanFadeInScale 0.2s ease-out;
+}
+
+/* Toggle tab pill styles */
+.kanban-tab {
+    background: transparent;
+    color: #64748b;
+    border: 1px solid #e2e8f0;
+}
+.dark .kanban-tab {
+    color: #94a3b8;
+    border-color: rgba(255, 255, 255, 0.15);
+}
+.kanban-tab:hover {
+    background: rgba(53, 168, 91, 0.08);
+    border-color: #35A85B;
+    color: #35A85B;
+}
+.kanban-tab-active {
+    background: #35A85B !important;
+    color: white !important;
+    border-color: #35A85B !important;
+}
+
+/* Column header with status color accent */
+.kanban-col-header {
+    border-left: 3px solid transparent;
+}
+.kanban-col-header.is-draft { border-left-color: #94a3b8; }
+.kanban-col-header.is-pending { border-left-color: #f59e0b; }
+.kanban-col-header.is-review { border-left-color: #3b82f6; }
+.kanban-col-header.is-approved { border-left-color: #35A85B; }
+.kanban-col-header.is-rejected { border-left-color: #ef4444; }
+
+/* Detail modal - key-value list */
+.kanban-detail-row {
+    display: flex;
+    padding: 8px 0;
+    border-bottom: 1px solid #f1f5f9;
+}
+.dark .kanban-detail-row {
+    border-bottom-color: rgba(255, 255, 255, 0.06);
+}
+.kanban-detail-label {
+    width: 120px;
+    flex-shrink: 0;
+    font-size: 13px;
+    color: #94a3b8;
+}
+.kanban-detail-value {
+    flex: 1;
+    font-size: 13px;
+    color: #334155;
+    word-break: break-all;
+}
+.dark .kanban-detail-value {
+    color: #e2e8f0;
+}
+
+/* Amount highlight */
+.kanban-amount {
+    font-weight: 600;
+    color: #059669;
+}
+
+/* View mode toggle tabs */
+.kanban-view-tab {
+    background: transparent;
+    color: #64748b;
+    border: 1px solid #e2e8f0;
+    transition: all 0.15s ease;
+}
+.dark .kanban-view-tab {
+    color: #94a3b8;
+    border-color: rgba(255, 255, 255, 0.15);
+}
+.kanban-view-tab:hover {
+    background: rgba(53, 168, 91, 0.08);
+    border-color: #35A85B;
+    color: #35A85B;
+}
+.kanban-view-active {
+    background: #35A85B !important;
+    color: white !important;
+    border-color: #35A85B !important;
+}
+.kanban-view-active:hover {
+    background: #228547 !important;
+    color: white !important;
+}
+
+/* Table view styles */
+#kanban-table-container table {
+    min-width: 600px;
+}
+#kanban-table-container tbody tr {
+    transition: background 0.12s ease;
+}
+#kanban-table-container tbody tr:hover {
+    background: rgba(0, 0, 0, 0.03);
+}
+.dark #kanban-table-container tbody tr:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+#kanban-table-container tbody td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #f1f5f9;
+}
+.dark #kanban-table-container tbody td {
+    border-bottom-color: rgba(255, 255, 255, 0.06);
+}
+
+/* Chart container */
+#kanban-chart-container canvas {
+    max-height: 350px;
+}
+
+/* Filter inputs */
+#kanban-date-from::-webkit-calendar-picker-indicator,
+#kanban-date-to::-webkit-calendar-picker-indicator {
+    opacity: 0.5;
+    cursor: pointer;
+}
+.dark #kanban-date-from::-webkit-calendar-picker-indicator,
+.dark #kanban-date-to::-webkit-calendar-picker-indicator {
+    filter: invert(1);
+}
 .context-divider span {
     font-size: 12px;
     white-space: nowrap;
@@ -1682,4 +1864,235 @@
 .delete-msg-btn:disabled {
     cursor: not-allowed !important;
     opacity: 0.35 !important;
+}
+
+/* =====================================================================
+   Projects View Styles
+   ===================================================================== */
+
+/* Drag over state for upload area */
+#projects-upload-area.drag-over {
+    border-color: #4ABE6E !important;
+    background: rgba(74, 190, 110, 0.08) !important;
+}
+
+/* Stats cards */
+.projects-stat-card {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 20px;
+    transition: box-shadow 0.15s ease;
+}
+.dark .projects-stat-card {
+    background: #1A1A1A;
+    border-color: rgba(255, 255, 255, 0.08);
+}
+.projects-stat-card:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+}
+.dark .projects-stat-card:hover {
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+.projects-stat-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    flex-shrink: 0;
+}
+.projects-stat-value {
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1.2;
+    color: #1e293b;
+}
+.dark .projects-stat-value {
+    color: #f1f5f9;
+}
+.projects-stat-label {
+    font-size: 12px;
+    color: #94a3b8;
+    margin-top: 2px;
+}
+
+/* Stalled item card */
+.projects-stalled-item {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 14px;
+    background: rgba(255, 255, 255, 0.6);
+    border-radius: 10px;
+    border: 1px solid rgba(239, 68, 68, 0.15);
+}
+.dark .projects-stalled-item {
+    background: rgba(255, 255, 255, 0.03);
+    border-color: rgba(239, 68, 68, 0.2);
+}
+.projects-stalled-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+}
+.projects-stalled-name {
+    font-weight: 600;
+    font-size: 13px;
+    color: #1e293b;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+.dark .projects-stalled-name {
+    color: #e2e8f0;
+}
+.projects-stalled-days {
+    font-size: 12px;
+    color: #ef4444;
+    font-weight: 600;
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+/* Tags row */
+.projects-stalled-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.projects-stalled-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 500;
+    white-space: nowrap;
+}
+.tag-owner { background: #ede9fe; color: #7c3aed; }
+.dark .tag-owner { background: rgba(124, 58, 237, 0.15); color: #a78bfa; }
+.tag-city { background: #dbeafe; color: #2563eb; }
+.dark .tag-city { background: rgba(37, 99, 235, 0.15); color: #93c5fd; }
+.tag-industry { background: #d1fae5; color: #059669; }
+.dark .tag-industry { background: rgba(5, 150, 105, 0.15); color: #6ee7b7; }
+.tag-rating { background: #fef3c7; color: #d97706; }
+.dark .tag-rating { background: rgba(217, 119, 6, 0.15); color: #fcd34d; }
+.tag-milestone { background: #fce7f3; color: #db2777; }
+.dark .tag-milestone { background: rgba(219, 39, 119, 0.15); color: #f9a8d4; }
+
+.projects-stalled-progress {
+    width: 100%;
+}
+/* Extra info section */
+.projects-stalled-extra {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding-top: 6px;
+    border-top: 1px dashed rgba(148, 163, 184, 0.3);
+}
+.projects-extra-line {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    font-size: 12px;
+    line-height: 1.4;
+}
+.projects-extra-label {
+    flex-shrink: 0;
+    color: #94a3b8;
+    min-width: 5em;
+}
+.projects-extra-value {
+    color: #64748b;
+    word-break: break-word;
+}
+.dark .projects-extra-value {
+    color: #94a3b8;
+}
+
+/* Progress bar */
+.projects-progress-bar {
+    height: 6px;
+    border-radius: 999px;
+    background: #e2e8f0;
+    overflow: hidden;
+}
+.dark .projects-progress-bar {
+    background: rgba(255, 255, 255, 0.1);
+}
+.projects-progress-fill {
+    height: 100%;
+    border-radius: 999px;
+    transition: width 0.3s ease;
+}
+
+/* Kanban Data Analysis Panel */
+#kanban-analysis .rounded-xl {
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+#kanban-analysis-kpi > div {
+    transition: transform 0.15s ease;
+}
+#kanban-analysis-kpi > div:hover {
+    transform: translateY(-1px);
+}
+#kanban-analysis-detail .h-2 {
+    min-width: 4px;
+}
+
+/* Table styling — reuse kanban table patterns */
+#projects-table-section table {
+    min-width: 500px;
+}
+#projects-table-section thead th {
+    padding: 10px 14px;
+    text-align: left;
+    font-size: 12px;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    border-bottom: 1px solid #e2e8f0;
+    white-space: nowrap;
+}
+.dark #projects-table-section thead th {
+    color: #94a3b8;
+    border-bottom-color: rgba(255, 255, 255, 0.08);
+}
+#projects-table-section tbody td {
+    padding: 10px 14px;
+    border-bottom: 1px solid #f1f5f9;
+    font-size: 13px;
+    color: #475569;
+}
+.dark #projects-table-section tbody td {
+    border-bottom-color: rgba(255, 255, 255, 0.04);
+    color: #cbd5e1;
+}
+#projects-table-section tbody tr {
+    transition: background 0.12s ease;
+}
+#projects-table-section tbody tr:hover {
+    background: rgba(0, 0, 0, 0.02);
+}
+.dark #projects-table-section tbody tr:hover {
+    background: rgba(255, 255, 255, 0.03);
+}
+#projects-table-section tbody tr:last-child td {
+    border-bottom: none;
+}
+#projects-table-section tbody td:first-child {
+    font-weight: 500;
+}
+
+/* Upload area transitions */
+#projects-upload-area {
+    transition: border-color 0.2s ease, background 0.2s ease;
 }
