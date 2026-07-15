@@ -688,8 +688,11 @@ class CowCliPlugin(Plugin):
                 if resolved:
                     updates["bot_type"] = resolved
 
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        config_path = os.path.join(project_root, "config.json")
+        # Write to the data dir (~/.cow in desktop, project root otherwise), not
+        # __file__-relative — the latter lives inside the read-only .app bundle
+        # when frozen and writing there breaks the macOS code-signature seal.
+        from config import get_data_root
+        config_path = os.path.join(get_data_root(), "config.json")
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 file_config = _json.load(f)
@@ -810,8 +813,8 @@ class CowCliPlugin(Plugin):
                 "you can also run `cow install-browser` in a terminal.",
             )
         return _t(
-            "✅ 安装流程已结束。请重启 CowAgent 后使用 browser 工具（进度见上方消息）。",
-            "✅ Installation finished. Restart CowAgent to use the browser tool (see messages above for progress).",
+            "✅ 安装流程已结束。请重启 CowAgent 后使用 browser 工具。",
+            "✅ Installation finished. Restart CowAgent to use the browser tool.",
         )
 
     # ------------------------------------------------------------------
@@ -1630,8 +1633,9 @@ class CowCliPlugin(Plugin):
 
         conf()["knowledge"] = enabled
 
-        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        config_path = os.path.join(project_root, "config.json")
+        # Data dir (~/.cow in desktop), not __file__-relative — see _config_set.
+        from config import get_data_root
+        config_path = os.path.join(get_data_root(), "config.json")
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 file_config = _json.load(f)

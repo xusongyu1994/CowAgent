@@ -1,10 +1,10 @@
 <p align="center"><img src= "https://github.com/user-attachments/assets/eca9a9ec-8534-4615-9e0f-96c5ac1d10a3" alt="CowAgent" width="420" /></p>
 
 <p align="center">
-  <a href="https://github.com/zhayujie/CowAgent/releases/latest"><img src="https://img.shields.io/github/v/release/zhayujie/CowAgent?cacheSeconds=3600" alt="Latest release"></a>
-  <a href="https://github.com/zhayujie/CowAgent/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License: MIT"></a>
-  <a href="https://github.com/zhayujie/CowAgent"><img src="https://img.shields.io/github/stars/zhayujie/CowAgent?style=flat-square&cacheSeconds=3600" alt="Stars"></a>
-  <a href="https://docs.cowagent.ai/zh"><img src="https://img.shields.io/badge/%E6%96%87%E6%A1%A3-cowagent.ai-blue?style=flat&logo=readthedocs&logoColor=white" alt="文档"></a>
+  <a href="https://github.com/zhayujie/CowAgent/releases/latest"><img src="https://img.shields.io/github/v/release/zhayujie/CowAgent?cacheSeconds=3600" alt="Latest release" /></a>
+  <a href="https://github.com/zhayujie/CowAgent/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green.svg" alt="License: MIT" /></a>
+  <a href="https://github.com/zhayujie/CowAgent"><img src="https://img.shields.io/github/stars/zhayujie/CowAgent?style=flat-square&cacheSeconds=3600" alt="Stars" /></a>
+  <a href="https://docs.cowagent.ai/zh"><img src="https://img.shields.io/badge/%E6%96%87%E6%A1%A3-cowagent.ai-blue?style=flat&logo=readthedocs&logoColor=white" alt="文档" /></a>
 </p>
 
 <p align="center">
@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  [<a href="../../README.md">English</a>] | [中文] | [<a href="../ja/README.md">日本語</a>]
+  [<a href="../../README.md">English</a>] | [中文] | [<a href="README-Hant.md">繁體中文</a>] | [<a href="../ja/README.md">日本語</a>]
 </p>
 
 **CowAgent** 是一个开源的超级 AI 助理，能够主动思考和规划任务、操作计算机和外部资源、创造和执行 Skills、构建知识库与长期记忆、通过自主进化与你一同成长，是 Agent Harness 工程的最佳实践之一。
@@ -24,6 +24,7 @@ CowAgent 轻量、易部署、可扩展，自由接入主流大模型，覆盖�
   <a href="https://docs.cowagent.ai/zh/">📖 文档中心</a> &nbsp;·&nbsp;
   <a href="https://docs.cowagent.ai/zh/guide/quick-start">🚀 快速开始</a> &nbsp;·&nbsp;
   <a href="https://skills.cowagent.ai/">🧩 技能广场</a> &nbsp;·&nbsp;
+  <a href="https://cowagent.ai/zh/download/">💻 下载客户端</a> &nbsp;·&nbsp;
   <a href="https://link-ai.tech/cowagent/create">☁️ 在线体验</a>
 </p>
 
@@ -95,6 +96,8 @@ cow skill install <名称>           # 安装技能
 cow install-browser                # 安装浏览器工具
 ```
 
+> 💻 桌面客户端：前往 **[下载 CowAgent 桌面客户端](https://cowagent.ai/zh/download/)**（macOS / Windows），内置 Agent 运行环境，开箱即用。
+
 <br/>
 
 ## 🤖 模型支持
@@ -105,9 +108,9 @@ CowAgent 支持国内外主流厂商的大语言模型。**文本对话、图像
 | --- | --- | :-: | :-: | :-: | :-: | :-: | :-: |
 | [DeepSeek](https://docs.cowagent.ai/zh/models/deepseek) | deepseek-v4-flash / pro | ✅ | | | | | |
 | [MiniMax](https://docs.cowagent.ai/zh/models/minimax) | MiniMax-M3 | ✅ | ✅ | ✅ | | ✅ | |
-| [Claude](https://docs.cowagent.ai/zh/models/claude) | claude-sonnet-5 | ✅ | ✅ | | | | |
+| [Claude](https://docs.cowagent.ai/zh/models/claude) | claude-sonnet-5 / fable-5 | ✅ | ✅ | | | | |
 | [Gemini](https://docs.cowagent.ai/zh/models/gemini) | gemini-3.5-flash | ✅ | ✅ | ✅ | | | |
-| [OpenAI](https://docs.cowagent.ai/zh/models/openai) | gpt-5.5、o 系列 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [OpenAI](https://docs.cowagent.ai/zh/models/openai) | gpt-5.6 系列 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [智谱 GLM](https://docs.cowagent.ai/zh/models/glm) | glm-5.2、glm-5v-turbo | ✅ | ✅ | | ✅ | | ✅ |
 | [通义千问](https://docs.cowagent.ai/zh/models/qwen) | qwen3.7-plus | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [豆包 Doubao](https://docs.cowagent.ai/zh/models/doubao) | doubao-seed-2.1 系列 | ✅ | ✅ | ✅ | | | ✅ |
@@ -200,6 +203,8 @@ CowAgent 支持国内外主流厂商的大语言模型。**文本对话、图像
 
 ## 🏷 更新日志
 
+> **2026.07.08：** [v2.1.3](https://github.com/zhayujie/CowAgent/releases/tag/2.1.3) — [桌面客户端](https://cowagent.ai/zh/download/)正式发布（macOS / Windows）、知识库文档管理增强、MCP 工具智能检索、繁体中文支持、新模型接入
+
 > **2026.06.18：** [v2.1.2](https://github.com/zhayujie/CowAgent/releases/tag/2.1.2) — Web 控制台升级（定时任务管理、知识库分类、多模型自定义厂商）、自主进化优化、新模型接入（kimi-k2.7-code、glm-5.2）、安全加固和体验优化
 
 > **2026.06.09：** [v2.1.1](https://github.com/zhayujie/CowAgent/releases/tag/2.1.1) — 自进化能力、Web 控制台升级（消息管理、多会话并行）、新模型接入（MiniMax-M3、qwen3.7-plus）、Python 3.13 支持
@@ -228,7 +233,7 @@ CowAgent 支持国内外主流厂商的大语言模型。**文本对话、图像
 
 扫码加入微信开源交流群：
 
-<img width="130" src="https://img-1317903499.cos.ap-guangzhou.myqcloud.com/docs/open-community.png">
+<img width="130" src="https://img-1317903499.cos.ap-guangzhou.myqcloud.com/docs/open-community.png" />
 
 也可通过以下方式获取支持：
 
@@ -247,7 +252,7 @@ CowAgent 支持国内外主流厂商的大语言模型。**文本对话、图像
 
 ## 🏢 企业服务
 
-<a href="https://link-ai.tech" target="_blank"><img width="650" src="https://cdn.link-ai.tech/image/link-ai-intro.jpg"></a>
+<a href="https://link-ai.tech" target="_blank"><img width="650" src="https://cdn.link-ai.tech/image/link-ai-intro.jpg" /></a>
 
 > [LinkAI](https://link-ai.tech/) 是面向企业和个人的一站式 AI 智能体平台，为 CowAgent 提供云端托管和企业级支持：
 >
@@ -257,7 +262,7 @@ CowAgent 支持国内外主流厂商的大语言模型。**文本对话、图像
 
 **产品咨询和企业服务** 可联系产品客服：
 
-<img width="130" src="https://cdn.link-ai.tech/portal/linkai-customer-service.png">
+<img width="130" src="https://cdn.link-ai.tech/portal/linkai-customer-service.png" />
 
 <br/>
 
