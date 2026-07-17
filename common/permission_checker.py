@@ -82,8 +82,8 @@ def check_knowledge_permission(userid: str, folder: str = None) -> tuple[bool, s
     folder_permissions = config.get('folder_permissions', {})
     
     if not folder_permissions:
-        # 如果没有配置任何权限，默认允许访问
-        return True, ""
+        # 权限已启用但未配置任何文件夹权限，所有用户均无权限
+        return False, "您没有访问知识库的权限"
     
     if folder:
         # 检查特定文件夹的权限

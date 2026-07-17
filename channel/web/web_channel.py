@@ -5535,50 +5535,22 @@ class PermissionsSyncUsersHandler:
         try:
             logger.info("[PermissionsSyncUsersHandler] Syncing users from WeCom API")
             
-            # Read wecom_user_details.json - try multiple possible paths
-            users_path = self._get_users_path()
-            if not os.path.exists(users_path):
-                # Fallback: try local tmp directory (relative to project)
-                fallback_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "tmp", "wecom_user_details.json")
-                if os.path.exists(fallback_path):
-                    users_path = fallback_path
-                else:
-                    return json.dumps({
-                        "status": "error",
-                        "message": f"用户数据文件不存在 (tried: {users_path}, {fallback_path})"
-                    }, ensure_ascii=False)
+            # 优先从企微 API 获取全量用户数据
+            api_users = self._fetch_all_users_from_api()
             
-            with open(users_path, 'r', encoding='utf-8') as f:
-                users_data = json.load(f)
+            if api_users is not None:
+                # API 可用 → 直接使用 API 数据（最新最准确）
+                converted_users = api_users
+                logger.info(f"[PermissionsSyncUsersHandler] 从企微 API 获取到 {len(converted_users)} 个用户")
+            else:
+                # API 不可用 → 降级到读取 wecom_user_details.json（现有逻辑）
+                converted_users = self._fallback_read_file_users()
             
-            # Try to enrich department info with full paths from WeCom API
-            enriched_dept = self._fetch_full_department_paths()
-            
-            # Convert to permission config format
-            # wecom_user_details.json format: { "name": { "userid": "...", "department": "..." } }
-            # permission config format: { "userid": { "name": "...", "department": "...", "userid": "..." } }
-            converted_users = {}
-            for name, info in users_data.items():
-                userid = info.get('userid', '')
-                if userid:
-                    department = info.get('department', '')
-                    # 如果从 API 获取到了完整路径，则覆盖当前部门名
-                    if enriched_dept and userid in enriched_dept:
-                        department = enriched_dept[userid]
-                    converted_users[userid] = {
-                        'name': name,
-                        'userid': userid,
-                        'department': department,
-                        'leader_userid': info.get('leader_userid', '')
-                    }
-            
-            # 从 API 获取了活跃用户数据时，过滤掉已离职/禁用的用户
-            if enriched_dept:
-                before_count = len(converted_users)
-                converted_users = {uid: info for uid, info in converted_users.items() if uid in enriched_dept}
-                removed_count = before_count - len(converted_users)
-                if removed_count > 0:
-                    logger.info(f"[PermissionsSyncUsersHandler] 过滤掉 {removed_count} 个离职/禁用用户")
+            if converted_users is None:
+                return json.dumps({
+                    "status": "error",
+                    "message": "同步用户失败：企微API不可用且本地用户数据文件也不存在"
+                }, ensure_ascii=False)
             
             # Save to permission config
             config_path = self._get_config_path()
@@ -5589,8 +5561,16 @@ class PermissionsSyncUsersHandler:
             
             config['users'] = converted_users
             
+            # 清理 folder_permissions 和 kingdee_permissions 中的离职用户引用
+            valid_userids = set(converted_users.keys())
+            config = self._cleanup_invalid_user_refs(config, valid_userids)
+            
             with open(config_path, 'w', encoding='utf-8') as f:
                 json.dump(config, f, ensure_ascii=False, indent=2)
+            
+            # 如果数据来自 API（最新最准确），同时覆写 wecom_user_details.json 缓存
+            if api_users is not None:
+                self._write_clean_wecom_cache(converted_users)
             
             logger.info(f"[PermissionsSyncUsersHandler] Synced {len(converted_users)} users")
             
@@ -5602,6 +5582,141 @@ class PermissionsSyncUsersHandler:
         except Exception as e:
             logger.error(f"[PermissionsSyncUsersHandler] POST error: {e}")
             return json.dumps({"status": "error", "message": str(e)})
+
+    def _fetch_all_users_from_api(self) -> dict:
+        """
+        从企微 API 获取全量用户数据，直接构建 permission config 格式的用户列表。
+        
+        Returns:
+            dict: {userid: {name, userid, department, leader_userid}} 
+                  如果 API 不可用返回 None
+        """
+        try:
+            from channel.wechatcom.wechatcomapp_channel import WechatComAppChannel
+            ch = WechatComAppChannel()
+            if ch.client is None:
+                logger.warning("[PermissionsSyncUsersHandler] WeCom client 不可用")
+                return None
+
+            # 1. 获取全量部门列表
+            dept_list = ch.client.department.get()
+            if not dept_list:
+                return None
+
+            # 2. 构建 dept_id -> {name, parentid} 映射
+            dept_map = {}
+            for dept in dept_list:
+                dept_id = dept.get('id')
+                if dept_id:
+                    dept_map[dept_id] = {
+                        'name': dept.get('name', ''),
+                        'parentid': dept.get('parentid', 0)
+                    }
+
+            # 3. 构建 dept_id -> 完整部门路径（如 "揽盛电气/研发中心"）
+            dept_paths = {}
+            for dept_id in dept_map:
+                parts = []
+                current = dept_id
+                visited = set()
+                while current and current in dept_map and current not in visited:
+                    visited.add(current)
+                    parts.insert(0, dept_map[current]['name'])
+                    parent = dept_map[current]['parentid']
+                    if parent == 0 or parent == current:
+                        break
+                    current = parent
+                dept_paths[dept_id] = '/'.join(parts)
+
+            # 4. 获取活跃用户列表（status=1 只返回已激活成员，排除离职/禁用）
+            root_dept_id = self._find_root_department_id(dept_list)
+            if not root_dept_id:
+                return None
+            user_list = ch.client.user.list(root_dept_id, fetch_child=True, simple=False, status=1)
+
+            # 5. 构建 full user info dict
+            result = {}
+            for user in user_list:
+                uid = user.get('userid', '')
+                if not uid:
+                    continue
+                
+                # 构建部门路径（取第一个部门）
+                dept_ids = user.get('department', [])
+                department = ''
+                if dept_ids:
+                    paths = [dept_paths.get(did, '') for did in dept_ids if dept_paths.get(did)]
+                    department = paths[0] if paths else ''
+                
+                name = user.get('name', '')
+                # 如果 name 为空，尝试用别名
+                if not name:
+                    alias = user.get('alias', '') or user.get('mobile', '') or uid
+                    name = alias
+                
+                result[uid] = {
+                    'name': name,
+                    'userid': uid,
+                    'department': department,
+                    'leader_userid': user.get('leader_userid', '')
+                }
+
+            logger.info(f"[PermissionsSyncUsersHandler] 从企微 API 获取到 {len(result)} 个用户")
+            return result
+
+        except Exception as e:
+            logger.warning(f"[PermissionsSyncUsersHandler] 从 API 获取用户失败: {e}")
+            return None
+
+    def _fallback_read_file_users(self) -> dict:
+        """
+        降级方案：从 wecom_user_details.json 读取用户数据。
+        Returns dict 或 None（文件不存在时）。
+        """
+        users_path = self._get_users_path()
+        if not os.path.exists(users_path):
+            fallback_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                "tmp", "wecom_user_details.json"
+            )
+            if os.path.exists(fallback_path):
+                users_path = fallback_path
+            else:
+                logger.error(f"[PermissionsSyncUsersHandler] 用户数据文件不存在 (tried: {users_path}, {fallback_path})")
+                return None
+        
+        with open(users_path, 'r', encoding='utf-8') as f:
+            users_data = json.load(f)
+        
+        # 尝试从 API 获取部门路径（仅用于增强部门信息）
+        enriched_dept = self._fetch_full_department_paths()
+        
+        # Convert wecom_user_details.json format to permission config format
+        # wecom_user_details format: { "name": { "userid": "...", "department": "..." } }
+        # permission config format: { "userid": { "name": "...", "department": "...", "userid": "..." } }
+        converted_users = {}
+        for name, info in users_data.items():
+            userid = info.get('userid', '')
+            if userid:
+                department = info.get('department', '')
+                if enriched_dept and userid in enriched_dept:
+                    department = enriched_dept[userid]
+                converted_users[userid] = {
+                    'name': name,
+                    'userid': userid,
+                    'department': department,
+                    'leader_userid': info.get('leader_userid', '')
+                }
+        
+        # 从 API 获取了活跃用户数据时，过滤掉已离职/禁用的用户
+        if enriched_dept:
+            before_count = len(converted_users)
+            converted_users = {uid: info for uid, info in converted_users.items() if uid in enriched_dept}
+            removed_count = before_count - len(converted_users)
+            if removed_count > 0:
+                logger.info(f"[PermissionsSyncUsersHandler] 过滤掉 {removed_count} 个离职/禁用用户")
+        
+        return converted_users
 
     def _fetch_full_department_paths(self) -> dict:
         """
@@ -5666,7 +5781,7 @@ class PermissionsSyncUsersHandler:
                 else:
                     result[uid] = ''
 
-            logger.info(f"[PermissionsSyncUsersHandler] 从企微 API 获取到 {len(result)} 个用户的部门路径")
+            logger.info(f"[PermissionsSyncUsersHandler] 从企微 API 获取到 {len(result)} 个用户的部门路径（用于增强）")
             return result
 
         except Exception as e:
@@ -5679,6 +5794,61 @@ class PermissionsSyncUsersHandler:
             if dept.get("parentid", 0) == 0:
                 return dept["id"]
         return dept_list[0]["id"] if dept_list else None
+
+    def _write_clean_wecom_cache(self, users: dict):
+        """
+        用 API 获取的干净数据覆写 wecom_user_details.json 缓存文件，
+        确保 API 降级时读取到的也是不含离职用户的数据。
+
+        Args:
+            users: {userid: {name, userid, department, leader_userid}} 
+                   来自 API 的干净用户数据
+        """
+        cache_path = self._get_users_path()
+        try:
+            # 转换为 wecom_user_details.json 的格式: { name: { userid, department, leader_userid } }
+            cache_data = {}
+            for uid, info in users.items():
+                cache_data[info['name']] = {
+                    'userid': uid,
+                    'department': info.get('department', ''),
+                    'leader_userid': info.get('leader_userid', '')
+                }
+            
+            os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+            
+            logger.info(f"[PermissionsSyncUsersHandler] 已更新 wecom_user_details.json 缓存 ({len(users)} 个在职用户)")
+        except Exception as e:
+            logger.warning(f"[PermissionsSyncUsersHandler] 更新 wecom_user_details.json 缓存失败: {e}")
+
+    def _cleanup_invalid_user_refs(self, config: dict, valid_userids: set) -> dict:
+        """
+        清理 config 中已离职用户的引用。
+        
+        从 folder_permissions 和 kingdee_permissions.user_permissions 中
+        移除 valid_userids 中不存在的 userid。
+        """
+        # 清理 folder_permissions
+        folder_perms = config.get('folder_permissions', {})
+        for folder in list(folder_perms.keys()):
+            original = folder_perms[folder]
+            folder_perms[folder] = [uid for uid in original if uid in valid_userids]
+            if len(folder_perms[folder]) != len(original):
+                removed = len(original) - len(folder_perms[folder])
+                logger.info(f"[PermissionsSyncUsersHandler] 清理文件夹「{folder}」权限中 {removed} 个离职用户")
+
+        # 清理 kingdee_permissions.user_permissions
+        kingdee_perms = config.get('kingdee_permissions', {})
+        user_perms = kingdee_perms.get('user_permissions', {})
+        removed_kd = [uid for uid in user_perms if uid not in valid_userids]
+        for uid in removed_kd:
+            del user_perms[uid]
+        if removed_kd:
+            logger.info(f"[PermissionsSyncUsersHandler] 清理金蝶权限中 {len(removed_kd)} 个离职用户: {removed_kd}")
+
+        return config
 
     def _get_users_path(self):
         """Get path to wecom_user_details.json, checking multiple possible locations."""
