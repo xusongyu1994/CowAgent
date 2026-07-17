@@ -4490,6 +4490,42 @@ class SkillsHandler:
             return json.dumps({"status": "error", "message": str(e)})
 
 
+# ── 金蝶查询会话级缓存 ──────────────────────────────────────────
+# 减少同一会话中重复的 API 调用
+_kingdee_cache = {}
+_KINGDEE_CACHE_TTL = {
+    "query_metadata": 30 * 60,  # 30 分钟（字段结构不变）
+    "count_bill":      5 * 60,  # 5 分钟（数据量变化快）
+}
+
+
+def _kingdee_cache_get(cache_type: str, key: str):
+    """从缓存中取金蝶查询结果，过期返回 None"""
+    entry = _kingdee_cache.get((cache_type, key))
+    if entry is None:
+        return None
+    if time.time() > entry["expires_at"]:
+        del _kingdee_cache[(cache_type, key)]
+        return None
+    return entry["value"]
+
+
+def _kingdee_cache_set(cache_type: str, key: str, value, ttl: int = None):
+    """设置金蝶查询缓存"""
+    if ttl is None:
+        ttl = _KINGDEE_CACHE_TTL.get(cache_type, 5 * 60)
+    _kingdee_cache[(cache_type, key)] = {
+        "value": value,
+        "expires_at": time.time() + ttl,
+    }
+    # 控制缓存大小，超过 200 条时清理过期条目
+    if len(_kingdee_cache) > 200:
+        now = time.time()
+        expired = [k for k, v in _kingdee_cache.items() if v["expires_at"] <= now]
+        for k in expired:
+            del _kingdee_cache[k]
+
+
 class KingdeeKanbanHandler:
     """金蝶云星空订单审批看板 — 按单据类型+状态分组返回看板数据。只读，不走Agent推理链路。"""
     def GET(self):
@@ -4556,20 +4592,26 @@ class KingdeeKanbanHandler:
                     "mcp_status": mcp_status,
                 })
 
-            # 先 count 估算
-            count_tool = tm._mcp_tool_instances.get("count_bill")
-            total_count = None
-            if count_tool:
-                try:
-                    count_result = count_tool.execute({"form_id": form_id, "filter_string": filter_string})
-                    if count_result.status == "success" and count_result.result:
-                        data = count_result.result
-                        if isinstance(data, dict) and "total_count" in data:
-                            total_count = int(data["total_count"])
-                        elif isinstance(data, (int, float)):
-                            total_count = int(data)
-                except Exception:
-                    pass
+            # 先 count 估算（带缓存）
+            count_cache_key = f"{form_id}|{filter_string}"
+            total_count = _kingdee_cache_get("count_bill", count_cache_key)
+            if total_count is not None:
+                logger.info(f"[KingdeeCache] count_bill HIT: {form_id} -> {total_count}")
+            else:
+                count_tool = tm._mcp_tool_instances.get("count_bill")
+                if count_tool:
+                    try:
+                        count_result = count_tool.execute({"form_id": form_id, "filter_string": filter_string})
+                        if count_result.status == "success" and count_result.result:
+                            data = count_result.result
+                            if isinstance(data, dict) and "estimated_rows" in data:
+                                total_count = int(data["estimated_rows"])
+                            elif isinstance(data, (int, float)):
+                                total_count = int(data)
+                        if total_count is not None:
+                            _kingdee_cache_set("count_bill", count_cache_key, total_count)
+                    except Exception:
+                        pass
 
             top_count = min(total_count if total_count and total_count < 2000 else 2000, 2000)
             result = tool.execute({

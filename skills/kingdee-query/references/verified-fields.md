@@ -131,11 +131,24 @@
 
 ### ✅ 已验证可用字段
 
-| 字段名 | 含义 |
-|--------|------|
-| `FBillNo` | 入库单编号 |
-| `FDate` | 入库日期 |
-| `FDocumentStatus` | 状态 A/B/C |
+| 字段名 | 含义 | 备注 |
+|--------|------|------|
+| `FBillNo` | 入库单编号 | |
+| `FDate` | 入库日期 | |
+| `FDocumentStatus` | 状态 | A/B/C |
+| `FSupplierId.FName` | 供应商名称 | 关联字段 |
+| `FSupplierId.FNumber` | 供应商编号 | 关联字段 |
+| `FStockId.FName` | 仓库名称 | 关联字段 |
+| `FCreatorId.FName` | 创建人 | 关联字段 |
+| `FApproverId.FName` | 审核人 | 关联字段 |
+| `FApproveDate` | 审核日期 | |
+| `FQty` | 数量（主单位） | 行级 |
+
+### ❌ 禁用字段
+
+| 错误字段名 | 说明 |
+|-----------|------|
+| `FAllQty` | 不存在 |
 
 ---
 
@@ -145,11 +158,23 @@
 
 ### ✅ 已验证可用字段
 
-| 字段名 | 含义 |
-|--------|------|
-| `FBillNo` | 采购订单编号 |
-| `FDate` | 单据日期 |
-| `FDocumentStatus` | 状态（B = 待审核） |
+| 字段名 | 含义 | 备注 |
+|--------|------|------|
+| `FBillNo` | 采购订单编号 | |
+| `FDate` | 单据日期 | |
+| `FDocumentStatus` | 状态 | Z/A/B/C/D |
+| `FSupplierId.FName` | 供应商名称 | 关联字段 |
+| `FSupplierId.FNumber` | 供应商编号 | 关联字段 |
+| `FCreatorId.FName` | 创建人 | 关联字段 |
+| `FAmount` | 未税金额 | 表头级 |
+| `FTaxAmount` | 税额 | 表头级 |
+| `FAllAmount` | 含税合计 | ⚠️ 行级字段 |
+
+### ❌ 禁用字段
+
+| 错误字段名 | 说明 |
+|-----------|------|
+| `FTotalAmount` | 不存在 |
 
 ---
 
@@ -438,6 +463,41 @@ query_metadata(form_id="BD_Customer")
 
 1. **查本文档**：本文件记录了已验证的常用字段
 2. **查 SKILL.md 表单速查表**：确认表单ID是否正确
-3. **调用 query_metadata**：实时验证字段是否存在
-4. **查看已有单据**：用 `view_bill` 查看同类型单据的完整数据结构
-5. **测试查询**：先用 `top_count=1` 小范围测试，确认字段可用后再扩大查询范围
+3. **查 field-rules.md 字段规则速查**：metadata 转换规则、高频错误字段映射
+4. **调用 query_metadata**：实时验证字段是否存在
+5. **查看已有单据**：用 `view_bill` 查看同类型单据的完整数据结构
+6. **测试查询**：先用 `top_count=1` 小范围测试，确认字段可用后再扩大查询范围
+
+---
+
+## 十一、跨表字段差异速查
+
+同一语义字段在不同表单中 **字段名可能不同**，避免跨表复用：
+
+| 场景 | 在 SAL_SaleOrder 中 | 在 SAL_OUTSTOCK 中 | 在 STK_Inventory 中 |
+|------|-------------------|-------------------|-------------------|
+| 客户 | ✅ `FCustId.FName` | ❌ **不存在**（需从关联订单获取） | ❌ **不存在** |
+| 物料 | ✅ `FMaterialId.FName`（表体） | ✅ `FMaterialId.FName`（表体） | ✅ `FMaterialId.FName` |
+| 数量 | ✅ `FQty`（表体） | ✅ `FQty`（表体） | ✅ `FQty` |
+| 含税金额 | ✅ `FAllAmount`（行级） | ✅ `FAllAmount`（行级） | ❌ **不存在** |
+| 仓库 | ✅ `FStockId.FName` | ✅ `FStockId.FName` | ✅ `FStockId.FName` |
+| 单据编号 | ✅ `FBillNo` | ✅ `FBillNo` | ❌ **不存在** |
+
+### 高频跨表复用陷阱
+
+| ❌ 错误做法 | 原因 | 正确做法 |
+|-----------|------|---------|
+| 在 SAL_OUTSTOCK 中用 `FCustId.FName` | 销售出库单表头没有客户字段 | 通过销售订单号关联查询客户 |
+| 在 STK_Inventory 中用 `FBillNo` | 库存视图没有单据关联 | 库存视图只能用物料/仓库等维度 |
+| 在 BD_Customer 中用 `FBillNo` | 客户档案没有单据字段 | 客户查询用 `FName`、`FNumber` |
+
+---
+
+## ⚠️ FAllAmount 不同场景分组规则补充
+
+| 分析场景 | 正确做法 | 常见错误 |
+|---------|---------|---------|
+| **按客户汇总销售额** | 先按 `FBillNo` 分组对行级 `FAllAmount` 求和得订单总额，再按 `FCustId.FName` 汇总 | 直接按客户对行级 `FAllAmount` 求和 → 金额翻倍 |
+| **按物料汇总销量** | 直接按 `FMaterialId.FName` 对行级 `FAllAmount` 求和 | **不需要**按 FBillNo 去重 |
+| **按业务员汇总** | 先按 `FBillNo` 分组求订单总额，再按 `FSalerId.FName` 汇总 | 同一订单多条物料重复加给业务员 |
+| **查询订单列表展示** | 带行号 `FSeq` 展示，说明同一订单可能有多行 | 误以为每行是一个独立订单 |
