@@ -31,6 +31,7 @@ class AgentEventHandler:
         self._is_weixin = channel_type == const.WEIXIN
         self._thinking_sent_count = 0
         self._merged_buf: list[str] = []
+        self._status_sent_once = False  # 整个 Agent 运行只发一次状态提示
 
     def handle_event(self, event):
         event_type = event.get("type")
@@ -66,9 +67,13 @@ class AgentEventHandler:
         tool_calls = data.get("tool_calls", [])
 
         if tool_calls:
+            # 模型的内部思考过程 → 只记录日志，不发给用户
             if self.current_content.strip():
-                logger.info(f"💭 {self.current_content.strip()[:200]}{'...' if len(self.current_content) > 200 else ''}")
-                self._send_to_channel(self.current_content.strip())
+                logger.info(f"💭 模型思考(不发送): {self.current_content.strip()[:200]}{'...' if len(self.current_content) > 200 else ''}")
+            # 整个运行周期只发一次简短状态，不暴露操作细节
+            if not self._status_sent_once:
+                self._send_to_channel("🔄 正在处理中，请稍候...")
+                self._status_sent_once = True
         else:
             if self.current_content.strip():
                 logger.debug(f"💬 {self.current_content.strip()[:200]}{'...' if len(self.current_content) > 200 else ''}")

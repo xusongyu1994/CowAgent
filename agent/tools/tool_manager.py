@@ -532,6 +532,38 @@ class ToolManager:
         """Return {server_name: status} snapshot for UI / debugging."""
         return dict(self._mcp_status)
 
+    def wait_for_mcp_ready(self, timeout: int = 15) -> bool:
+        """阻塞等待所有已配置的 MCP 服务器就绪。
+
+        场景:
+        - 无 MCP 配置 → 立即返回 True
+        - MCP 已就绪 → 立即返回 True
+        - MCP 正在加载 → 等待最多 timeout 秒
+        - MCP 需要授权 (needs_auth) → 视为已处理，立即返回 True
+        - 超时 → 返回 False，不阻塞用户
+
+        Args:
+            timeout: 最大等待秒数 (默认 15)
+
+        Returns:
+            True 如果所有 MCP 服务器都已处理完毕（ready/failed/needs_auth）
+            False 如果超时，仍有服务器处于 pending 状态
+        """
+        if not self._mcp_active_configs:
+            return True
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            any_pending = any(s == "pending" for s in self._mcp_status.values())
+            if not any_pending:
+                return True
+            time.sleep(0.5)
+        pending = [n for n, s in self._mcp_status.items() if s == "pending"]
+        logger.warning(
+            f"[MCP] Wait timeout after {timeout}s — "
+            f"still pending: {pending if pending else 'none (all done)'}"
+        )
+        return False
+
     def sync_mcp_into_agent(self, agent) -> tuple:
         """
         Reconcile a live agent's tool collection with the current MCP tool registry.

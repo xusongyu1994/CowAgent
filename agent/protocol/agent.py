@@ -480,6 +480,15 @@ class Agent:
         if not self.model:
             raise ValueError("No model available for agent")
 
+        # 等待 MCP 工具就绪并同步到 agent，确保 system prompt 包含 MCP 工具信息
+        try:
+            from agent.tools import ToolManager
+            tm = ToolManager()
+            tm.wait_for_mcp_ready(timeout=15)
+            tm.sync_mcp_into_agent(self)
+        except Exception as e:
+            logger.debug(f"[Agent] MCP pre-warm sync: {e}")
+
         # Get full system prompt with skills
         full_system_prompt = self.get_full_system_prompt(skill_filter=skill_filter)
 

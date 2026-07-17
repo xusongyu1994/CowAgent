@@ -460,6 +460,10 @@ class WebChannel(ChatChannel):
         # subsequent agent_end handler can skip its "empty final_response"
         # fallback (which would otherwise overwrite the real error).
         streamed_error: List[str] = []
+        # Buffer for message_update deltas — only flushed to SSE when confirmed
+        # as the final reply (no tool_calls in message_end). If tool_calls are
+        # present, the buffered text is model thinking and gets discarded.
+        message_buffer: List[str] = []
 
         def on_event(event: dict):
             if request_id not in self.sse_queues:
@@ -489,43 +493,28 @@ class WebChannel(ChatChannel):
             elif event_type == "message_update":
                 delta = data.get("delta", "")
                 if delta:
-                    q.put({"type": "delta", "content": delta})
+                    message_buffer.append(delta)  # 缓存，确认是最终回复后再发
 
             elif event_type == "tool_execution_start":
-                tool_name = data.get("tool_name", "tool")
-                arguments = data.get("arguments", {})
-                q.put({"type": "tool_start", "tool_call_id": data.get("tool_call_id"), "tool": tool_name, "arguments": arguments})
+                pass  # 不暴露操作步骤和参数
 
             elif event_type == "tool_execution_progress":
-                q.put({
-                    "type": "tool_progress",
-                    "tool_call_id": data.get("tool_call_id"),
-                    "tool": data.get("tool_name", "tool"),
-                    "content": str(data.get("message", ""))[-4 * 1024:],
-                })
+                pass  # 不暴露中间进度
 
             elif event_type == "tool_execution_end":
-                tool_name = data.get("tool_name", "tool")
-                status = data.get("status", "success")
-                result = data.get("result", "")
-                exec_time = data.get("execution_time", 0)
-                # Truncate long results to avoid huge SSE payloads
-                result_str = str(result)
-                if len(result_str) > 2000:
-                    result_str = result_str[:2000] + "…"
-                q.put({
-                    "type": "tool_end",
-                    "tool_call_id": data.get("tool_call_id"),
-                    "tool": tool_name,
-                    "status": status,
-                    "result": result_str,
-                    "execution_time": round(exec_time, 2)
-                })
+                pass  # 不暴露执行结果
 
             elif event_type == "message_end":
                 tool_calls = data.get("tool_calls", [])
                 if tool_calls:
+                    # 有工具调用 → 之前的文本是模型思考，丢弃
+                    message_buffer.clear()
                     q.put({"type": "message_end", "has_tool_calls": True})
+                else:
+                    # 无工具调用 → 这是最终回复，flush 缓存的 delta
+                    for chunk in message_buffer:
+                        q.put({"type": "delta", "content": chunk})
+                    message_buffer.clear()
 
             elif event_type == "error":
                 # Agent raised an exception (LLM 401/timeout/etc). Surface the
