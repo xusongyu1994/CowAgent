@@ -1717,7 +1717,7 @@ class ConfigHandler:
         const.GLM_5_2, const.GLM_5_1, const.GLM_5_TURBO, const.GLM_5, const.GLM_4_7,
         const.QWEN37_PLUS, const.QWEN37_MAX, const.QWEN36_PLUS,
         const.DOUBAO_SEED_2_1_PRO, const.DOUBAO_SEED_2_1_TURBO, const.DOUBAO_SEED_2_CODE,
-        const.KIMI_K2_7_CODE, const.KIMI_K2_7_CODE_HIGHSPEED, const.KIMI_K2_6, const.KIMI_K2_5, const.KIMI_K2,
+        const.KIMI_K3, const.KIMI_K2_7_CODE, const.KIMI_K2_7_CODE_HIGHSPEED, const.KIMI_K2_6, const.KIMI_K2_5, const.KIMI_K2,
         const.ERNIE_5_1, const.ERNIE_5, const.ERNIE_X1_1, const.ERNIE_45_TURBO_128K, const.ERNIE_45_TURBO_32K,
         const.MIMO_V2_5_PRO, const.MIMO_V2_5,
     ]
@@ -1804,7 +1804,7 @@ class ConfigHandler:
             "api_base_key": "moonshot_base_url",
             "api_base_default": "https://api.moonshot.cn/v1",
             "api_base_placeholder": _PLACEHOLDER_V1,
-            "models": [const.KIMI_K2_7_CODE, const.KIMI_K2_7_CODE_HIGHSPEED, const.KIMI_K2_6, const.KIMI_K2_5, const.KIMI_K2],
+            "models": [const.KIMI_K3, const.KIMI_K2_7_CODE, const.KIMI_K2_7_CODE_HIGHSPEED, const.KIMI_K2_6, const.KIMI_K2_5, const.KIMI_K2],
         }),
         ("qianfan", {
             "label": {"zh": "百度千帆", "en": "ERNIE"},
@@ -4849,11 +4849,33 @@ class SchedulerUpdateHandler:
             
             # Update action
             if "action" in body:
-                action = body["action"]
-                channel_type = action.get("channel_type", "web")
-                
                 # Get the task's original channel_type
-                old_channel = original_task.get("action", {}).get("channel_type", "web")
+                original_action = original_task.get("action", {})
+                if not isinstance(original_action, dict):
+                    original_action = {}
+                action_patch = body["action"]
+                if not isinstance(action_patch, dict):
+                    return json.dumps({
+                        "status": "error",
+                        "message": "Action must be an object."
+                    }, ensure_ascii=False)
+
+                # The Web editor only exposes a subset of action fields. Merge
+                # that patch into the stored action so scheduler metadata such
+                # as notify_session_id, silent, and channel-specific delivery
+                # fields survive unrelated edits.
+                action = dict(original_action)
+                action.update(action_patch)
+                action_type = action.get("type")
+                if action_type == "send_message":
+                    action.pop("task_description", None)
+                    action.pop("silent", None)
+                elif action_type == "agent_task":
+                    action.pop("content", None)
+
+                old_channel = original_action.get("channel_type", "web")
+                channel_type = action.get("channel_type") or old_channel
+                action["channel_type"] = channel_type
                 
                 # If channel type changed or no receiver, reject the update.
                 # Note: the web UI disables the channel selector, so this branch
