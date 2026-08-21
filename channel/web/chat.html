@@ -13,6 +13,8 @@
     <script src="assets/vendor/markdown-it/markdown-it.min.js"></script>
     <!-- Chart.js for kanban charts -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <!-- SheetJS for Excel export (forked to vendor/ for Chinese enterprise network access) -->
+    <script src="assets/vendor/xlsx/xlsx.full.min.js"></script>
     <link id="hljs-light" rel="stylesheet" href="assets/vendor/highlightjs/styles/github.min.css">
     <link id="hljs-dark" rel="stylesheet" href="assets/vendor/highlightjs/styles/github-dark.min.css" disabled>
     <script src="assets/vendor/highlightjs/highlight.min.js"></script>
@@ -73,7 +75,7 @@
     (function() {
         // Backend-resolved default language (from cow_lang config / auto-detect).
         window.__COW_DEFAULT_LANG__ = '{{COW_DEFAULT_LANG}}';
-        var theme = localStorage.getItem('cow_theme') || 'dark';
+        var theme = localStorage.getItem('cow_theme') || 'light';
         if (theme === 'dark') document.documentElement.classList.add('dark');
         document.documentElement.setAttribute('lang', window.__cowResolveLang__());
     })();
@@ -195,6 +197,11 @@
                            data-view="kanban">
                             <i class="fas fa-columns item-icon text-xs w-5 text-center"></i>
                             <span data-i18n="menu_kanban">看板</span>
+                        </a>
+                        <a class="sidebar-item flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition-all duration-150 hover:bg-white/5 hover:text-neutral-200 text-[14px]"
+                           data-view="overdue">
+                            <i class="fas fa-clock item-icon text-xs w-5 text-center"></i>
+                            <span data-i18n="menu_overdue">逾期统计</span>
                         </a>
                         <a class="sidebar-item flex items-center gap-3 px-3 py-2 rounded-lg cursor-pointer transition-all duration-150 hover:bg-white/5 hover:text-neutral-200 text-[14px]"
                            data-view="projects">
@@ -1303,6 +1310,12 @@
                                     <button class="kanban-tab px-4 py-1.5 rounded-full text-sm font-medium transition-all duration-150 cursor-pointer"
                                             data-form="PUR_PurchaseOrder"
                                             data-i18n="kanban_purchase">采购订单</button>
+                                    <button class="kanban-tab px-4 py-1.5 rounded-full text-sm font-medium transition-all duration-150 cursor-pointer"
+                                            data-form="conversion-stats"
+                                            data-i18n="kanban_conversion">转换统计</button>
+                                    <button class="kanban-tab px-4 py-1.5 rounded-full text-sm font-medium transition-all duration-150 cursor-pointer"
+                                            data-form="ar-overdue"
+                                            data-i18n="kanban_overdue">逾期统计</button>
                                 </div>
                             </div>
 
@@ -1382,7 +1395,7 @@
                                                 <th class="px-3 py-2.5 font-medium">单据编号</th>
                                                 <th class="px-3 py-2.5 font-medium">客户/供应商</th>
                                                 <th class="px-3 py-2.5 font-medium">单据状态</th>
-                                                <th class="px-3 py-2.5 font-medium">金额</th>
+                                                <th class="px-3 py-2.5 font-medium">价税合计</th>
                                                 <th class="px-3 py-2.5 font-medium">创建人</th>
                                                 <th class="px-3 py-2.5 font-medium">日期</th>
                                             </tr>
@@ -1417,12 +1430,70 @@
                                     </div>
                                 </div>
                             </div>
+                            <!-- Conversion Stats Container -->
+                            <div id="kanban-conversion-container" class="hidden">
+                                <div id="kanban-conversion-loading" class="flex flex-col items-center justify-center py-20">
+                                    <i class="fas fa-spinner fa-spin text-3xl text-primary-500 mb-3"></i>
+                                    <p class="text-sm text-slate-400" data-i18n="kanban_conversion_loading">加载转换统计数据...</p>
+                                </div>
+                                <div id="kanban-conversion-error" class="hidden bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-800 rounded-xl p-4 mb-6">
+                                    <div class="flex items-center gap-3">
+                                        <i class="fas fa-exclamation-triangle text-red-500"></i>
+                                        <p id="kanban-conversion-error-msg" class="text-sm text-red-700 dark:text-red-400"></p>
+                                    </div>
+                                </div>
+                                <div id="kanban-conversion-content" class="hidden space-y-6">
+                                    <!-- Quotation → Sales Order -->
+                                    <div class="bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-white/10 p-5 shadow-sm">
+                                        <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100 mb-4 flex items-center gap-2">
+                                            <i class="fas fa-file-invoice text-primary-500"></i>
+                                            <span data-i18n="kanban_conversion_quotation_title">报价单 → 销售订单</span>
+                                        </h3>
+                                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4" id="conversion-quotation-cards">
+                                            <!-- KPI cards rendered by JS -->
+                                        </div>
+                                        <div class="mt-4" id="conversion-quotation-bar">
+                                            <!-- Progress bar rendered by JS -->
+                                        </div>
+                                    </div>
+
+                                    <!-- Sample → Sales Order -->
+                                    <div class="bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-white/10 p-5 shadow-sm">
+                                        <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100 mb-4 flex items-center gap-2">
+                                            <i class="fas fa-flask text-amber-500"></i>
+                                            <span data-i18n="kanban_conversion_sample_title">样品单 → 销售订单</span>
+                                        </h3>
+                                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4" id="conversion-sample-cards">
+                                            <!-- KPI cards rendered by JS -->
+                                        </div>
+                                        <div class="mt-4" id="conversion-sample-bar">
+                                            <!-- Progress bar rendered by JS -->
+                                        </div>
+                                    </div>
+
+                                    <!-- Customer deep analysis -->
+                                    <div class="bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-white/10 p-5 shadow-sm">
+                                        <div id="kanban-conversion-customer-analysis">
+                                            <!-- Customer analysis rendered by JS -->
+                                        </div>
+                                    </div>
+
+                                    <!-- Detail table -->
+                                    <div class="bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-white/10 p-5 shadow-sm">
+                                        <h4 class="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-3 flex items-center gap-2">
+                                            <i class="fas fa-list-alt text-slate-400"></i>
+                                            <span data-i18n="kanban_conversion_detail_title">转换明细</span>
+                                        </h4>
+                                        <div id="kanban-conversion-detail" class="overflow-x-auto">
+                                            <!-- Detail content rendered by JS -->
+                                        </div>
+                                    </div>
+                                                  </div>
+                    </div>
+                </div>
                         </div>
                     </div>
                 </div>
-
-                <!-- ====================================================== -->
-                <!-- VIEW: Logs                                              -->
                 <!-- ====================================================== -->
                 <div id="view-logs" class="view">
                     <div class="flex-1 overflow-y-auto p-6">
@@ -1474,6 +1545,173 @@
                                     <p class="text-slate-500" data-i18n="logs_coming_msg">日志流即将在此提供。将连接 run.log 实现类似 tail -f 的实时输出。</p>
                                 </div>
                             </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Overdue Stats View (独立页面) -->
+                <div id="view-overdue" class="view">
+                    <div class="flex-1 overflow-y-auto p-6">
+                        <div class="max-w-7xl mx-auto">
+                            <!-- Header -->
+                            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+                                <div>
+                                    <h2 class="text-xl font-bold text-slate-800 dark:text-slate-100" data-i18n="overdue_title">逾期应收款管理看板</h2>
+                                    <p class="text-sm text-slate-500 dark:text-slate-400 mt-1" data-i18n="overdue_desc">按风险阶段展示应收逾期数据，支持多维筛选与下钻分析</p>
+                                </div>
+                            </div>
+
+                            <!-- Date Range Selector -->
+                            <div class="flex flex-wrap items-center gap-3 mb-6">
+                                <label class="text-sm text-slate-500 dark:text-slate-400" data-i18n="overdue_date_range">日期筛选（可选）：</label>
+                                <input type="date" id="overdue-date-from"
+                                       class="h-9 px-3 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-[#1A1A1A] text-sm text-slate-700 dark:text-slate-200 focus:outline-none focus:border-primary-500 transition-colors duration-150">
+                                <span class="text-slate-400">~</span>
+                                <input type="date" id="overdue-date-to"
+                                       class="h-9 px-3 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-[#1A1A1A] text-sm text-slate-700 dark:text-slate-200 focus:outline-none focus:border-primary-500 transition-colors duration-150">
+                                <button id="overdue-query-btn"
+                                        class="h-9 px-4 rounded-lg bg-primary-500 hover:bg-primary-600 text-white text-sm font-medium transition-colors duration-150 cursor-pointer">
+                                    <i class="fas fa-search mr-1"></i><span data-i18n="overdue_query_btn">查询</span>
+                                </button>
+                                <button id="overdue-clear-date-btn"
+                                        class="h-9 px-3 rounded-lg border border-slate-300 dark:border-slate-600 text-sm text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition-colors duration-150 cursor-pointer bg-white dark:bg-transparent">
+                                    <i class="fas fa-eraser mr-1"></i><span data-i18n="overdue_clear_date">清除筛选</span>
+                                </button>
+                                <span class="text-xs text-slate-400 ml-1" data-i18n="overdue_default_hint">默认展示全部应收数据</span>
+                            </div>
+
+                            <!-- Loading -->
+                            <div id="overdue-loading" class="flex flex-col items-center justify-center py-20">
+                                <i class="fas fa-spinner fa-spin text-3xl text-primary-500 mb-3"></i>
+                                <p class="text-sm text-slate-400" data-i18n="kanban_overdue_loading">加载逾期统计数据...</p>
+                            </div>
+
+                            <!-- Error -->
+                            <div id="overdue-error" class="hidden bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-800 rounded-xl p-4 mb-6">
+                                <div class="flex items-center gap-3">
+                                    <i class="fas fa-exclamation-triangle text-red-500"></i>
+                                    <p id="overdue-error-msg" class="text-sm text-red-700 dark:text-red-400"></p>
+                                </div>
+                            </div>
+
+                            <!-- Content -->
+                            <div id="overdue-content" class="hidden space-y-6">
+
+                                <!-- KPI Cards (4项) -->
+                                <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4" id="overdue-kpi"></div>
+                                <!-- has_more 提示 -->
+                                <div id="overdue-has-more" class="hidden flex items-center gap-2 px-4 py-2 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800 rounded-lg text-xs text-amber-700 dark:text-amber-300">
+                                    <i class="fas fa-exclamation-triangle"></i>
+                                    <span data-i18n="overdue_has_more">数据量超过展示上限，部分数据未显示，请缩小日期范围后重试</span>
+                                </div>
+
+                                <!-- Main Layout: Left Tab + Right Fixed -->
+                                <div class="flex gap-6">
+                                    <!-- Left Column (Tab切换) -->
+                                    <div class="flex-1 min-w-0">
+                                        <!-- Tab Bar -->
+                                        <div class="overdue-tab-bar flex items-center gap-1 mb-4 border-b border-slate-200 dark:border-white/10">
+                                            <button class="overdue-main-tab px-4 py-2.5 text-sm font-medium border-b-2 border-primary-500 text-primary-600 dark:text-primary-400 transition-colors duration-150 cursor-pointer" data-tab="detail">
+                                                <i class="fas fa-file-invoice mr-1.5"></i><span data-i18n="overdue_tab_detail">应回款</span>
+                                            </button>
+                                            <button class="overdue-main-tab px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors duration-150 cursor-pointer" data-tab="saler">
+                                                <i class="fas fa-users mr-1.5"></i><span data-i18n="overdue_tab_saler">业务员汇总</span>
+                                            </button>
+                                            <button class="overdue-main-tab px-4 py-2.5 text-sm font-medium border-b-2 border-transparent text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors duration-150 cursor-pointer" data-tab="workflow">
+                                                <i class="fas fa-route mr-1.5"></i><span data-i18n="overdue_tab_workflow">跟进流程</span>
+                                            </button>
+                                        </div>
+
+                                        <!-- Tab: 应回款(明细) -->
+                                        <div id="overdue-tab-detail" class="overdue-tab-content">
+                                            <div class="bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-white/10 p-5 shadow-sm">
+                                                <!-- Filter Bar -->
+                                                <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+                                                    <div class="flex items-center gap-2 flex-wrap">
+                                                        <label class="flex items-center gap-1.5 cursor-pointer select-none">
+                                                            <input type="checkbox" id="overdue-only-overdue" checked
+                                                                   class="rounded border-slate-300 text-primary-500 focus:ring-primary-500 cursor-pointer">
+                                                            <span class="text-xs text-slate-500" data-i18n="overdue_only_overdue">仅显示逾期</span>
+                                                        </label>
+                                                        <select id="overdue-saler-filter"
+                                                                class="h-7 px-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-[#1A1A1A] text-xs text-slate-600 dark:text-slate-300 focus:outline-none focus:border-primary-500">
+                                                            <option value="">全部业务员</option>
+                                                        </select>
+                                                        <select id="overdue-risk-filter"
+                                                                class="h-7 px-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-[#1A1A1A] text-xs text-slate-600 dark:text-slate-300 focus:outline-none focus:border-primary-500">
+                                                            <option value="">全部风险阶段</option>
+                                                            <option value="预警">预警</option>
+                                                            <option value="早期">早期</option>
+                                                            <option value="中期">中期</option>
+                                                            <option value="重度">重度</option>
+                                                            <option value="危险">危险</option>
+                                                            <option value="坏账">坏账</option>
+                                                        </select>
+                                                        <input id="overdue-keyword" type="text" placeholder="搜索客户/单据号..."
+                                                               class="h-7 px-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-[#1A1A1A] text-xs text-slate-700 dark:text-slate-200 focus:outline-none focus:border-primary-500 w-28">
+                                                        <button id="overdue-detail-export-btn"
+                                                                class="h-7 px-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-medium cursor-pointer transition-colors duration-150">
+                                                            <i class="fas fa-file-excel mr-1"></i><span data-i18n="kanban_conversion_export_btn">导出 Excel</span>
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                                <div id="overdue-detail-table" class="overflow-x-auto"></div>
+                                                <div id="overdue-detail-summary" class="mt-2 text-xs text-slate-400 text-right"></div>
+                                            </div>
+                                        </div>
+
+                                        <!-- Tab: 业务员汇总 -->
+                                        <div id="overdue-tab-saler" class="overdue-tab-content hidden">
+                                            <div class="bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-white/10 p-5 shadow-sm">
+                                                <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+                                                    <h4 class="text-sm font-semibold text-slate-700 dark:text-slate-200 flex items-center gap-2">
+                                                        <i class="fas fa-users text-indigo-500"></i>
+                                                        <span data-i18n="overdue_saler_title">业务员回款汇总</span>
+                                                    </h4>
+                                                    <div class="flex items-center gap-2">
+                                                        <input id="overdue-saler-search" type="text" placeholder="搜索业务员..."
+                                                               class="h-8 px-2.5 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-[#1A1A1A] text-xs text-slate-700 dark:text-slate-200 focus:outline-none focus:border-primary-500 w-32">
+                                                    </div>
+                                                </div>
+                                                <div id="overdue-saler-table" class="overflow-x-auto"></div>
+                                            </div>
+                                        </div>
+
+                                        <!-- Tab: 跟进流程(SOP) -->
+                                        <div id="overdue-tab-workflow" class="overdue-tab-content hidden">
+                                            <div class="bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-white/10 p-5 shadow-sm">
+                                                <h4 class="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-3 flex items-center gap-2">
+                                                    <i class="fas fa-route text-blue-500"></i>
+                                                    <span data-i18n="overdue_sop_title">逾期跟进流程SOP参考</span>
+                                                </h4>
+                                                <div id="overdue-sop-table" class="overflow-x-auto"></div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Right Column (固定) -->
+                                    <div class="w-80 flex-shrink-0 space-y-6">
+                                        <!-- 逾期天数分布 (表+条混合) -->
+                                        <div class="bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-white/10 p-5 shadow-sm">
+                                            <h3 class="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-4 flex items-center gap-2">
+                                                <i class="fas fa-chart-bar text-orange-500"></i>
+                                                <span data-i18n="overdue_aging_title">逾期天数分布</span>
+                                            </h3>
+                                            <div id="overdue-aging-chart"></div>
+                                        </div>
+
+                                        <!-- 跟进阶段概览 -->
+                                        <div class="bg-white dark:bg-[#1A1A1A] rounded-xl border border-slate-200 dark:border-white/10 p-5 shadow-sm">
+                                            <h3 class="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-4 flex items-center gap-2">
+                                                <i class="fas fa-layer-group text-blue-500"></i>
+                                                <span data-i18n="overdue_workflow_title">跟进阶段概览</span>
+                                            </h3>
+                                            <div id="overdue-workflow" class="space-y-2"></div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                            </div><!-- /#overdue-content -->
                         </div>
                     </div>
                 </div>

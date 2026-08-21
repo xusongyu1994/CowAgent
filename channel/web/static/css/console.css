@@ -1488,6 +1488,45 @@
     line-height: 1.55;
 }
 
+/* ─── Conversion dual-bill layout ─── */
+.kanban-dual-bills {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+@media (max-width: 768px) {
+    .kanban-dual-bills {
+        grid-template-columns: 1fr;
+    }
+}
+.kanban-dual-bill-panel {
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 16px;
+    background: #f8fafc;
+}
+.dark .kanban-dual-bill-panel {
+    border-color: rgba(255,255,255,0.1);
+    background: rgba(255,255,255,0.03);
+}
+
+/* ─── Conversion customer bills modal ─── */
+.kanban-max-w-6xl {
+    max-width: 72rem !important;
+}
+
+/* Customer bills table row clickable */
+.kanban-bill-row {
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.kanban-bill-row:hover {
+    background: rgba(34, 139, 34, 0.05);
+}
+.dark .kanban-bill-row:hover {
+    background: rgba(74, 190, 110, 0.08);
+}
+
 /* Graph legend */
 .knowledge-graph-legend {
     position: absolute;
@@ -2047,6 +2086,30 @@
     min-width: 4px;
 }
 
+/* Kanban Conversion Stats */
+#kanban-conversion-content .rounded-xl {
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+}
+#kanban-conversion-content h3 {
+    letter-spacing: 0.01em;
+}
+#conversion-quotation-cards > div,
+#conversion-sample-cards > div {
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+#conversion-quotation-cards > div:hover,
+#conversion-sample-cards > div:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+}
+.dark #conversion-quotation-cards > div:hover,
+.dark #conversion-sample-cards > div:hover {
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+#kanban-conversion-content .h-3 {
+    min-width: 4px;
+}
+
 /* Table styling — reuse kanban table patterns */
 #projects-table-section table {
     min-width: 500px;
@@ -2095,4 +2158,224 @@
 /* Upload area transitions */
 #projects-upload-area {
     transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+/* =====================================================================
+   Overdue Stats Page Styles
+   ===================================================================== */
+
+/* Date input styling */
+#overdue-date-from::-webkit-calendar-picker-indicator,
+#overdue-date-to::-webkit-calendar-picker-indicator {
+    opacity: 0.5;
+    cursor: pointer;
+}
+.dark #overdue-date-from::-webkit-calendar-picker-indicator,
+.dark #overdue-date-to::-webkit-calendar-picker-indicator {
+    filter: invert(1);
+}
+
+/* Risk stage badge colors */
+.risk-badge-warning { background: #eef2ff; color: #6366f1; }
+.risk-badge-early { background: #f0fdf4; color: #16a34a; }
+.risk-badge-mid { background: #fefce8; color: #ca8a04; }
+.risk-badge-severe { background: #fff7ed; color: #ea580c; }
+.risk-badge-danger { background: #fef2f2; color: #dc2626; }
+.risk-badge-baddebt { background: #fef2f2; color: #991b1b; }
+
+.dark .risk-badge-warning { background: rgba(99, 102, 241, 0.15); color: #a5b4fc; }
+.dark .risk-badge-early { background: rgba(22, 163, 74, 0.15); color: #86efac; }
+.dark .risk-badge-mid { background: rgba(202, 138, 4, 0.15); color: #fde047; }
+.dark .risk-badge-severe { background: rgba(234, 88, 12, 0.15); color: #fdba74; }
+.dark .risk-badge-danger { background: rgba(220, 38, 38, 0.15); color: #fca5a5; }
+.dark .risk-badge-baddebt { background: rgba(153, 27, 27, 0.25); color: #f87171; }
+
+/* Main tab switching (bottom-border style) */
+.overdue-main-tab {
+    white-space: nowrap;
+}
+.overdue-main-tab.active {
+    border-bottom-color: #35A85B !important;
+    color: #35A85B !important;
+}
+.dark .overdue-main-tab.active {
+    color: #4ABE6E !important;
+    border-bottom-color: #4ABE6E !important;
+}
+
+/* Aging table + bar mixed style */
+#overdue-aging-chart .aging-row {
+    transition: background 0.12s ease;
+}
+#overdue-aging-chart .aging-row:hover {
+    background: rgba(0,0,0,0.03);
+}
+.dark #overdue-aging-chart .aging-row:hover {
+    background: rgba(255,255,255,0.05);
+}
+#overdue-aging-chart .aging-bar-bg {
+    background: #f1f5f9;
+    border-radius: 999px;
+    height: 10px;
+    overflow: hidden;
+}
+.dark #overdue-aging-chart .aging-bar-bg {
+    background: rgba(255,255,255,0.08);
+}
+#overdue-aging-chart .aging-bar-fill {
+    height: 100%;
+    border-radius: 999px;
+    transition: width 0.6s ease;
+    min-width: 4px;
+}
+
+/* Stage overview cards */
+#overdue-workflow .wf-stage-item {
+    padding: 8px 10px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+#overdue-workflow .wf-stage-item:hover {
+    transform: translateX(4px);
+    box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+#overdue-workflow .wf-stage-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+#overdue-workflow .wf-stage-bar-bg {
+    flex: 1;
+    height: 6px;
+    background: rgba(0,0,0,0.06);
+    border-radius: 999px;
+    overflow: hidden;
+    max-width: 80px;
+}
+.dark #overdue-workflow .wf-stage-bar-bg {
+    background: rgba(255,255,255,0.08);
+}
+#overdue-workflow .wf-stage-bar-fill {
+    height: 100%;
+    border-radius: 999px;
+    transition: width 0.5s ease;
+}
+
+/* SOP table styles */
+#overdue-sop-table table {
+    min-width: 1000px;
+    font-size: 12px;
+}
+#overdue-sop-table th {
+    background: #f8fafc;
+    color: #64748b;
+    font-weight: 600;
+    padding: 10px 12px;
+    text-align: left;
+    white-space: nowrap;
+    border-bottom: 2px solid #e2e8f0;
+}
+.dark #overdue-sop-table th {
+    background: rgba(255,255,255,0.05);
+    color: #94a3b8;
+    border-bottom-color: rgba(255,255,255,0.1);
+}
+#overdue-sop-table td {
+    padding: 8px 12px;
+    border-bottom: 1px solid #f1f5f9;
+    vertical-align: top;
+    line-height: 1.5;
+}
+.dark #overdue-sop-table td {
+    border-bottom-color: rgba(255,255,255,0.06);
+}
+#overdue-sop-table tbody tr:hover {
+    background: rgba(0,0,0,0.02);
+}
+.dark #overdue-sop-table tbody tr:hover {
+    background: rgba(255,255,255,0.03);
+}
+
+/* Overdue tab buttons */
+.overdue-tab-btn {
+    transition: all 0.15s ease;
+}
+
+/* Saler summary table row hover */
+#overdue-saler-table tbody tr[data-saler]:hover {
+    filter: brightness(0.96);
+}
+.dark #overdue-saler-table tbody tr[data-saler]:hover {
+    filter: brightness(1.2);
+}
+
+/* Detail table sort indicator */
+#overdue-saler-table th[data-sort] i.fa-sort {
+    opacity: 0.4;
+}
+#overdue-saler-table th[data-sort]:hover i.fa-sort {
+    opacity: 0.8;
+}
+#overdue-saler-table th[data-sort][data-dir="asc"] i.fa-sort {
+    opacity: 1;
+}
+#overdue-saler-table th[data-sort][data-dir="asc"] i.fa-sort::before {
+    content: '\f0de'; /* fa-sort-up */
+}
+#overdue-saler-table th[data-sort][data-dir="desc"] i.fa-sort {
+    opacity: 1;
+}
+#overdue-saler-table th[data-sort][data-dir="desc"] i.fa-sort::before {
+    content: '\f0dd'; /* fa-sort-down */
+}
+
+/* KPI card hover */
+#overdue-kpi > div {
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+#overdue-kpi > div:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+}
+.dark #overdue-kpi > div:hover {
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+}
+
+/* Workflow stage items */
+#overdue-workflow > div {
+    transition: transform 0.15s ease;
+}
+#overdue-workflow > div:hover {
+    transform: translateX(4px);
+}
+
+/* Filter controls consistent sizing */
+#overdue-saler-filter,
+#overdue-risk-filter {
+    min-width: 90px;
+}
+
+/* Detail table consistent with kanban table styles */
+#overdue-detail-table table {
+    min-width: 800px;
+}
+#overdue-detail-table tbody tr {
+    transition: background 0.12s ease;
+}
+#overdue-detail-table tbody tr:hover {
+    background: rgba(0, 0, 0, 0.03);
+}
+.dark #overdue-detail-table tbody tr:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+#overdue-detail-table tbody td {
+    padding: 10px 12px;
+    border-bottom: 1px solid #f1f5f9;
+}
+.dark #overdue-detail-table tbody td {
+    border-bottom-color: rgba(255, 255, 255, 0.06);
 }

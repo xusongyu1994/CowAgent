@@ -228,35 +228,62 @@ class WecomAppSend(BaseTool):
 
     def _build_name_mapping(self, channel, cache_file: str):
         """
-        调用企微通讯录 API 获取全量用户，建立 姓名→userid 映射
+        调用企微通讯录 API 获取全量用户，建立 姓名→userid 映射。
+
+        说明：企微 API 中一个员工可能属于多个部门，若只从根部门 fetch_child=True 拉取，
+        返回的用户往往不完整（部分版本只返回根部门直属用户）。因此这里改为：
+        1. 遍历所有部门，逐部门拉取用户
+        2. 按 userid 去重，避免同一员工被重复统计/覆盖
         """
         try:
             client = channel.client
 
-            # 1. 获取根部门 ID（department.get(id=None) 返回全量部门列表）
+            # 1. 获取全量部门列表
             dept_list = client.department.get()
-            root_dept_id = self._find_root_department_id(dept_list)
-            if not root_dept_id:
-                logger.error("[WecomAppSend] 无法找到根部门 ID")
+            if not dept_list:
+                logger.error("[WecomAppSend] 未获取到部门列表，无法拉取用户")
                 return
 
-            logger.info(f"[WecomAppSend] 根部门 ID: {root_dept_id}，开始拉取全量用户...")
+            logger.info(f"[WecomAppSend] 共 {len(dept_list)} 个部门，开始逐部门拉取全量用户...")
 
-            # 2. 拉取全量用户（含子部门）
-            user_list = client.user.list(root_dept_id, fetch_child=True, simple=False)
-            # user_list 是 list of dict，每个 dict 含 userid 和 name
+            # 2. 遍历所有部门拉取用户，并按 userid 去重
+            uid_name_map = {}   # userid -> name（用于去重）
+            seen_userids = set()
+            for dept in dept_list:
+                dept_id = dept.get("id")
+                try:
+                    user_list = client.user.list(dept_id, fetch_child=False, simple=False)
+                except Exception as e:
+                    logger.warning(f"[WecomAppSend] 拉取部门[{dept_id}]用户失败: {e}")
+                    continue
+                # user_list 可能是 dict（{"userlist": [...]}）或 list
+                users = user_list.get("userlist", user_list) if isinstance(user_list, dict) else user_list
+                for user in users or []:
+                    if not isinstance(user, dict):
+                        continue
+                    name = (user.get("name") or "").strip()
+                    userid = (user.get("userid") or "").strip()
+                    if not name or not userid:
+                        continue
+                    if userid in seen_userids:
+                        continue  # 已在其他部门出现过，跳过
+                    seen_userids.add(userid)
+                    uid_name_map[userid] = name
 
+            # 3. 建立 姓名→userid 映射
             mapping = {}
-            for user in user_list:
-                name = user.get("name", "").strip()
-                userid = user.get("userid", "").strip()
-                if name and userid:
-                    mapping[name] = userid
+            for userid, name in uid_name_map.items():
+                mapping[name] = userid
 
             self._name_mapping = mapping
-            logger.info(f"[WecomAppSend] 姓名映射建立完成，共 {len(mapping)} 条")
+            logger.info(f"[WecomAppSend] 姓名映射建立完成，共 {len(mapping)} 条（去重后唯一用户 {len(uid_name_map)} 人）")
 
-            # 3. 写入缓存文件
+            # 4. 防覆盖保护：拉取到的用户数异常少时，保留旧缓存，避免用不完整数据覆盖全量
+            if len(mapping) < 5 and self._name_mapping:
+                logger.warning(f"[WecomAppSend] 本次仅拉取到 {len(mapping)} 个用户（疑似不完整），跳过覆写缓存")
+                return
+
+            # 5. 写入缓存文件
             try:
                 os.makedirs(os.path.dirname(cache_file), exist_ok=True)
                 with open(cache_file, "w", encoding="utf-8") as f:

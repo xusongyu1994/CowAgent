@@ -47,5 +47,7 @@
   "permissions_enabled": false,
   "mcp_tool_retrieval_enabled": false,
   "mcp_tool_retrieval_threshold": 20,
-  "mcp_tool_retrieval_top_k": 10
+  "mcp_tool_retrieval_top_k": 10,
+  "wecom_public_base": "",
+  "wecom_open_pages": {"kanban": "金蝶看板"}
 }

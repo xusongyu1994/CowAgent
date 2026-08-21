@@ -101,7 +101,7 @@ metadata:
 | 库存明细 | `STK_Inventory` | 非物料档案，字段不同 |
 | 其他入库单 | `STK_InStock` | |
 | 其他出库单 | `STK_OutStock` | 注意：销售出库是 SAL_OUTSTOCK |
-| 收款单 | `AR_receiveBill` | |
+| 应收单 | `AR_receivable` | |
 | 付款单 | `AP_PAYBILL` | |
 
 ---

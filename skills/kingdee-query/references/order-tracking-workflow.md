@@ -11,7 +11,7 @@
 ### 流程链
 
 ```
-销售订单(SAL_SaleOrder) → 发货通知(SAL_DELIVERYNOTICE) → 销售出库(SAL_OUTSTOCK) → 收款(AR_receiveBill)
+销售订单(SAL_SaleOrder) → 发货通知(SAL_DELIVERYNOTICE) → 销售出库(SAL_OUTSTOCK) → 应收单(AR_receivable)
 ```
 
 ### Step 1 — 查销售订单
@@ -54,12 +54,12 @@ query_bill_json(
 
 > 出库单推荐用 `FCreateDate` 过滤。注意：SAL_OUTSTOCK 中**无** `FCustId.FName` 字段。
 
-### Step 4 — 查收款单
+### Step 4 — 查应收单
 
 ```python
 query_bill_json(
-    form_id="AR_receiveBill",
-    field_keys="FBillNo,FDate,FDocumentStatus,FContactUnit.FName,FRECTOTALAMOUNTFOR",
+    form_id="AR_receivable",
+    field_keys="FBillNo,FDate,FDocumentStatus,FCUSTOMERID.FName,FALLAMOUNTFOR",
     filter_string="FDate >= '起始日期' AND FDate < '结束日期'",
     top_count=500
 )
@@ -193,7 +193,7 @@ filter_string="FDocumentStatus = 'B'"
 | SAL_SaleOrder | `FCustId.FName` | `FAllAmount`（行级） |
 | SAL_DELIVERYNOTICE | `FCustomerID.FName` | — |
 | SAL_OUTSTOCK | ❌ 无客户字段 | — |
-| AR_receiveBill | `FContactUnit.FName` | `FRECTOTALAMOUNTFOR` |
+| AR_receivable | `FCUSTOMERID.FName` | `FALLAMOUNTFOR` |
 | PUR_PurchaseOrder | `FSupplierId.FName` | `FAllAmount`（行级） |
 | STK_InStock | — | — |
 | AP_PAYBILL | `FCONTACTUNIT.FName` | `FPAYTOTALAMOUNTFOR` |

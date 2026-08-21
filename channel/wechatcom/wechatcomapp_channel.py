@@ -46,15 +46,38 @@ class WechatComAppChannel(ChatChannel):
 
     def startup(self):
         # start message listener
-        urls = ("/wxcomapp/?", "channel.wechatcom.wechatcomapp_channel.Query")
-        app = web.application(urls, globals(), autoreload=False)
+        # 1. 创建 /wxcomapp/ 的 web.py 应用
+        wecom_urls = ("/wxcomapp/?", "channel.wechatcom.wechatcomapp_channel.Query")
+        wecom_app = web.application(wecom_urls, globals(), autoreload=False)
+        wecom_wsgi = wecom_app.wsgifunc()
+
+        # 2. 获取 WebChannel 的 WSGI 函数（等待就绪，最多 3 秒）
+        from channel.web.web_channel import WebChannel as _WebChannel
+        web_ch = _WebChannel()
+        wsgi_func = None
+        for _ in range(30):
+            if hasattr(web_ch, '_wsgi_func') and web_ch._wsgi_func:
+                wsgi_func = web_ch._wsgi_func
+                break
+            time.sleep(0.1)
+
+        if wsgi_func is None:
+            logger.error("[wechatcom] WebChannel not ready, /auth/wecom/* will not work")
+            wsgi_func = wecom_wsgi  # fallback: standalone /wxcomapp/ only
+
+        # 3. 合并：/wxcomapp/ 归自己，其余全部交给 WebChannel
+        def combined_wsgi(environ, start_response):
+            path = environ.get('PATH_INFO', '')
+            if path.startswith('/wxcomapp'):
+                return wecom_wsgi(environ, start_response)
+            return wsgi_func(environ, start_response)
+
         port = conf().get("wechatcomapp_port", 9898)
         logger.info("[wechatcom] ✅ WeCom app channel started successfully")
         logger.info("[wechatcom] 📡 Listening on http://0.0.0.0:{}/wxcomapp/".format(port))
-        logger.info("[wechatcom] 🤖 Ready to receive messages")
-        
-        # Build WSGI app with middleware (same as runsimple but without print)
-        func = web.httpserver.StaticMiddleware(app.wsgifunc())
+        logger.info("[wechatcom] 📡 Non-/wxcomapp/ paths proxied to WebChannel (OAuth/chat/api)")
+
+        func = web.httpserver.StaticMiddleware(combined_wsgi)
         func = web.httpserver.LogMiddleware(func)
         server = web.httpserver.WSGIServer(("0.0.0.0", port), func)
         self._http_server = server
