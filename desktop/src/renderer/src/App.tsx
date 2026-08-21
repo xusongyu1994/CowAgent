@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from 'react'
 import { Routes, Route, useLocation, useNavigate } from 'react-router-dom'
-import { History } from 'lucide-react'
+import { History, FolderTree } from 'lucide-react'
 import NavRail from './layout/NavRail'
 import SessionList from './layout/SessionList'
 import WindowControls from './layout/WindowControls'
@@ -8,8 +8,12 @@ import StatusScreen from './components/StatusScreen'
 import LoginGate from './components/LoginGate'
 import { useBackend } from './hooks/useBackend'
 import { usePlatform } from './hooks/usePlatform'
+import { usePushPoll } from './hooks/usePushPoll'
 import { useUIStore } from './store/uiStore'
 import { useSessionStore } from './store/sessionStore'
+import { useWorkspaceStore } from './store/workspaceStore'
+import WorkspacePanel from './components/WorkspacePanel'
+import Lightbox from './components/Lightbox'
 import { initUpdateListener } from './store/updateStore'
 import { useOnboardingStore } from './store/onboardingStore'
 import OnboardingWizard from './components/OnboardingWizard'
@@ -23,6 +27,7 @@ import MemoryPage from './pages/MemoryPage'
 import ChannelsPage from './pages/ChannelsPage'
 import TasksPage from './pages/TasksPage'
 import LogsPage from './pages/LogsPage'
+import { product } from '@product'
 
 const App: React.FC = () => {
   const backend = useBackend()
@@ -30,6 +35,8 @@ const App: React.FC = () => {
   const navigate = useNavigate()
   const { isWin, isMac } = usePlatform()
   const { sessionsCollapsed, toggleSessions, navCollapsed } = useUIStore()
+  const toggleWorkspace = useWorkspaceStore((s) => s.togglePanel)
+  const workspaceOpen = useWorkspaceStore((s) => s.open)
   const onboardingOpen = useOnboardingStore((s) => s.open)
   const maybeOpenOnboarding = useOnboardingStore((s) => s.maybeOpen)
   const [, forceUpdate] = useState(0)
@@ -37,10 +44,30 @@ const App: React.FC = () => {
   // whether login is needed; 'need_login' shows the password screen; 'ok' lets
   // the main UI render.
   const [authState, setAuthState] = useState<'checking' | 'need_login' | 'ok'>('checking')
+  const [productAuthed, setProductAuthed] = useState(false)
+  // Optional gate provided by '@product'. `product.auth` is constant for the
+  // whole build, so calling its hook conditionally is stable across renders.
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  const productRequiresAuth = product.auth ? product.auth.useRequiresAuth() : false
 
   useEffect(() => {
     if (backend.status === 'ready') apiClient.setBaseUrl(backend.baseUrl)
   }, [backend.status, backend.baseUrl])
+
+  // A file dropped where no drop zone handles it makes Chromium navigate to
+  // that file, replacing the app. Swallow those at the document level; pages
+  // that accept files (chat input, knowledge import) still get the event first.
+  useEffect(() => {
+    const swallow = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes('Files')) e.preventDefault()
+    }
+    document.addEventListener('dragover', swallow)
+    document.addEventListener('drop', swallow)
+    return () => {
+      document.removeEventListener('dragover', swallow)
+      document.removeEventListener('drop', swallow)
+    }
+  }, [])
 
   // Once the backend is ready, check whether a web_password is set. If so and
   // this session isn't authenticated, show the login gate before the app.
@@ -72,6 +99,8 @@ const App: React.FC = () => {
   // configured (and not dismissed earlier this session); no persisted flag.
   useEffect(() => {
     if (backend.status !== 'ready' || authState !== 'ok') return
+    // An extension may opt out of the built-in setup wizard.
+    if (product.onboarding?.enabled === false) return
     let cancelled = false
     apiClient
       .getModels()
@@ -97,6 +126,18 @@ const App: React.FC = () => {
     }
   }, [backend.status, authState, maybeOpenOnboarding])
 
+  // Poll for scheduler/push messages once the backend and auth are settled.
+  usePushPoll(backend.status === 'ready' && authState === 'ok')
+
+  // A clicked OS notification asks us to open its session.
+  useEffect(() => {
+    const off = window.electronAPI?.onOpenSession?.((sessionId) => {
+      useSessionStore.getState().setActive(sessionId)
+      navigate('/')
+    })
+    return off
+  }, [navigate])
+
   // Subscribe to auto-update status from the main process (no-op in dev).
   useEffect(() => initUpdateListener(), [])
 
@@ -118,7 +159,17 @@ const App: React.FC = () => {
   const handleLangChange = useCallback(() => forceUpdate((n) => n + 1), [])
 
   if (backend.status !== 'ready') {
-    return <StatusScreen status={backend.status} error={backend.error} onRetry={backend.restart} />
+    return (
+      <StatusScreen
+        status={backend.status}
+        error={backend.error}
+        code={backend.code}
+        path={backend.path}
+        slow={backend.slow}
+        reconnecting={backend.reconnecting}
+        onRetry={backend.restart}
+      />
+    )
   }
 
   // Backend is up but we're still resolving auth — keep the loading screen.
@@ -130,12 +181,19 @@ const App: React.FC = () => {
     return <LoginGate onAuthenticated={() => setAuthState('ok')} />
   }
 
+  // Optional gate from '@product', shown after the local auth check passes.
+  // Rendered inside the layout (nav rail stays visible) so the app's features
+  // are on display while the login card sits in the content area.
+  const ProductGate = product.auth?.Gate
+  const showProductGate = !!(ProductGate && productRequiresAuth && !productAuthed)
+
   const isChat = location.pathname === '/'
-  const showSessions = isChat && !sessionsCollapsed
+  const showSessions = isChat && !sessionsCollapsed && !showProductGate
 
   return (
     <div className="flex h-screen overflow-hidden bg-base text-content">
       {onboardingOpen && <OnboardingWizard onDone={handleLangChange} />}
+      <Lightbox />
       <NavRail onLangChange={handleLangChange} />
 
       {showSessions && <SessionList />}
@@ -156,11 +214,33 @@ const App: React.FC = () => {
             </button>
           )}
           <div className="flex-1 min-w-0" />
+          {isChat && !showProductGate && (
+            <button
+              onClick={toggleWorkspace}
+              title={t('ws_toggle')}
+              className={`titlebar-no-drag inline-flex items-center justify-center w-7 h-7 rounded-btn cursor-pointer transition-colors ${
+                workspaceOpen
+                  ? 'text-accent bg-accent-soft'
+                  : 'text-content-tertiary hover:text-content hover:bg-surface-2'
+              } ${isMac ? 'mt-1' : ''}`}
+            >
+              <FolderTree size={16} />
+            </button>
+          )}
+          {product.slots?.HeaderRight && (
+            <div className="titlebar-no-drag flex items-center">
+              <product.slots.HeaderRight />
+            </div>
+          )}
           {isWin && <WindowControls />}
         </header>
 
         {/* Content */}
-        <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-base">
+        <div className="flex-1 flex min-h-0 overflow-hidden bg-base">
+          <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
+          {showProductGate && ProductGate ? (
+            <ProductGate onAuthenticated={() => setProductAuthed(true)} />
+          ) : (
           <Routes>
             <Route path="/" element={<ChatPage baseUrl={backend.baseUrl} />} />
             <Route path="/knowledge" element={<KnowledgePage baseUrl={backend.baseUrl} />} />
@@ -172,7 +252,13 @@ const App: React.FC = () => {
             {/* Legacy /models route now lives as a tab inside settings */}
             <Route path="/models" element={<SettingsPage baseUrl={backend.baseUrl} onLangChange={handleLangChange} />} />
             <Route path="/logs" element={<LogsPage baseUrl={backend.baseUrl} />} />
+            {product.routes?.map((r) => (
+              <Route key={r.path} path={r.path} element={r.element} />
+            ))}
           </Routes>
+          )}
+          </div>
+          {isChat && !showProductGate && <WorkspacePanel />}
         </div>
       </div>
     </div>

@@ -3,7 +3,8 @@ Agent Bridge - Integrates Agent system with existing COW bridge
 """
 
 import os
-from typing import Optional, List, Tuple
+import threading
+from typing import Dict, Iterator, Optional, List, Tuple
 
 
 def _extract_user_identity(context: 'Context') -> Tuple[Optional[str], Optional[str], str]:
@@ -55,7 +56,13 @@ def _extract_user_identity(context: 'Context') -> Tuple[Optional[str], Optional[
     
     return user_id, user_nickname, channel
 
-from agent.protocol import Agent, LLMModel, LLMRequest, get_cancel_registry
+from agent.protocol import (
+    Agent,
+    LLMModel,
+    LLMRequest,
+    get_cancel_registry,
+    get_steer_registry,
+)
 from bridge.agent_event_handler import AgentEventHandler
 from bridge.agent_initializer import AgentInitializer
 from bridge.bridge import Bridge
@@ -96,7 +103,7 @@ def add_openai_compatible_support(bot_instance):
             return {
                 'api_key': conf().get("open_ai_api_key"),
                 'api_base': conf().get("open_ai_api_base"),
-                'model': conf().get("model", "gpt-3.5-turbo"),
+                'model': conf().get("model") or const.DEFAULT_MODEL,
                 'default_temperature': conf().get("temperature", 0.9),
                 'default_top_p': conf().get("top_p", 1.0),
                 'default_frequency_penalty': conf().get("frequency_penalty", 0.0),
@@ -132,22 +139,61 @@ class AgentLLMModel(LLMModel):
     ]
 
     def __init__(self, bridge: Bridge, bot_type: str = "chat"):
-        super().__init__(model=conf().get("model", const.GPT_41))
+        super().__init__(model=conf().get("model") or const.DEFAULT_MODEL)
         self.bridge = bridge
         self.bot_type = bot_type
         self._bot = None
         self._bot_model = None
+        # Per-session model override (see agent.workspace.session_prefs). None
+        # on both means "follow the global config", which is what every session
+        # does until the user picks a model for that conversation.
+        self._session_model = None
+        self._session_provider = None
 
     @property
     def model(self):
-        return conf().get("model", const.GPT_41)
+        return self._session_model or conf().get("model") or const.DEFAULT_MODEL
 
     @model.setter
     def model(self, value):
         pass
 
+    def set_session_override(self, provider: Optional[str], model: Optional[str]) -> None:
+        """Pin this session to one model/provider, or clear it with None/None.
+
+        The provider matters as much as the model: without it a session that
+        switches from DeepSeek to Claude would keep routing through the globally
+        configured bot type and ask DeepSeek for a Claude model.
+        """
+        provider = (provider or "").strip() or None
+        model = (model or "").strip() or None
+        if provider == self._session_provider and model == self._session_model:
+            return
+        self._session_provider = provider
+        self._session_model = model
+        # Force the lazy bot to be rebuilt for the new routing on the next call.
+        self._bot = None
+        self._bot_model = None
+        self._bot_type = None
+
+    @staticmethod
+    def provider_to_bot_type(provider_id: str) -> str:
+        """Map a UI provider id onto a bot type, as the models console does."""
+        if not provider_id:
+            return ""
+        # Same mapping the models console persists: "openai" routes through the
+        # OpenAI-compatible bot, not the legacy completion one.
+        if provider_id == "openai":
+            return const.CHATGPT
+        return provider_id
+
     def _resolve_bot_type(self, model_name: str) -> str:
         """Resolve bot type from model name, matching Bridge.__init__ logic."""
+        # A session override wins over every global routing switch, including
+        # use_linkai: the user picked this provider for this conversation.
+        if self._session_provider:
+            return self.provider_to_bot_type(self._session_provider)
+
         if conf().get("use_linkai", False) and conf().get("linkai_api_key"):
             return const.LINKAI
         # Support custom bot type configuration
@@ -172,6 +218,27 @@ class AgentLLMModel(LLMModel):
             if lowered_model.startswith(prefix):
                 return btype
         return const.OPENAI
+
+    def _normalized_reasoning_effort(self):
+        """Return the active model's effort value after config resolution."""
+        from models.reasoning_capabilities import resolve_reasoning_effort
+
+        return resolve_reasoning_effort(
+            self._resolve_bot_type(self.model),
+            self.model,
+            conf().get("reasoning_effort_by_model", {}),
+            conf().get("reasoning_effort", "high"),
+        )
+
+    def _is_thinking_only_model(self) -> bool:
+        """Return True for models that require reasoning to stay enabled."""
+        from models.reasoning_capabilities import get_reasoning_capability
+
+        capability = get_reasoning_capability(
+            self._resolve_bot_type(self.model),
+            self.model,
+        )
+        return bool(capability.get("thinking_only"))
 
     @property
     def bot(self):
@@ -224,15 +291,20 @@ class AgentLLMModel(LLMModel):
                 # quality the thinking pass produces.
                 from config import conf
                 thinking_enabled = bool(conf().get("enable_thinking", False))
+                # Some native-reasoning models reject disabled thinking or use
+                # effort as their only control, so they cannot follow the UI
+                # toggle literally.
+                if self._is_thinking_only_model():
+                    thinking_enabled = True
                 kwargs['thinking'] = (
                     {"type": "enabled"} if thinking_enabled
                     else {"type": "disabled"}
                 )
-                # Reasoning effort is only meaningful when thinking is on.
-                # Bots that don't understand the kwarg drop it silently.
+                # Effort only shapes a thinking pass. Thinking-only models keep
+                # receiving it because they force thinking_enabled above.
                 if thinking_enabled:
-                    effort = conf().get("reasoning_effort", "high")
-                    if effort in ("high", "max"):
+                    effort = self._normalized_reasoning_effort()
+                    if effort:
                         kwargs['reasoning_effort'] = effort
 
                 response = self.bot.call_with_tools(**kwargs)
@@ -286,15 +358,19 @@ class AgentLLMModel(LLMModel):
                 # quality the thinking pass produces.
                 from config import conf
                 thinking_enabled = bool(conf().get("enable_thinking", False))
+                # Keep streaming and non-streaming calls on the same provider
+                # contract for always-thinking models.
+                if self._is_thinking_only_model():
+                    thinking_enabled = True
                 kwargs['thinking'] = (
                     {"type": "enabled"} if thinking_enabled
                     else {"type": "disabled"}
                 )
-                # Reasoning effort is only meaningful when thinking is on.
-                # Bots that don't understand the kwarg drop it silently.
+                # Effort only shapes a thinking pass. Thinking-only models keep
+                # receiving it because they force thinking_enabled above.
                 if thinking_enabled:
-                    effort = conf().get("reasoning_effort", "high")
-                    if effort in ("high", "max"):
+                    effort = self._normalized_reasoning_effort()
+                    if effort:
                         kwargs['reasoning_effort'] = effort
 
                 stream = self.bot.call_with_tools(**kwargs)
@@ -329,10 +405,23 @@ class AgentBridge:
     
     def __init__(self, bridge: Bridge):
         self.bridge = bridge
-        self.agents = {}  # session_id -> Agent instance mapping
-        self.default_agent = None  # For backward compatibility (no session_id)
+        from agent.registry import get_agent_registry
+        from agent.routing import get_agent_router
+
+        self.agent_registry = get_agent_registry()
+        self.agent_router = get_agent_router(self.agent_registry)
+        # Canonical runtime map. A session identifier is only unique inside an
+        # agent workspace, so the agent id is part of every live key.
+        self._agent_instances: Dict[Tuple[str, str], Agent] = {}
+        self._default_agents: Dict[str, Agent] = {}
+        self._agents_lock = threading.RLock()
+        # Backward-compatible view for integrations that inspect sessions of
+        # the configured default agent directly.
+        self.agents: Dict[str, Agent] = {}
+        self.default_agent = None
         self.agent: Optional[Agent] = None
         self.scheduler_initialized = False
+        self.scheduler_agent_ids = set()
         
         # Create helper instances
         self.initializer = AgentInitializer(bridge, self)
@@ -341,8 +430,10 @@ class AgentBridge:
         # for the first user message. init_scheduler is idempotent.
         try:
             from agent.tools.scheduler.integration import init_scheduler
-            if init_scheduler(self):
-                self.scheduler_initialized = True
+            for profile in self.agent_registry.list(include_disabled=False):
+                if init_scheduler(self, profile.workspace, profile.id):
+                    self.scheduler_agent_ids.add(profile.id)
+            self.scheduler_initialized = bool(self.scheduler_agent_ids)
         except Exception as e:
             logger.warning(f"[AgentBridge] Eager scheduler init failed: {e}")
 
@@ -381,7 +472,7 @@ class AgentBridge:
                 try:
                     tool = tool_manager.create_tool(tool_name)
                     if tool:
-                        if workspace_dir and hasattr(tool, 'cwd'):
+                        if workspace_dir:
                             tool.cwd = workspace_dir
                         tools.append(tool)
                 except Exception as e:
@@ -410,39 +501,152 @@ class AgentBridge:
 
         return agent
     
-    def get_agent(self, session_id: str = None) -> Optional[Agent]:
+    def steer_session(self, session_id: str, instruction: str, agent_id: str = None):
+        """Inject an explicit instruction into one active session."""
+        logger.info(f"[AgentBridge] steer new instruction: session={session_id}, content={instruction}")
+        return get_steer_registry().submit(
+            self.scoped_session_key(session_id, agent_id), instruction
+        )
+
+    def _resolve_agent_id(self, agent_id: str = None) -> str:
+        return self.agent_registry.get(agent_id).id
+
+    def scoped_session_key(self, session_id: str, agent_id: str = None) -> str:
+        """Namespace a session id by its agent.
+
+        Session ids are only unique within one Agent, so cancel and steer
+        lookups must be scoped or a /cancel in one Agent's chat would abort a
+        different Agent's run that happens to share the id.
+        """
+        return self._cancel_key(
+            self._resolve_agent_id(agent_id),
+            session_id,
+            self.agent_registry.default_agent_id,
+        )
+
+    def route_context(self, context: Context) -> str:
+        """Resolve and attach the workspace selected for an inbound context."""
+        return self.agent_router.resolve_context(context)
+
+    def get_conversation_store(self, agent_id: str = None):
+        """Return the session store owned by one agent workspace."""
+        profile = self.agent_registry.get(agent_id)
+        from agent.memory import get_conversation_store
+        return get_conversation_store(profile.workspace)
+
+    @staticmethod
+    def _runtime_key(agent_id: str, session_id: str) -> Tuple[str, str]:
+        return agent_id, session_id
+
+    @staticmethod
+    def _cancel_key(agent_id: str, token: str, default_agent_id: str) -> str:
+        """Keep legacy token keys for the default agent, namespace the rest."""
+        return token if agent_id == default_agent_id else f"{agent_id}::{token}"
+
+    def get_agent(self, session_id: str = None, agent_id: str = None) -> Optional[Agent]:
         """
         Get agent instance for the given session
         
         Args:
-            session_id: Session identifier (e.g., user_id). If None, returns default agent.
+            session_id: Session identifier (e.g., user_id). If None, returns
+                the workspace's default runtime instance.
+            agent_id: Agent profile identifier. Omit for the configured default.
         
         Returns:
             Agent instance for this session
         """
-        # If no session_id, use default agent (backward compatibility)
-        if session_id is None:
-            if self.default_agent is None:
-                self._init_default_agent()
-            return self.default_agent
-        
-        # Check if agent exists for this session
-        if session_id not in self.agents:
-            self._init_agent_for_session(session_id)
-        
-        return self.agents[session_id]
-    
-    def _init_default_agent(self):
-        """Initialize default super agent"""
-        agent = self.initializer.initialize_agent(session_id=None)
-        self.default_agent = agent
-    
-    def _init_agent_for_session(self, session_id: str):
-        """Initialize agent for a specific session"""
-        agent = self.initializer.initialize_agent(session_id=session_id)
-        self.agents[session_id] = agent
+        resolved_agent_id = self._resolve_agent_id(agent_id)
+        with self._agents_lock:
+            if session_id is None:
+                agent = self._default_agents.get(resolved_agent_id)
+                if agent is None:
+                    agent = self.initializer.initialize_agent(
+                        session_id=None, agent_id=resolved_agent_id
+                    )
+                    self._default_agents[resolved_agent_id] = agent
+                if resolved_agent_id == self.agent_registry.default_agent_id:
+                    self.default_agent = agent
+                return agent
 
-    def sync_session_messages_from_store(self, session_id: str) -> int:
+            key = self._runtime_key(resolved_agent_id, session_id)
+            agent = self._agent_instances.get(key)
+            if agent is None:
+                agent = self.initializer.initialize_agent(
+                    session_id=session_id, agent_id=resolved_agent_id
+                )
+                self._agent_instances[key] = agent
+                if resolved_agent_id == self.agent_registry.default_agent_id:
+                    self.agents[session_id] = agent
+            # Point the working directory at the session's project (if any).
+            # Applied on every fetch, so switching projects — or back to the
+            # default — takes effect on the next message without rebuilding the
+            # agent. Memory/skills stay anchored to the workspace regardless.
+            self._apply_session_project(agent, session_id, resolved_agent_id)
+            # Same idea for the session's model and permission mode: both are
+            # per-conversation overrides that fall back to the global config.
+            self.apply_session_prefs(agent, session_id, resolved_agent_id)
+            return agent
+
+    def _apply_session_project(self, agent, session_id: str, agent_id: str) -> None:
+        """Retarget the agent's working directory to the session's project dir.
+
+        A no-op when the session has no project selected (clears any previous
+        override). Failures are swallowed: a bad project setting must not break
+        the chat, it just falls back to the default workspace.
+        """
+        try:
+            from agent.workspace import project_store
+            project_dir = project_store.get_project_dir(session_id, agent_id)
+            if getattr(agent, "apply_project_dir", None):
+                agent.apply_project_dir(project_dir)
+        except Exception as e:
+            logger.debug(f"[AgentBridge] apply_session_project failed: {e}")
+
+    def apply_session_prefs(self, agent, session_id: str, agent_id: str = None) -> None:
+        """Apply a session's model / permission overrides to its agent.
+
+        Called on every agent fetch and right after the user changes a setting,
+        so a switch takes effect on the next message without rebuilding the
+        agent. An empty override resets the agent to the global config, which is
+        what makes "follow global" work after a session had pinned something.
+        """
+        if agent is None or not session_id:
+            return
+        try:
+            from agent.workspace import session_prefs
+
+            prefs = session_prefs.get_prefs(session_id, agent_id)
+            model = getattr(agent, "model", None)
+            if model is not None and hasattr(model, "set_session_override"):
+                model.set_session_override(prefs.get("provider"), prefs.get("model"))
+            if hasattr(agent, "apply_permission_mode"):
+                agent.apply_permission_mode(prefs.get("permission"))
+        except Exception as e:
+            logger.debug(f"[AgentBridge] apply_session_prefs failed: {e}")
+
+    def get_cached_agent(self, session_id: str, agent_id: str = None) -> Optional[Agent]:
+        """Return an existing session agent without creating one."""
+        resolved_agent_id = self._resolve_agent_id(agent_id)
+        with self._agents_lock:
+            return self._agent_instances.get(
+                self._runtime_key(resolved_agent_id, session_id)
+            )
+
+    def iter_agent_instances(
+        self, include_defaults: bool = True
+    ) -> Iterator[Tuple[str, Optional[str], Agent]]:
+        """Snapshot all live instances as ``(agent_id, session_id, agent)``."""
+        with self._agents_lock:
+            defaults = list(self._default_agents.items()) if include_defaults else []
+            sessions = list(self._agent_instances.items())
+        for agent_id, agent in defaults:
+            yield agent_id, None, agent
+        for (agent_id, session_id), agent in sessions:
+            yield agent_id, session_id, agent
+
+    def sync_session_messages_from_store(
+        self, session_id: str, agent_id: str = None
+    ) -> int:
         """Reload an agent's in-memory ``messages`` list from the persistent
         conversation store.
 
@@ -451,18 +655,23 @@ class AgentBridge:
         as the database. The operation is a no-op when the agent has not been
         instantiated yet for the session.
 
+        Tool blocks are stripped exactly as on session restore. Deleting a
+        message can orphan a tool_use from its tool_result, and replaying that
+        pair would make the provider reject the next request.
+
         Returns:
             Number of messages now held in the agent's memory. Returns -1 if
             the agent does not exist or has no compatible ``messages`` attr.
         """
-        if not session_id or session_id not in self.agents:
+        if not session_id:
             return -1
-        agent = self.agents[session_id]
+        agent = self.get_cached_agent(session_id, agent_id=agent_id)
+        if agent is None:
+            return -1
         if not (hasattr(agent, "messages") and hasattr(agent, "messages_lock")):
             return -1
         try:
-            from agent.memory import get_conversation_store
-            store = get_conversation_store()
+            store = self.get_conversation_store(agent_id)
             # No turn cap here: we want a faithful mirror of what the store
             # has for this session after deletion.
             remaining = store.load_messages(session_id, max_turns=10**6)
@@ -471,6 +680,7 @@ class AgentBridge:
                 f"[AgentBridge] Failed to load messages for sync (session={session_id}): {e}"
             )
             return -1
+        remaining = AgentInitializer._filter_text_only_messages(remaining)
         with agent.messages_lock:
             agent.messages.clear()
             for msg in remaining:
@@ -499,14 +709,23 @@ class AgentBridge:
             Reply object
         """
         session_id = None
+        agent_id = None
         agent = None
         request_id = None
         cancel_event = None
+        token_key = None
+        steer_inbox = None
         try:
             # Extract session_id from context for user isolation
             if context:
                 session_id = context.kwargs.get("session_id") or context.get("session_id")
                 request_id = context.kwargs.get("request_id") or context.get("request_id")
+
+            resolved_agent_id = (
+                self.route_context(context)
+                if context is not None
+                else self.agent_registry.default_agent_id
+            )
 
             # Register a cancel token. Prefer per-turn request_id (web),
             # fall back to session_id (IM channels). The Event is polled by
@@ -514,10 +733,24 @@ class AgentBridge:
             registry = get_cancel_registry()
             token_key = request_id or session_id
             if token_key:
-                cancel_event = registry.register(token_key, session_id=session_id)
+                token_key = self._cancel_key(
+                    resolved_agent_id,
+                    token_key,
+                    self.agent_registry.default_agent_id,
+                )
+                scoped_session_id = self._cancel_key(
+                    resolved_agent_id,
+                    session_id,
+                    self.agent_registry.default_agent_id,
+                )
+                cancel_event = registry.register(
+                    token_key, session_id=scoped_session_id
+                )
 
             # Get agent for this session (will auto-initialize if needed)
-            agent = self.get_agent(session_id=session_id)
+            agent = self.get_agent(
+                session_id=session_id, agent_id=resolved_agent_id
+            )
             if not agent:
                 return Reply(ReplyType.ERROR, "Failed to initialize super agent")
             
@@ -549,9 +782,11 @@ class AgentBridge:
             if context and hasattr(agent, 'model'):
                 agent.model.channel_type = context.get("channel_type", "")
                 agent.model.session_id = session_id or ""
+                agent.model.agent_id = resolved_agent_id
 
             # Store session_id on agent so executor can clear DB on fatal errors
             agent._current_session_id = session_id
+            agent._current_agent_id = resolved_agent_id
 
             # Bound the in-memory context for scheduler sessions before each run.
             # Scheduler sessions are stable per-task and append every trigger,
@@ -584,7 +819,7 @@ class AgentBridge:
             # The reply (assistant/tool messages) is appended once the run
             # completes; the final persist skips this already-stored user turn.
             pre_persisted = self._pre_persist_user_message(
-                session_id, query, context, clear_history
+                session_id, query, context, clear_history, resolved_agent_id
             )
 
             # Mark this session as mid-run so the self-evolution idle scan does
@@ -597,12 +832,20 @@ class AgentBridge:
                 pass
 
             try:
+                if session_id:
+                    steer_inbox = get_steer_registry().register(session_id)
                 # Use agent's run_stream method with event handler
                 response = agent.run_stream(
                     user_message=query,
                     on_event=event_handler.handle_event,
                     clear_history=clear_history,
                     cancel_event=cancel_event,
+                    steer_inbox=steer_inbox,
+                    # A scheduled task may legitimately have nothing to report
+                    # (e.g. "notify me only if the price drops"). Nobody is
+                    # waiting on this run, so an empty answer stays empty and
+                    # the scheduler sends no message at all.
+                    allow_empty_response=bool(context and context.get("is_scheduled_task")),
                 )
             finally:
                 # Clear the mid-run flag so idle scans can review this session.
@@ -625,6 +868,8 @@ class AgentBridge:
                         registry.unregister(token_key)
                     except Exception:
                         pass
+                if session_id and steer_inbox is not None:
+                    get_steer_registry().unregister(session_id, steer_inbox)
 
             # Persist new messages generated during this run
             if session_id:
@@ -635,17 +880,13 @@ class AgentBridge:
                 if pre_persisted and new_messages and new_messages[0].get("role") == "user":
                     new_messages = new_messages[1:]
                 if new_messages:
-                    self._persist_messages(session_id, list(new_messages), channel_type)
-                else:
-                    with agent.messages_lock:
-                        msg_count = len(agent.messages)
-                    if msg_count == 0:
-                        try:
-                            from agent.memory import get_conversation_store
-                            get_conversation_store().clear_session(session_id)
-                            logger.info(f"[AgentBridge] Cleared DB for recovered session: {session_id}")
-                        except Exception as e:
-                            logger.warning(f"[AgentBridge] Failed to clear DB after recovery: {e}")
+                    self._persist_messages(
+                        session_id,
+                        list(new_messages),
+                        channel_type,
+                        resolved_agent_id,
+                        create_if_missing=not pre_persisted,
+                    )
             
             # Record this user turn for the self-evolution idle trigger. Skip
             # scheduler-injected / scheduled-task sessions so internal runs do
@@ -712,27 +953,24 @@ class AgentBridge:
                     agent.stream_executor.files_to_send = []
                     
                     return reply
+                    return reply
             
             return Reply(ReplyType.TEXT, response)
             
         except Exception as e:
             logger.error(f"Agent reply error: {e}")
-            # If the agent cleared its messages due to format error / overflow,
-            # also purge the DB so the next request starts clean.
-            if session_id and agent:
-                try:
-                    with agent.messages_lock:
-                        msg_count = len(agent.messages)
-                    if msg_count == 0:
-                        from agent.memory import get_conversation_store
-                        get_conversation_store().clear_session(session_id)
-                        logger.info(f"[AgentBridge] Cleared DB for session after error: {session_id}")
-                except Exception as db_err:
-                    logger.warning(f"[AgentBridge] Failed to clear DB after error: {db_err}")
+            # The in-memory context may have been reset to recover from a format
+            # error or overflow, but the stored history is deliberately left
+            # intact: it is irreplaceable and is never reloaded with tool blocks.
             # Release cancel token on error path too (idempotent).
-            if cancel_event is not None and (request_id or session_id):
+            if cancel_event is not None and token_key:
                 try:
-                    get_cancel_registry().unregister(request_id or session_id)
+                    get_cancel_registry().unregister(token_key)
+                except Exception:
+                    pass
+            if session_id and steer_inbox is not None:
+                try:
+                    get_steer_registry().unregister(session_id, steer_inbox)
                 except Exception:
                     pass
             return Reply(ReplyType.ERROR, f"Agent error: {str(e)}")
@@ -746,6 +984,7 @@ class AgentBridge:
         """
         import threading
         from agent.tools import ToolManager
+        from common.runtime_identity import wrap
 
         def _run():
             try:
@@ -760,7 +999,12 @@ class AgentBridge:
             except Exception as e:
                 logger.warning(f"[AgentBridge] MCP hot-reload failed (non-fatal): {e}")
 
-        threading.Thread(target=_run, daemon=True, name="mcp-hot-reload").start()
+        # wrap carries the routed identity into the thread; without it this
+        # would reload the default Agent's mcp.json and sync its tools into
+        # whichever Agent actually served the message.
+        threading.Thread(
+            target=wrap(_run), daemon=True, name="mcp-hot-reload"
+        ).start()
 
     def _create_file_reply(self, file_info: dict, text_response: str, context: Context = None) -> Reply:
         """
@@ -889,7 +1133,12 @@ class AgentBridge:
                 logger.warning(f"[AgentBridge] Failed to sync API keys: {e}")
     
     def _pre_persist_user_message(
-        self, session_id: str, query: str, context: Context, clear_history: bool
+        self,
+        session_id: str,
+        query: str,
+        context: Context,
+        clear_history: bool,
+        agent_id: str = None,
     ) -> bool:
         """Persist the user's message before the agent runs.
 
@@ -911,8 +1160,7 @@ class AgentBridge:
             from config import conf
             if not conf().get("conversation_persistence", True):
                 return False
-            from agent.memory import get_conversation_store
-            store = get_conversation_store()
+            store = self.get_conversation_store(agent_id)
             # clear_history starts a fresh transcript: wipe the store first so
             # the eager user turn becomes seq 0, matching in-memory state.
             if clear_history:
@@ -931,12 +1179,22 @@ class AgentBridge:
             return False
 
     def _persist_messages(
-        self, session_id: str, new_messages: list, channel_type: str = ""
+        self,
+        session_id: str,
+        new_messages: list,
+        channel_type: str = "",
+        agent_id: str = None,
+        create_if_missing: bool = True,
     ) -> None:
         """
         Persist new messages to the conversation store after each agent run.
 
         Failures are logged but never propagate — they must not interrupt replies.
+
+        ``create_if_missing=False`` is used once the user turn is known to be
+        stored already: a missing session row then means the user deleted the
+        session while the reply was still running, so the reply is dropped
+        instead of resurrecting the session without its question.
         """
         if not new_messages:
             return
@@ -949,6 +1207,16 @@ class AgentBridge:
             # The in-memory message list keeps them intact for this run's
             # multi-turn LLM context.
             thinking_enabled = bool(conf().get("enable_thinking", False))
+            if not thinking_enabled:
+                from models.reasoning_capabilities import get_reasoning_capability
+
+                # Thinking-only models need their reasoning trace in stored
+                # history so the next tool-calling turn can echo it back.
+                capability = get_reasoning_capability(
+                    AgentLLMModel(None)._resolve_bot_type(conf().get("model", "")),
+                    conf().get("model", ""),
+                )
+                thinking_enabled = bool(capability.get("thinking_only"))
         except Exception:
             thinking_enabled = False
 
@@ -957,10 +1225,15 @@ class AgentBridge:
             messages_to_store = self._strip_thinking_blocks(new_messages)
 
         try:
-            from agent.memory import get_conversation_store
-            get_conversation_store().append_messages(
-                session_id, messages_to_store, channel_type=channel_type
+            stored = self.get_conversation_store(agent_id).append_messages(
+                session_id, messages_to_store, channel_type=channel_type,
+                create_if_missing=create_if_missing
             )
+            if not stored and not create_if_missing:
+                logger.info(
+                    f"[AgentBridge] Session {session_id} was deleted mid-run, "
+                    f"dropped {len(messages_to_store)} reply message(s)"
+                )
         except Exception as e:
             logger.warning(
                 f"[AgentBridge] Failed to persist messages for session={session_id}: {e}"
@@ -979,6 +1252,7 @@ class AgentBridge:
         content: str,
         channel_type: str = "",
         task_description: str = "",
+        agent_id: str = None,
     ) -> None:
         """Add the visible output of a scheduled task to the receiver's session.
 
@@ -1018,12 +1292,11 @@ class AgentBridge:
 
         # Persist first so the new pair gets a stable seq, then prune old
         # scheduler pairs in DB, then sync the in-memory agent.messages buffer.
-        self._persist_messages(session_id, messages, channel_type)
+        self._persist_messages(session_id, messages, channel_type, agent_id)
 
         keep_last_n = max(int(conf().get("scheduler_inject_max_per_session", 3) or 0), 0)
         try:
-            from agent.memory import get_conversation_store
-            deleted = get_conversation_store().prune_scheduled_messages(
+            deleted = self.get_conversation_store(agent_id).prune_scheduled_messages(
                 session_id, keep_last_n=keep_last_n
             )
             if deleted:
@@ -1037,7 +1310,7 @@ class AgentBridge:
                 f"for session={session_id}: {e}"
             )
 
-        agent = self.agents.get(session_id)
+        agent = self.get_cached_agent(session_id, agent_id=agent_id)
         if agent:
             try:
                 with agent.messages_lock:
@@ -1324,22 +1597,50 @@ class AgentBridge:
                 cleaned.append(new_msg)
         return cleaned
 
-    def clear_session(self, session_id: str):
+    def clear_session(self, session_id: str, agent_id: str = None):
         """
-        Clear a specific session's agent and conversation history
-        
+        Drop the cached agent for a session. Persisted history is untouched;
+        the next request rebuilds the agent and restores from the store.
+
         Args:
             session_id: Session identifier to clear
         """
-        if session_id in self.agents:
-            logger.info(f"[AgentBridge] Clearing session: {session_id}")
-            del self.agents[session_id]
+        if not session_id:
+            return
+        resolved_agent_id = self._resolve_agent_id(agent_id)
+        key = self._runtime_key(resolved_agent_id, session_id)
+        with self._agents_lock:
+            removed = self._agent_instances.pop(key, None)
+            if resolved_agent_id == self.agent_registry.default_agent_id:
+                self.agents.pop(session_id, None)
+        if removed is not None:
+            logger.info(
+                f"[AgentBridge] Clearing session: agent={resolved_agent_id}, "
+                f"session={session_id}"
+            )
+
+    def clear_agent(self, agent_id: str) -> int:
+        """Evict every live runtime instance for one agent workspace."""
+        resolved_agent_id = self._resolve_agent_id(agent_id)
+        with self._agents_lock:
+            keys = [key for key in self._agent_instances if key[0] == resolved_agent_id]
+            for key in keys:
+                self._agent_instances.pop(key, None)
+            self._default_agents.pop(resolved_agent_id, None)
+            if resolved_agent_id == self.agent_registry.default_agent_id:
+                self.agents.clear()
+                self.default_agent = None
+        return len(keys)
     
     def clear_all_sessions(self):
         """Clear all agent sessions"""
-        logger.info(f"[AgentBridge] Clearing all sessions ({len(self.agents)} total)")
-        self.agents.clear()
-        self.default_agent = None
+        with self._agents_lock:
+            count = len(self._agent_instances)
+            logger.info(f"[AgentBridge] Clearing all sessions ({count} total)")
+            self._agent_instances.clear()
+            self._default_agents.clear()
+            self.agents.clear()
+            self.default_agent = None
     
     def refresh_all_skills(self) -> int:
         """
@@ -1351,26 +1652,22 @@ class AgentBridge:
         """
         import os
         from dotenv import load_dotenv
-        from config import conf
-
-        # Reload environment variables from .env file
-        workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
-        env_file = os.path.join(workspace_root, '.env')
-
-        if os.path.exists(env_file):
-            load_dotenv(env_file, override=True)
-            logger.info(f"[AgentBridge] Reloaded environment variables from {env_file}")
+        from common.state_dir import env_file as workspace_env_file
 
         refreshed_count = 0
+        loaded_env_files = set()
 
-        # Collect all agent instances to refresh
-        agents_to_refresh = []
-        if self.default_agent:
-            agents_to_refresh.append(("default", self.default_agent))
-        for session_id, agent in self.agents.items():
-            agents_to_refresh.append((session_id, agent))
-
-        for label, agent in agents_to_refresh:
+        # Each live agent reloads its own workspace .env, not just the one the
+        # caller happens to be routed to.
+        for agent_id, session_id, agent in self.iter_agent_instances():
+            workspace_root = getattr(agent, "workspace_dir", None)
+            env_file = str(workspace_env_file(base=workspace_root)) if workspace_root else None
+            if env_file and env_file not in loaded_env_files and os.path.exists(env_file):
+                load_dotenv(env_file, override=True)
+                loaded_env_files.add(env_file)
+                logger.info(
+                    f"[AgentBridge] Reloaded environment variables from {env_file}"
+                )
             # Refresh skills
             if hasattr(agent, 'skill_manager') and agent.skill_manager:
                 agent.skill_manager.refresh_skills()

@@ -5,6 +5,10 @@
 export interface ElectronAPI {
   getBackendPort: () => Promise<number | null>
   getBackendStatus: () => Promise<string>
+  /** The last backend failure, queryable so it can't be missed by timing. */
+  getBackendError: () => Promise<BackendFailure | null>
+  /** Data dir holding config.json and run.log (~/.cow in packaged builds). */
+  getDataDir: () => Promise<string>
   restartBackend: () => Promise<boolean>
   selectDirectory: () => Promise<string | null>
   selectFile: (filters?: { name: string; extensions: string[] }[]) => Promise<string | null>
@@ -21,11 +25,38 @@ export interface ElectronAPI {
   onMenuAction?: (callback: (action: string) => void) => () => void
   // Current app version string (e.g. "0.0.5").
   getAppVersion?: () => Promise<string>
+  // Launch-at-login toggle (macOS + Windows). get returns the effective state;
+  // set returns the real outcome so the UI can surface refusals/errors.
+  getLoginItemEnabled?: () => Promise<boolean>
+  setLoginItemEnabled?: (
+    enabled: boolean
+  ) => Promise<{ ok: boolean; enabled: boolean; error: string }>
+  // Themes (bundled + user themes from ~/.cow/themes), images inlined.
+  listThemes?: () => Promise<Record<string, unknown>[]>
+  getThemesDir?: () => Promise<string>
+  // Optional app config: first-run default theme + display name. Null when
+  // the build ships no app config (standard build).
+  getAppConfig?: () => Promise<{ defaultTheme?: string; appName?: string } | null>
+  // Generic HTTPS relay via the main process (bypasses renderer CORS).
+  httpRelay?: (req: {
+    url: string
+    method?: string
+    headers?: Record<string, string>
+    body?: string
+  }) => Promise<{ ok: boolean; status: number; headers: Record<string, string>; body: string }>
   // Auto-update. lang (e.g. "zh") routes installer downloads to the China CDN.
   checkForUpdate?: (lang?: string) => Promise<void>
   downloadUpdate?: (lang?: string) => Promise<void>
   installUpdate?: () => Promise<void>
   onUpdateStatus?: (callback: (status: UpdateStatus) => void) => () => void
+  // Override the window/Dock/taskbar icon and title at runtime (cached across
+  // launches). Used by product extensions; unused by the standard build.
+  setAppIcon?: (iconUrl: string, icoUrl?: string) => Promise<boolean>
+  setAppTitle?: (title: string) => Promise<boolean>
+  // Show a native OS notification; clicking it focuses the window and fires
+  // onOpenSession with the session id.
+  notify?: (payload: { title?: string; body?: string; sessionId?: string; silent?: boolean }) => Promise<boolean>
+  onOpenSession?: (callback: (sessionId: string) => void) => () => void
   platform: string
   // OS UI language (e.g. "zh-CN"); used to default the language on first run.
   systemLocale?: string
@@ -34,16 +65,39 @@ export interface ElectronAPI {
 // Mirrors UpdateStatus in src/main/updater.ts.
 export type UpdateStatus =
   | { state: 'checking' }
-  | { state: 'available'; version: string; notes?: string }
+  // userInitiated: true when the check came from an explicit "check for update"
+  // click; drives whether a dismissed version re-opens the panel (see store).
+  | { state: 'available'; version: string; notes?: string; userInitiated?: boolean }
   | { state: 'not-available' }
   | { state: 'downloading'; percent: number }
   | { state: 'downloaded'; version: string }
   | { state: 'error'; message: string }
 
+/** Why the backend failed. Mirrors BackendErrorCode in main/python-manager.ts. */
+export type BackendErrorCode =
+  | 'backend_removed'
+  | 'backend_missing'
+  | 'backend_blocked'
+  | 'backend_crashed'
+  | 'backend_timeout'
+  | 'backend_unresponsive'
+
+export interface BackendFailure {
+  code: BackendErrorCode
+  message: string
+  path?: string
+}
+
 export interface BackendStatusEvent {
-  status: 'ready' | 'error' | 'starting'
+  // 'lost' means a previously-ready backend stopped answering and the main
+  // process is restarting it.
+  status: 'ready' | 'error' | 'starting' | 'lost'
   port?: number
   error?: string
+  // Present on 'error': lets the UI explain the specific failure and what to
+  // do about it, rather than falling back to one generic sentence.
+  code?: BackendErrorCode
+  path?: string
 }
 
 // ============================================================
@@ -51,6 +105,16 @@ export interface BackendStatusEvent {
 // ============================================================
 
 export type Role = 'user' | 'assistant' | 'system'
+
+/** One tool call made inside a sub agent, shown under that sub agent's step. */
+export interface SubStep {
+  id: string
+  name: string
+  args?: string
+  status?: string
+  execution_time?: number
+  error?: string
+}
 
 /** A single ordered step inside an assistant turn (matches backend history). */
 export interface MessageStep {
@@ -64,6 +128,16 @@ export interface MessageStep {
   is_error?: boolean
   status?: string
   execution_time?: number
+  /** The outcome written for a person. Rendered instead of `result`, which is
+   * the form the model was handed. */
+  display?: string
+  /** Work done inside this step, for a tool that drives sub agents. */
+  substeps?: SubStep[]
+  /** Set when the tool was refused by the session's permission mode, so the UI
+   * can render an actionable "adjust permissions" hint rather than a plain error. */
+  permission_denied?: boolean
+  /** The mode that refused the call (read-only / workspace-write / full-access). */
+  permission_mode?: string
 }
 
 /** Local UI message model (superset of backend history message). */
@@ -74,6 +148,8 @@ export interface ChatMessage {
   /** Unix seconds. Backend history uses `created_at`; we normalize to `timestamp`. */
   timestamp: number
   attachments?: Attachment[]
+  /** User-facing files the agent wrote during this turn, shown as file cards. */
+  artifacts?: Artifact[]
   /** Ordered steps (thinking / content / tool). Preferred over legacy toolCalls. */
   steps?: MessageStep[]
   /** Legacy live-stream tool events (kept for backward compat during streaming). */
@@ -89,16 +165,95 @@ export interface ChatMessage {
   isStreaming?: boolean
   isCancelled?: boolean
   error?: string
+  /** request_id of a server-pushed (scheduler) message, used to dedupe polls. */
+  pushRequestId?: string
 }
 
 export interface Attachment {
   file_path: string
   file_name: string
-  file_type: 'image' | 'video' | 'file' | 'directory'
+  /** `workspace_ref` points at an existing workspace file (dragged from the
+   *  file panel or picked with `@`) and is referenced in place, not uploaded. */
+  file_type: 'image' | 'video' | 'file' | 'directory' | 'workspace_ref'
+  /** For `workspace_ref`: whether the reference points at a folder. */
+  is_dir?: boolean
   preview_url?: string
   /** Local absolute path (set for files sent via the `send` tool) so the
    *  desktop client can open them directly with the OS default app. */
   abs_path?: string
+}
+
+// ============================================================
+// Workspace files / artifacts
+// ============================================================
+
+/** Coarse file classes the preview panel knows how to render. */
+export type FileKind =
+  | 'directory'
+  | 'html'
+  | 'markdown'
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'pdf'
+  | 'csv'
+  | 'code'
+  | 'office'
+  | 'text'
+  | 'file'
+
+export interface WorkspaceEntry {
+  name: string
+  /** Workspace-relative path. */
+  path: string
+  is_dir: boolean
+  kind: FileKind
+  previewable: boolean
+  size: number
+  mtime: number
+  abs_path?: string
+  raw_url?: string
+  preview_url?: string
+}
+
+export interface WorkspaceTree {
+  path: string
+  root: string
+  entries: WorkspaceEntry[]
+  truncated: boolean
+}
+
+// ============================================================
+// Project workspace (per-session working directory)
+// ============================================================
+
+/** A project directory the user can point a session at. */
+export interface ProjectRef {
+  path: string
+  name: string
+  /** Unix seconds of last use; present on recents. */
+  ts?: number
+}
+
+/** Project picker state for a session (from /api/projects). */
+export interface ProjectState {
+  /** null when the session uses the default workspace (~/cow). */
+  current: ProjectRef | null
+  default_workspace: string
+  projects_root?: string
+  recents: ProjectRef[]
+}
+
+/** A user-facing file the agent wrote during a turn. */
+export interface Artifact {
+  abs_path: string
+  rel_path: string
+  file_name: string
+  kind: FileKind
+  previewable: boolean
+  size: number
+  raw_url: string
+  preview_url: string
 }
 
 /** Live tool event during SSE streaming. */
@@ -119,9 +274,11 @@ export type StreamEventType =
   | 'tool_start'
   | 'tool_progress'
   | 'tool_end'
+  | 'subagent_step'
   | 'message_end'
   | 'phase'
   | 'file_to_send'
+  | 'artifact'
   | 'image'
   | 'video'
   | 'file'
@@ -139,14 +296,32 @@ export interface StreamEvent {
   arguments?: Record<string, unknown>
   status?: string
   result?: string
+  /** `tool_end`: the outcome written for a person, when the tool wrote one. */
+  display?: string
   execution_time?: number
   has_tool_calls?: boolean
+  /** `tool_end`: true when the call was refused by the session permission mode. */
+  permission_denied?: boolean
+  /** `tool_end`: the mode that refused the call. */
+  permission_mode?: string
+  /** `subagent_step` event fields: which step of which card, and how it went. */
+  card_id?: string
+  step_id?: string
+  phase?: 'start' | 'end'
+  error?: string
   path?: string
   abs_path?: string
   file_name?: string
   file_type?: string
   web_url?: string
   audio_url?: string
+  /** `artifact` event fields. */
+  rel_path?: string
+  kind?: FileKind
+  previewable?: boolean
+  size?: number
+  raw_url?: string
+  preview_url?: string
   request_id?: string
   timestamp?: number
   user_seq?: number
@@ -164,6 +339,10 @@ export interface SessionItem {
   created_at: number
   last_active: number
   msg_count: number
+  /** User-pinned to the top of its group. */
+  pinned?: boolean
+  /** Bound project workspace, or null/absent for the default workspace. */
+  project?: { path: string; name: string } | null
 }
 
 export interface SessionsPage {
@@ -172,6 +351,36 @@ export interface SessionsPage {
   page: number
   page_size: number
   has_more: boolean
+  /** "project" once more than one distinct workspace is in play, else "time". */
+  group_mode?: 'project' | 'time'
+  /** Number of distinct project spaces across all sessions (decides group_mode). */
+  space_count?: number
+  default_workspace?: string
+  /** User-defined order of project spaces; "__default__" marks the default one. */
+  project_order?: string[]
+}
+
+/** Per-session model + permission overrides (from /api/sessions/{id}/settings). */
+export interface SessionModelProvider {
+  id: string
+  label: string | { zh: string; en: string }
+  models: string[]
+}
+
+export interface SessionSettingsState {
+  model: {
+    model: string
+    provider: string
+    source: 'session' | 'global'
+    global: { model: string; provider: string }
+    providers: SessionModelProvider[]
+  }
+  permission: {
+    mode: 'read-only' | 'workspace-write' | 'full-access'
+    source: 'session' | 'global'
+    global: string
+    modes: string[]
+  }
 }
 
 /** Backend history message (as returned by /api/history). */
@@ -184,6 +393,8 @@ export interface HistoryMessage {
   reasoning?: string
   kind?: 'evolution'
   extras?: Record<string, unknown>
+  /** Files written this turn, rebuilt server-side from the write/edit steps. */
+  artifacts?: Artifact[]
   /** Per-message sequence number used by delete/regenerate APIs. */
   _seq?: number
 }
@@ -204,9 +415,24 @@ export interface HistoryPage {
 /** A label that may be localized (some providers/channels return {zh,en}). */
 export type LocalizedLabel = string | { zh: string; en: string }
 
+export interface ReasoningOption {
+  value: string
+  label: string
+}
+
+export interface ReasoningCapability {
+  supported: boolean
+  param?: string
+  default?: string
+  thinking_only?: boolean
+  options: ReasoningOption[]
+}
+
 export interface ProviderMeta {
   label: LocalizedLabel
   models: string[]
+  reasoning?: ReasoningCapability
+  reasoning_by_model?: Record<string, ReasoningCapability>
   api_base_key?: string | null
   api_base_default?: string | null
   api_base_placeholder?: string
@@ -224,7 +450,13 @@ export interface ConfigData {
   agent_max_context_tokens: number
   agent_max_context_turns: number
   agent_max_steps: number
+  /** Global default permission for sessions that have not picked one. */
+  agent_permission_mode?: string
+  permission_modes?: string[]
   enable_thinking?: boolean
+  reasoning_effort?: string
+  reasoning_effort_by_model?: Record<string, string>
+  subagent_enabled?: boolean
   self_evolution_enabled?: boolean
   api_bases: Record<string, string>
   api_keys: Record<string, string>

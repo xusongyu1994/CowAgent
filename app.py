@@ -1,5 +1,6 @@
 # encoding:utf-8
 
+import logging
 import os
 import signal
 import sys
@@ -8,6 +9,7 @@ import time
 from channel import channel_factory
 from common import const
 from common.log import logger
+from common.ssl_certs import ensure_ca_bundle
 from config import load_config, conf
 from plugins import *
 import threading
@@ -67,10 +69,31 @@ class ChannelManager:
         Create and start one or more channels in sub-threads.
         If first_start is True, plugins and linkai client will also be initialized.
         """
+        # A concurrent path may have started this channel already (saving its
+        # config restarts it, connecting it starts it). Overwriting the registry
+        # entry below would orphan that instance: nothing holds it any more, yet
+        # its connection stays up and keeps consuming events, so every inbound
+        # message gets handled twice.
+        for name in channel_names:
+            if self._channels.get(name) is not None:
+                logger.warning(f"[ChannelManager] Channel '{name}' is already running, stopping it first")
+                self.stop(name)
+
         with self._lock:
             channels = []
             for name in channel_names:
-                ch = channel_factory.create_channel(name)
+                # One misconfigured channel (e.g. wechatcom_app without its
+                # corp_id/token/aes_key) must not take the whole process down:
+                # instantiating it can raise while parsing config. The web
+                # console in particular has to come up so the desktop shell can
+                # surface the error and let the user fix the config. Skip the
+                # broken channel and keep the rest.
+                try:
+                    ch = channel_factory.create_channel(name)
+                except Exception as e:
+                    logger.error(f"[ChannelManager] Failed to create channel '{name}', skipping it: {e}")
+                    logger.exception(e)
+                    continue
                 ch.cloud_mode = self.cloud_mode
                 self._channels[name] = ch
                 channels.append((name, ch))
@@ -133,6 +156,15 @@ class ChannelManager:
         except Exception as e:
             logger.error(f"[ChannelManager] Channel '{name}' startup error: {e}")
             logger.exception(e)
+            # The desktop client IS the web channel: without it the Electron
+            # shell polls a health endpoint that will never answer and, 90s
+            # later, blames a generic "initialization failed". Exiting non-zero
+            # lets the shell surface the real error immediately. Server
+            # deployments keep the old behavior - other channels may still be
+            # serving, so one broken channel must not take the process down.
+            if DESKTOP_MODE and name == "web":
+                logging.shutdown()
+                os._exit(1)
 
     def stop(self, channel_name: str = None):
         """
@@ -297,12 +329,78 @@ def _warmup_mcp_tools():
     (npx / uvx etc.) finish initializing before the first user message
     arrives. Returns immediately — the actual work happens on a daemon
     thread inside ToolManager. Safe to call when MCP is not configured.
+
+    Warms every enabled Agent: this runs before any routing has happened, so
+    without the loop only the default Agent's servers would be ready and the
+    rest would boot on their first message instead.
     """
     try:
+        from agent.registry import get_agent_registry
         from agent.tools import ToolManager
-        ToolManager()._load_mcp_tools()
+        from common.runtime_identity import identity_scope
+
+        profiles = get_agent_registry().list(include_disabled=False)
     except Exception as e:
         logger.warning(f"[App] MCP warmup failed (non-fatal): {e}")
+        return
+
+    for profile in profiles:
+        # Per Agent, so one broken mcp.json does not stop the others warming.
+        try:
+            with identity_scope(agent_id=profile.id):
+                ToolManager()._load_mcp_tools()
+        except Exception as e:
+            logger.warning(f"[App] MCP warmup failed for '{profile.id}' (non-fatal): {e}")
+
+
+def _preload_heavy_imports():
+    """Resolve the scheduler's import graph on the main thread.
+
+    Python locks imports per module, so two threads walking overlapping graphs
+    in opposite order deadlock outright: the scheduler warmup pulls
+    agent.tools -> requests -> urllib3 while channel creation pulls
+    web_channel -> web -> http.client -> email, and the graphs meet. Desktop
+    mode warms up on a background thread, so its modules must already be in
+    sys.modules before that thread exists - afterwards it only builds objects.
+    """
+    try:
+        from bridge.bridge import Bridge  # noqa: F401
+    except Exception as e:
+        logger.warning(f"[App] Import preload failed (non-fatal): {e}")
+
+
+WEB_STARTUP_TIMEOUT = 25
+
+
+def _start_web_watchdog(timeout: int = WEB_STARTUP_TIMEOUT):
+    """Exit if the web console hasn't bound within ``timeout`` seconds.
+
+    A crash in channel startup already exits, but a *hang* used to leave the
+    process alive forever: the Electron shell waited out its own timeout,
+    blamed a generic "initialization failed", and the wedged backend stayed
+    resident - one more of them per launch attempt. Dumping every thread's
+    stack turns the next such hang into a diagnosable log instead of a guess.
+    """
+    # Resolved here, on the main thread: a background thread must not be the
+    # one to import these (see _preload_heavy_imports).
+    import faulthandler
+    from channel.web.web_channel import SERVING
+
+    def _watch():
+        if SERVING.wait(timeout):
+            return
+        logger.error(
+            f"[App] Web console did not start within {timeout}s, exiting. "
+            "Thread stacks follow:"
+        )
+        try:
+            faulthandler.dump_traceback()
+        except Exception:
+            pass
+        logging.shutdown()
+        os._exit(1)
+
+    threading.Thread(target=_watch, daemon=True).start()
 
 
 def _warmup_scheduler():
@@ -315,44 +413,138 @@ def _warmup_scheduler():
         logger.warning(f"[App] Scheduler warmup failed: {e}")
 
 
+def _warn_if_legacy_workspace_data_exists():
+    """
+    Warn if the hardcoded ~/cow default holds data that agent_workspace
+    doesn't - e.g. after changing agent_workspace without moving the old
+    directory's contents over. The new workspace would otherwise look
+    empty even though old data still exists, with no indication why.
+    """
+    try:
+        from common.state_dir import state_root_str
+        from common.utils import expand_path
+        workspace_root = state_root_str()
+        legacy_root = expand_path("~/cow")
+        # samefile checks filesystem identity, so case-insensitive filesystems
+        # (default on Windows and macOS) are handled correctly - normcase
+        # alone isn't enough, since it only folds case on Windows. Falls back
+        # when either path doesn't exist yet (samefile requires both to).
+        try:
+            same = os.path.samefile(legacy_root, workspace_root)
+        except OSError:
+            same = os.path.normcase(os.path.realpath(legacy_root)) == os.path.normcase(os.path.realpath(workspace_root))
+        if same:
+            return
+        # Any visible entry counts - covers session/skills/memory alike. Hidden
+        # entries are ignored so OS noise (.DS_Store) can't warn on every boot.
+        leftovers = os.listdir(legacy_root) if os.path.isdir(legacy_root) else []
+        if any(not name.startswith(".") for name in leftovers):
+            logger.warning(
+                f"[App] Found existing data at the default workspace ({legacy_root}) "
+                f"that doesn't match your configured agent_workspace ({workspace_root}). "
+                f"It is not migrated automatically - if it has session history, memory, "
+                f"or skills you want to keep, move it into {workspace_root} manually."
+            )
+    except Exception as e:
+        logger.warning(f"[App] Legacy workspace check failed: {e}")
+
+
 def _sync_builtin_skills():
-    """Sync builtin skills from project skills/ to workspace skills/ on startup."""
+    """Sync builtin skills from project skills/ into every enabled Agent's
+    workspace, so a newly configured Agent is not born without them."""
     import shutil
     try:
-        workspace = conf().get("agent_workspace", "~/cow")
-        workspace = os.path.expanduser(workspace)
+        from agent.registry import get_agent_registry
+        from common.runtime_identity import RuntimeIdentity
+        from common.state_dir import skills_dir
+
         project_root = os.path.dirname(os.path.abspath(__file__))
         builtin_dir = os.path.join(project_root, "skills")
-        custom_dir = os.path.join(workspace, "skills")
-
         if not os.path.isdir(builtin_dir):
             return
 
-        os.makedirs(custom_dir, exist_ok=True)
-        synced = 0
-        for name in os.listdir(builtin_dir):
-            src = os.path.join(builtin_dir, name)
-            if not os.path.isdir(src) or not os.path.isfile(os.path.join(src, "SKILL.md")):
-                continue
-            dst = os.path.join(custom_dir, name)
-            try:
-                if os.path.isdir(dst):
-                    shutil.rmtree(dst)
-                shutil.copytree(src, dst)
-                synced += 1
-            except Exception as e:
-                logger.warning(f"[App] Failed to sync builtin skill '{name}': {e}")
-        if synced:
-            logger.info(f"[App] Synced {synced} builtin skill(s) to workspace")
+        for profile in get_agent_registry().list(include_disabled=False):
+            custom_dir = str(
+                skills_dir(RuntimeIdentity(agent_id=profile.id), ensure=True)
+            )
+            synced = 0
+            for name in os.listdir(builtin_dir):
+                src = os.path.join(builtin_dir, name)
+                if not os.path.isdir(src) or not os.path.isfile(os.path.join(src, "SKILL.md")):
+                    continue
+                dst = os.path.join(custom_dir, name)
+                try:
+                    if os.path.isdir(dst):
+                        shutil.rmtree(dst)
+                    shutil.copytree(src, dst)
+                    synced += 1
+                except Exception as e:
+                    logger.warning(f"[App] Failed to sync builtin skill '{name}': {e}")
+            if synced:
+                logger.info(
+                    f"[App] Synced {synced} builtin skill(s) to workspace of "
+                    f"agent '{profile.id}'"
+                )
     except Exception as e:
         logger.warning(f"[App] Builtin skills sync failed: {e}")
+
+
+def _scaffold_subagent_assets():
+    """Seed every enabled Agent's subagents/ directory with the guide and the
+    example type, so there is something to copy from.
+
+    Only when the feature is on: an install that never enables sub agents
+    should not grow a directory for them. Files are written once rather than
+    synced like skills, so a user who edits or deletes one keeps that choice.
+    """
+    import shutil
+    try:
+        from agent.registry import get_agent_registry
+        from agent.subagent import SubagentSettings
+        from common.runtime_identity import RuntimeIdentity
+        from common.state_dir import subagents_dir
+
+        if not SubagentSettings.from_config().enabled:
+            return
+
+        asset_dir = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "agent", "subagent", "assets"
+        )
+        if not os.path.isdir(asset_dir):
+            return
+
+        for profile in get_agent_registry().list(include_disabled=False):
+            target_dir = subagents_dir(RuntimeIdentity(agent_id=profile.id), ensure=True)
+            written = 0
+            for name in sorted(os.listdir(asset_dir)):
+                src = os.path.join(asset_dir, name)
+                target = target_dir / name
+                if not os.path.isfile(src) or target.exists():
+                    continue
+                try:
+                    shutil.copyfile(src, target)
+                    written += 1
+                except Exception as e:
+                    logger.warning(f"[App] Failed to write sub agent asset '{name}': {e}")
+            if written:
+                logger.info(
+                    f"[App] Seeded {written} sub agent file(s) in workspace of "
+                    f"agent '{profile.id}'"
+                )
+    except Exception as e:
+        logger.warning(f"[App] Sub agent scaffold failed: {e}")
 
 
 def run():
     global _channel_mgr
     try:
+        # Before any TLS connection: a packaged build has no OpenSSL CA store.
+        bundle = ensure_ca_bundle()
+        if bundle:
+            logger.debug(f"[App] using certifi CA bundle: {bundle}")
         # load config
         load_config()
+        _warn_if_legacy_workspace_data_exists()
         # ctrl + c
         sigterm_handler_wrap(signal.SIGINT)
         # kill signal
@@ -375,6 +567,7 @@ def run():
 
         # Sync builtin skills to workspace before channels start
         _sync_builtin_skills()
+        _scaffold_subagent_assets()
 
         # Kick off MCP server loading in the background so first-message
         # latency isn't dominated by npx package downloads. Skipped in desktop
@@ -386,6 +579,8 @@ def run():
             # Defer the (heavy) AgentBridge/scheduler warmup to a background
             # thread so the web API becomes available within a couple seconds.
             # The scheduler still starts; it just doesn't block UI readiness.
+            _preload_heavy_imports()
+            _start_web_watchdog()
             threading.Thread(target=_warmup_scheduler, daemon=True).start()
         else:
             _warmup_scheduler()
@@ -402,6 +597,12 @@ def run():
     except Exception as e:
         logger.error("App startup failed!")
         logger.exception(e)
+        # Desktop shell reads exit code 0 as a clean shutdown and would spin on
+        # "connecting" until its timeout. Exit non-zero so it surfaces the real
+        # error and offers a retry right away.
+        if DESKTOP_MODE:
+            logging.shutdown()
+            os._exit(1)
 
 
 if __name__ == "__main__":

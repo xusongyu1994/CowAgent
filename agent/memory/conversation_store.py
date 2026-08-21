@@ -7,7 +7,8 @@ Design:
 - Pruning: age-based only (sessions not updated within N days are deleted)
 - Thread-safe via a single in-process lock
 
-Storage path: ~/cow/sessions/conversations.db
+Storage path: <agent workspace>/memory/long-term/index.db (shared with the
+memory index)
 """
 
 from __future__ import annotations
@@ -35,7 +36,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     context_start_seq INTEGER NOT NULL DEFAULT 0,
     created_at        INTEGER NOT NULL,
     last_active       INTEGER NOT NULL,
-    msg_count         INTEGER NOT NULL DEFAULT 0
+    msg_count         INTEGER NOT NULL DEFAULT 0,
+    pinned            INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS messages (
@@ -67,6 +69,11 @@ ALTER TABLE sessions ADD COLUMN title TEXT NOT NULL DEFAULT '';
 
 _MIGRATION_ADD_CONTEXT_START_SEQ = """
 ALTER TABLE sessions ADD COLUMN context_start_seq INTEGER NOT NULL DEFAULT 0;
+"""
+
+# User-pinned conversations, kept at the top of the session list.
+_MIGRATION_ADD_PINNED = """
+ALTER TABLE sessions ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0;
 """
 
 # Generic JSON sidecar for per-message attachments (TTS audio URL, future use).
@@ -193,7 +200,9 @@ def _group_into_display_turns(
     include_thinking: bool = True,
 ) -> List[Dict[str, Any]]:
     """
-    Convert raw (role, content_json, created_at) DB rows into display turns.
+    Convert raw DB rows into display turns. Rows loaded for the web history
+    include ``seq`` as their first field; older callers may still pass the
+    legacy ``(role, content_json, created_at, extras)`` shape.
 
     One display turn = one visible user message  +  one merged assistant reply.
     All intermediate assistant messages (those carrying tool_use) and the final
@@ -219,7 +228,12 @@ def _group_into_display_turns(
     cur_rest: List[tuple] = []
     started = False
 
-    for role, raw_content, created_at, raw_extras in rows:
+    for row in rows:
+        if len(row) == 5:
+            seq, role, raw_content, created_at, raw_extras = row
+        else:
+            seq = None
+            role, raw_content, created_at, raw_extras = row
         try:
             content = json.loads(raw_content)
         except Exception:
@@ -234,11 +248,11 @@ def _group_into_display_turns(
         if role == "user" and _is_visible_user_message(content):
             if started:
                 groups.append((cur_user, cur_rest))
-            cur_user = (content, created_at, extras)
+            cur_user = (content, created_at, extras, seq)
             cur_rest = []
             started = True
         else:
-            cur_rest.append((role, content, created_at, extras))
+            cur_rest.append((role, content, created_at, extras, seq))
 
     if started:
         groups.append((cur_user, cur_rest))
@@ -251,13 +265,16 @@ def _group_into_display_turns(
     for user_row, rest in groups:
         # User turn
         if user_row:
-            content, created_at, _u_extras = user_row
+            content, created_at, _u_extras, user_seq = user_row
             text = _extract_display_text(content)
             # Hide internal injection markers (scheduler / self-evolution) so the
             # user never sees a synthetic "[SCHEDULED] self-evolution" bubble;
             # the assistant reply that follows is still rendered.
             if text and not _is_internal_user_marker(text):
-                turns.append({"role": "user", "content": text, "created_at": created_at})
+                turn = {"role": "user", "content": text, "created_at": created_at}
+                if user_seq is not None:
+                    turn["_seq"] = user_seq
+                turns.append(turn)
 
         # Build an ordered list of steps preserving the original sequence:
         #   thinking → content → tool_call → content → ...
@@ -265,9 +282,10 @@ def _group_into_display_turns(
         tool_results: Dict[str, str] = {}
         final_text = ""
         final_ts: Optional[int] = None
+        final_seq: Optional[int] = None
         merged_extras: Dict[str, Any] = {}
 
-        for role, content, created_at, extras in rest:
+        for role, content, created_at, extras, seq in rest:
             if role == "assistant" and isinstance(extras, dict):
                 merged_extras.update(extras)
             if role == "user":
@@ -301,6 +319,8 @@ def _group_into_display_turns(
                     steps.append({"type": "content", "content": content.strip()})
                     final_text = content.strip()
                 final_ts = created_at
+                if seq is not None:
+                    final_seq = seq
 
         # Attach tool results to tool steps
         for step in steps:
@@ -334,6 +354,8 @@ def _group_into_display_turns(
                 turn["kind"] = "evolution"
             if merged_extras:
                 turn["extras"] = merged_extras
+            if final_seq is not None:
+                turn["_seq"] = final_seq
             turns.append(turn)
 
     return turns
@@ -352,6 +374,7 @@ class ConversationStore:
     def __init__(self, db_path: Path):
         self._db_path = db_path
         self._lock = threading.RLock()  # Use RLock to allow reentrant locking
+        self._schema_identity: tuple = ()
         self._init_db()
 
     # ------------------------------------------------------------------
@@ -440,7 +463,8 @@ class ConversationStore:
         session_id: str,
         messages: List[Dict[str, Any]],
         channel_type: str = "",
-    ) -> None:
+        create_if_missing: bool = True,
+    ) -> bool:
         """
         Append new messages to a session's history.
 
@@ -452,15 +476,31 @@ class ConversationStore:
             messages: List of message dicts to append.
             channel_type: Source channel (e.g. "feishu", "web", "wechat").
                           Only written on session creation; ignored on update.
+            create_if_missing: When False, do nothing if the session row is
+                          gone. Callers that already stored the user turn use
+                          this so a session deleted mid-run is not recreated
+                          from the reply alone.
+
+        Returns:
+            True when the messages were written, False when the session was
+            missing and ``create_if_missing`` is False.
         """
         if not messages:
-            return
+            return False
 
         now = int(time.time())
         with self._lock:
             conn = self._connect()
             try:
                 with conn:
+                    if not create_if_missing:
+                        exists = conn.execute(
+                            "SELECT 1 FROM sessions WHERE session_id = ?",
+                            (session_id,),
+                        ).fetchone()
+                        if not exists:
+                            return False
+
                     # INSERT OR IGNORE creates the row on first visit;
                     # the UPDATE always refreshes last_active.
                     # Avoids ON CONFLICT...DO UPDATE (requires SQLite >= 3.24).
@@ -529,6 +569,7 @@ class ConversationStore:
                                         (title, session_id),
                                     )
                                     break
+                    return True
             finally:
                 conn.close()
 
@@ -1025,33 +1066,7 @@ class ConversationStore:
         except Exception:
             include_thinking = False
 
-        # Strip seq for display grouping, but record max seq per visible user group
-        plain_rows = [
-            (role, content, created_at, extras_raw)
-            for _seq, role, content, created_at, extras_raw in rows
-        ]
-        visible = _group_into_display_turns(plain_rows, include_thinking=include_thinking)
-
-        # Build a mapping: find the seq of each visible user message to annotate context boundary.
-        # Walk through rows to find visible user message seqs in order.
-        visible_user_seqs: List[int] = []
-        for seq, role, raw_content, _ts, _extras in rows:
-            if role != "user":
-                continue
-            try:
-                content = json.loads(raw_content)
-            except Exception:
-                content = raw_content
-            if _is_visible_user_message(content):
-                visible_user_seqs.append(seq)
-
-        # Each pair of display turns (user+assistant) corresponds to a visible user seq.
-        # Mark which turns are before the context boundary.
-        user_turn_idx = 0
-        for turn in visible:
-            if turn["role"] == "user" and user_turn_idx < len(visible_user_seqs):
-                turn["_seq"] = visible_user_seqs[user_turn_idx]
-                user_turn_idx += 1
+        visible = _group_into_display_turns(rows, include_thinking=include_thinking)
 
         total = len(visible)
         offset = (page - 1) * page_size
@@ -1074,11 +1089,17 @@ class ConversationStore:
         page_size: int = 50,
     ) -> Dict[str, Any]:
         """
-        List sessions ordered by last_active DESC, with optional channel_type filter.
+        List sessions with pinned ones first, then last_active DESC, with an
+        optional channel_type filter.
+
+        Pinned sessions sort ahead of everything else rather than only ahead of
+        the rows on the same page, so a pin still reaches the top of the list
+        when the conversation is old enough to sit several pages down.
 
         Returns:
             {
-                "sessions": [{session_id, title, created_at, last_active, msg_count}, ...],
+                "sessions": [{session_id, title, created_at, last_active,
+                              msg_count, pinned}, ...],
                 "total": int,
                 "page": int,
                 "page_size": int,
@@ -1096,10 +1117,10 @@ class ConversationStore:
                     ).fetchone()[0]
                     rows = conn.execute(
                         """
-                        SELECT session_id, title, created_at, last_active, msg_count
+                        SELECT session_id, title, created_at, last_active, msg_count, pinned
                         FROM sessions
                         WHERE channel_type = ?
-                        ORDER BY last_active DESC
+                        ORDER BY pinned DESC, last_active DESC
                         LIMIT ? OFFSET ?
                         """,
                         (channel_type, page_size, (page - 1) * page_size),
@@ -1110,9 +1131,9 @@ class ConversationStore:
                     ).fetchone()[0]
                     rows = conn.execute(
                         """
-                        SELECT session_id, title, created_at, last_active, msg_count
+                        SELECT session_id, title, created_at, last_active, msg_count, pinned
                         FROM sessions
-                        ORDER BY last_active DESC
+                        ORDER BY pinned DESC, last_active DESC
                         LIMIT ? OFFSET ?
                         """,
                         (page_size, (page - 1) * page_size),
@@ -1127,6 +1148,7 @@ class ConversationStore:
                 "created_at": r[2],
                 "last_active": r[3],
                 "msg_count": r[4],
+                "pinned": bool(r[5]),
             }
             for r in rows
         ]
@@ -1151,6 +1173,40 @@ class ConversationStore:
                     return cur.rowcount > 0
             finally:
                 conn.close()
+
+    def set_pinned(self, session_id: str, pinned: bool) -> bool:
+        """Pin or unpin a session. Returns True if the session existed."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                with conn:
+                    cur = conn.execute(
+                        "UPDATE sessions SET pinned = ? WHERE session_id = ?",
+                        (1 if pinned else 0, session_id),
+                    )
+                    return cur.rowcount > 0
+            finally:
+                conn.close()
+
+    def list_session_ids(self, channel_type: Optional[str] = None) -> List[str]:
+        """Every session id, optionally filtered by channel.
+
+        One cheap single-column scan, used to work out how many distinct project
+        spaces are actually in play without paging through full session rows.
+        """
+        with self._lock:
+            conn = self._connect()
+            try:
+                if channel_type:
+                    rows = conn.execute(
+                        "SELECT session_id FROM sessions WHERE channel_type = ?",
+                        (channel_type,),
+                    ).fetchall()
+                else:
+                    rows = conn.execute("SELECT session_id FROM sessions").fetchall()
+            finally:
+                conn.close()
+        return [r[0] for r in rows]
 
     def get_stats(self) -> Dict[str, Any]:
         """Return basic stats keyed by channel_type, for monitoring."""
@@ -1185,13 +1241,37 @@ class ConversationStore:
 
     def _init_db(self) -> None:
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        conn = self._connect()
+        conn = self._raw_connect()
         try:
             conn.executescript(_DDL)
             conn.commit()
             self._migrate(conn)
         finally:
             conn.close()
+        self._schema_identity = self._db_identity()
+
+    def _db_identity(self) -> tuple:
+        """Identify the physical file behind _db_path, or () when it is missing."""
+        try:
+            st = self._db_path.stat()
+        except OSError:
+            return ()
+        return (st.st_dev, st.st_ino)
+
+    def _ensure_schema(self) -> None:
+        """Recreate the conversation tables when the shared DB file was swapped.
+
+        The long-term memory index lives in the same file and may quarantine and
+        replace it on corruption. Without this check, every later query would
+        keep failing with "no such table: sessions" for the whole process
+        lifetime, so new messages would silently stop being persisted.
+        """
+        if self._db_identity() == self._schema_identity:
+            return
+        logger.warning(
+            "[ConversationStore] Shared DB file was replaced; recreating conversation schema"
+        )
+        self._init_db()
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
         """Apply incremental schema migrations on existing databases."""
@@ -1220,6 +1300,13 @@ class ConversationStore:
                 logger.info("[ConversationStore] Migrated: added context_start_seq column")
             except Exception as e:
                 logger.warning(f"[ConversationStore] Migration (context_start_seq) failed: {e}")
+        if "pinned" not in cols:
+            try:
+                conn.execute(_MIGRATION_ADD_PINNED)
+                conn.commit()
+                logger.info("[ConversationStore] Migrated: added pinned column")
+            except Exception as e:
+                logger.warning(f"[ConversationStore] Migration (pinned) failed: {e}")
 
         msg_cols = {
             row[1]
@@ -1234,6 +1321,11 @@ class ConversationStore:
                 logger.warning(f"[ConversationStore] Migration (extras) failed: {e}")
 
     def _connect(self) -> sqlite3.Connection:
+        with self._lock:
+            self._ensure_schema()
+        return self._raw_connect()
+
+    def _raw_connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._db_path), timeout=10)
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
@@ -1245,34 +1337,59 @@ class ConversationStore:
 # ---------------------------------------------------------------------------
 
 _store_instance: Optional[ConversationStore] = None
-_store_lock = threading.Lock()
+_store_instances: Dict[str, ConversationStore] = {}
+_store_lock = threading.RLock()
 
 
-def get_conversation_store() -> ConversationStore:
-    """
-    Return the process-wide ConversationStore singleton.
-
-    Reuses the long-term memory database so the project stays with a single
-    SQLite file: ~/cow/memory/long-term/index.db
-    The conversation tables (sessions / messages) are separate from the
-    memory tables (memory_chunks / file_metadata) — no conflicts.
-    """
-    global _store_instance
-    if _store_instance is not None:
-        return _store_instance
-
-    with _store_lock:
-        if _store_instance is not None:
-            return _store_instance
-
+def _resolve_store_path(workspace_root=None) -> Path:
+    if workspace_root is None:
         try:
             from agent.memory.config import get_default_memory_config
-            db_path = get_default_memory_config().get_db_path()
+            return get_default_memory_config().get_db_path().resolve()
         except Exception:
             from common.utils import expand_path
-            db_path = Path(expand_path("~/cow")) / "memory" / "long-term" / "index.db"
+            return (
+                Path(expand_path("~/cow")) / "memory" / "long-term" / "index.db"
+            ).resolve()
+    from agent.memory.config import MemoryConfig
+    from common.utils import expand_path
+    workspace = Path(expand_path(str(workspace_root))).resolve()
+    return MemoryConfig(workspace_root=str(workspace)).get_db_path().resolve()
 
-        _store_instance = ConversationStore(db_path)
-        logger.debug(f"[ConversationStore] Using shared DB at: {db_path}")
-        return _store_instance
 
+def get_conversation_store(workspace_root=None) -> ConversationStore:
+    """
+    Return the ConversationStore for one complete agent workspace.
+
+    Reuses that workspace's long-term memory database, keeping one SQLite file
+    per agent at ``<workspace>/memory/long-term/index.db``.
+    The conversation tables (sessions / messages) are separate from the
+    memory tables (memory_chunks / file_metadata). Omitting ``workspace_root``
+    preserves the original single-agent behaviour.
+    """
+    global _store_instance
+    db_path = _resolve_store_path(workspace_root)
+    key = str(db_path)
+    store = _store_instances.get(key)
+    if store is not None:
+        if workspace_root is None:
+            _store_instance = store
+        return store
+
+    with _store_lock:
+        store = _store_instances.get(key)
+        if store is None:
+            store = ConversationStore(db_path)
+            _store_instances[key] = store
+            logger.debug(f"[ConversationStore] Using workspace DB at: {db_path}")
+        if workspace_root is None:
+            _store_instance = store
+        return store
+
+
+def clear_conversation_store_cache() -> None:
+    """Forget cached store objects. Intended for config reloads and tests."""
+    global _store_instance
+    with _store_lock:
+        _store_instances.clear()
+        _store_instance = None

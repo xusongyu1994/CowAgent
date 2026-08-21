@@ -7,7 +7,7 @@ from common.log import logger
 from agent.protocol.models import LLMRequest, LLMModel
 from agent.protocol.agent_stream import AgentStreamExecutor
 from agent.protocol.result import AgentAction, AgentActionType, ToolResult, AgentResult
-from agent.tools.base_tool import BaseTool, ToolStage
+from agent.tools.base_tool import BaseTool, ToolStage, is_tool_available
 
 
 class Agent:
@@ -15,7 +15,7 @@ class Agent:
                  tools=None, output_mode="print", max_steps=100, max_context_tokens=None, 
                  context_reserve_tokens=None, memory_manager=None, name: str = None,
                  workspace_dir: str = None, skill_manager=None, enable_skills: bool = True,
-                 runtime_info: dict = None):
+                 runtime_info: dict = None, skip_context_files: bool = False):
         """
         Initialize the Agent with system prompt, model, description.
 
@@ -34,6 +34,12 @@ class Agent:
         :param skill_manager: Optional SkillManager instance (will be created if None and enable_skills=True)
         :param enable_skills: Whether to enable skills support (default: True)
         :param runtime_info: Optional runtime info dict (with _get_current_time callable for dynamic time)
+        :param skip_context_files: Skip AGENT.md / USER.md / RULE.md when building the
+                           system prompt. Sub agents set this: they report to the
+                           agent that spawned them rather than to the user, so the
+                           persona is the parent's job, and inheriting it would
+                           spend context on instructions about a conversation the
+                           sub agent cannot see.
         """
         self.name = name or "Agent"
         self.system_prompt = system_prompt
@@ -49,9 +55,18 @@ class Agent:
         self.messages = []  # Unified message history for stream mode
         self.messages_lock = threading.Lock()  # Lock for thread-safe message operations
         self.memory_manager = memory_manager  # Memory manager for auto memory flush
-        self.workspace_dir = workspace_dir  # Workspace directory
+        self.workspace_dir = workspace_dir  # Workspace directory (state root, e.g. ~/cow)
+        # Optional per-session project directory that overrides the working
+        # directory (bash cwd, relative file paths) while memory/skills stay
+        # anchored to workspace_dir. None means "use workspace_dir".
+        self.project_dir = None
+        # How much this session may change (see agent.permission). None means
+        # "follow the global setting", resolved at check time so a change to the
+        # global default reaches sessions that never picked a mode themselves.
+        self.permission_mode = None
         self.enable_skills = enable_skills  # Skills enabled flag
         self.runtime_info = runtime_info  # Runtime info for dynamic time update
+        self.skip_context_files = skip_context_files
         # Optional extra instructions appended AFTER the rebuilt full system
         # prompt. Used by the self-evolution review agent to add its task brief
         # on top of the full context (tools, workspace, user preferences, time)
@@ -92,6 +107,87 @@ class Agent:
         tool.model = self.model
         self.tools.append(tool)
 
+    # Tools whose cwd defines the working directory. Memory and other tools
+    # deliberately keep their own paths and are not retargeted here.
+    _CWD_TOOLS = frozenset(
+        {"read", "write", "edit", "bash", "search_files", "ls", "web_fetch", "send", "browser"}
+    )
+
+    def effective_cwd(self) -> str:
+        """The working directory in force: the project override, else workspace."""
+        return self.project_dir or self.workspace_dir or os.getcwd()
+
+    def apply_project_dir(self, project_dir):
+        """Point the working directory at ``project_dir`` (None resets to workspace).
+
+        Retargets the cwd of file/shell tools so bash, read, write, etc. operate
+        inside the project. Memory, skills and MCP keep pointing at the Agent's
+        workspace because they resolve absolute paths of their own. The system
+        prompt is rebuilt per turn via ``get_full_system_prompt`` and reads
+        ``effective_cwd`` there, so no prompt refresh is needed here.
+        """
+        # Normalize: an empty or workspace-equal value means "no project".
+        if project_dir:
+            project_dir = os.path.realpath(os.path.expanduser(project_dir))
+            if self.workspace_dir and project_dir == os.path.realpath(
+                os.path.expanduser(self.workspace_dir)
+            ):
+                project_dir = None
+        else:
+            project_dir = None
+
+        self.project_dir = project_dir
+        cwd = self.effective_cwd()
+        for tool in self.tools:
+            name = getattr(tool, "name", None)
+            if not (name in self._CWD_TOOLS or hasattr(tool, "cwd")):
+                continue
+            try:
+                # Prefer set_cwd when a tool has one (bash re-renders its
+                # description); otherwise just retarget the attribute.
+                setter = getattr(tool, "set_cwd", None)
+                if callable(setter):
+                    setter(cwd)
+                else:
+                    tool.cwd = cwd
+                if isinstance(getattr(tool, "config", None), dict):
+                    tool.config["cwd"] = cwd
+            except Exception:
+                pass
+        return self.project_dir
+
+    def effective_permission_mode(self) -> str:
+        """The permission mode in force: this session's, else the global default."""
+        from agent.permission import global_mode, normalize_mode
+
+        if self.permission_mode:
+            return normalize_mode(self.permission_mode, global_mode())
+        return global_mode()
+
+    def apply_permission_mode(self, mode):
+        """Set (or clear, with None) this session's permission mode.
+
+        Takes effect on the next tool call: the executor resolves the mode per
+        call, so a mid-conversation change applies without rebuilding the agent.
+        The system prompt is rebuilt per turn and picks the new mode up there.
+        """
+        from agent.permission import normalize_mode
+
+        self.permission_mode = normalize_mode(mode) if mode else None
+        return self.permission_mode
+
+    def write_roots(self) -> list:
+        """Directories that stay writable under the workspace-write mode.
+
+        The working directory is where the user's work belongs; the Agent's own
+        state root has to stay writable regardless, or memory, skills and
+        knowledge - which live there by design - would break in project mode.
+        """
+        roots = [self.effective_cwd()]
+        if self.workspace_dir:
+            roots.append(self.workspace_dir)
+        return roots
+
     def get_skills_prompt(self, skill_filter=None) -> str:
         """
         Get the skills prompt to append to system prompt.
@@ -122,7 +218,9 @@ class Agent:
             if self.skill_manager:
                 self.skill_manager.refresh_skills()
 
-            context_files = load_context_files(self.workspace_dir) if self.workspace_dir else None
+            context_files = None
+            if self.workspace_dir and not self.skip_context_files:
+                context_files = load_context_files(self.workspace_dir)
 
             try:
                 from common import i18n
@@ -168,12 +266,17 @@ class Agent:
                 logger.warning("[Agent] current_user_id is None, cannot build user_identity!")
             
             full = builder.build(
-                tools=self.tools,
+                # Same list the model is offered this turn: describing a tool
+                # in the prompt that is not in the schema invites it to call
+                # something that is not there.
+                tools=[tool for tool in self.tools if is_tool_available(tool)],
                 context_files=context_files,
                 skill_manager=self.skill_manager,
                 memory_manager=self.memory_manager,
                 runtime_info=self.runtime_info,
                 user_identity=user_identity,
+                project_dir=self.project_dir,
+                permission_mode=self.effective_permission_mode(),
             )
             if self.extra_system_suffix:
                 full = f"{full}\n\n{self.extra_system_suffix}"
@@ -215,24 +318,21 @@ class Agent:
 
     def _get_model_context_window(self) -> int:
         """
-        Get the model's context window size in tokens.
+        Get the model's *total* context window size in tokens (input + output).
         Auto-detect based on model name.
-        
-        Model context windows:
-        - Claude 3.5/3.7 Sonnet: 200K tokens
-        - Claude 3 Opus: 200K tokens
-        - GPT-4 Turbo/128K: 128K tokens
-        - GPT-4: 8K-32K tokens
-        - GPT-3.5: 16K tokens
-        - DeepSeek: 64K tokens
-        
+
+        This is the hard ceiling the provider enforces on prompt tokens plus
+        the completion budget. Trimming must leave room for the completion (see
+        `_get_output_reserve_tokens`), otherwise a full-window prompt plus the
+        server-side default `max_tokens` overflows and the request 400s.
+
         :return: Context window size in tokens
         """
         if self.model and hasattr(self.model, 'model'):
             model_name = self.model.model.lower()
 
             # Claude models - 200K context
-            if 'claude-3' in model_name or 'claude-sonnet' in model_name:
+            if 'claude' in model_name:
                 return 200000
 
             # GPT-4 models
@@ -251,10 +351,12 @@ class Agent:
                 else:
                     return 4000
 
-            # DeepSeek
+            # DeepSeek: V4 family ships a 1M window; legacy chat/reasoner is 64K.
             elif 'deepseek' in model_name:
+                if 'v4' in model_name:
+                    return 1000000
                 return 64000
-            
+
             # Gemini models
             elif 'gemini' in model_name:
                 if '2.0' in model_name or 'exp' in model_name:
@@ -264,6 +366,27 @@ class Agent:
 
         # Default conservative value
         return 128000
+
+    def _get_output_reserve_tokens(self) -> int:
+        """
+        Tokens to hold back from the input budget for the model's completion.
+
+        A model's context window is shared by the prompt and the reply. Providers
+        (and proxies such as LinkAI) attach a large default `max_tokens` for
+        agent-mode models — DeepSeek V4, for example, can be asked for up to 384K
+        output tokens. If we let the trimmed prompt fill the whole window, prompt +
+        that completion budget exceeds the window and the request is rejected with
+        "maximum context length ... you requested N tokens", which then loops.
+
+        Scale the reserve with the window so small models keep a modest buffer and
+        large ones (V4's 1M) reserve enough for their oversized completion default,
+        while never eating more than ~40% of the window.
+        """
+        context_window = self._get_model_context_window()
+        # ~40% of the window, clamped to a sane floor/ceiling. 400K covers the
+        # 384K completion default that large-window agent models request.
+        reserve = int(context_window * 0.4)
+        return max(8000, min(400000, reserve))
 
     def _get_context_reserve_tokens(self) -> int:
         """
@@ -437,7 +560,8 @@ class Agent:
         return action
 
     def run_stream(self, user_message: str, on_event=None, clear_history: bool = False,
-                   skill_filter=None, cancel_event=None) -> str:
+                   skill_filter=None, cancel_event=None, steer_inbox=None,
+                   allow_empty_response: bool = False) -> str:
         """
         Execute single agent task with streaming (based on tool-call)
 
@@ -447,6 +571,7 @@ class Agent:
         - Event callbacks
         - Persistent conversation history across calls
         - User-initiated cancellation via ``cancel_event``
+        - Explicit active-turn guidance via ``steer_inbox``
 
         Args:
             user_message: User message
@@ -459,6 +584,11 @@ class Agent:
                 "[Interrupted by user]" assistant note, and returns the
                 partial response. ``messages`` stays in a valid state
                 (tool_use/tool_result pairs preserved).
+            steer_inbox: Optional SteerInbox drained at safe checkpoints. New
+                instructions guide this run without entering the normal queue.
+            allow_empty_response: If True, an empty answer is returned as-is
+                instead of a fallback message. For runs nobody is waiting on
+                (scheduled tasks), where sending nothing is a valid outcome.
 
         Returns:
             Final response text
@@ -513,6 +643,8 @@ class Agent:
             messages=messages_copy,  # Pass copied message history
             max_context_turns=max_context_turns,
             cancel_event=cancel_event,
+            steer_inbox=steer_inbox,
+            allow_empty_response=allow_empty_response,
         )
 
         # Execute
@@ -532,11 +664,39 @@ class Agent:
         # If the executor trimmed context, its message list is shorter than
         # original_length, so we must replace rather than append.
         with self.messages_lock:
+            # Track messages added in this run (user query + all assistant/tool messages).
+            # When context was trimmed, executor.messages is shorter than original_length,
+            # so slicing at original_length yields an empty list and the assistant reply
+            # would never be persisted. Instead, locate this run's user query (always the
+            # first message of the last turn) by scanning from the tail.
+            trimmed = len(executor.messages) < original_length
+            if trimmed:
+                new_start = original_length  # fallback
+                for idx in range(len(executor.messages) - 1, -1, -1):
+                    msg = executor.messages[idx]
+                    if msg.get("role") != "user":
+                        continue
+                    content = msg.get("content", [])
+                    is_user_query = False
+                    if isinstance(content, list):
+                        has_text = any(
+                            isinstance(b, dict) and b.get("type") == "text"
+                            for b in content
+                        )
+                        has_tool_result = any(
+                            isinstance(b, dict) and b.get("type") == "tool_result"
+                            for b in content
+                        )
+                        is_user_query = has_text and not has_tool_result
+                    elif isinstance(content, str):
+                        is_user_query = True
+                    if is_user_query:
+                        new_start = idx
+                        break
+                self._last_run_new_messages = list(executor.messages[new_start:])
+            else:
+                self._last_run_new_messages = list(executor.messages[original_length:])
             self.messages = list(executor.messages)
-            # Track messages added in this run (user query + all assistant/tool messages)
-            # original_length may exceed executor.messages length after trimming
-            trim_adjusted_start = min(original_length, len(executor.messages))
-            self._last_run_new_messages = list(executor.messages[trim_adjusted_start:])
         
         # Store executor reference for agent_bridge to access files_to_send
         self.stream_executor = executor
@@ -550,3 +710,116 @@ class Agent:
         """Clear conversation history and captured actions"""
         self.messages = []
         self.captured_actions = []
+
+    def compact_context(self, keep_recent_turns: int = 2) -> dict:
+        """Manually compact the conversation history right now.
+
+        Reuses the same turn-splitting and summary-injection logic as the
+        automatic context trimming in AgentStreamExecutor (via shared helpers
+        in message_utils), the only difference being that this summarizes
+        synchronously and runs on demand regardless of token usage — so the
+        /compact command frees context immediately and consistently.
+
+        :param keep_recent_turns: How many most-recent turns to keep verbatim.
+        :return: dict with keys: ok, reason, compacted_turns, before, after.
+        """
+        from agent.protocol.message_utils import (
+            identify_complete_turns,
+            build_compaction_summary_text,
+            find_first_user_text_block,
+            _extract_text_from_content,
+        )
+
+        with self.messages_lock:
+            before = len(self.messages)
+            turns = identify_complete_turns(self.messages)
+
+            if len(turns) <= keep_recent_turns:
+                return {
+                    "ok": False,
+                    "reason": "nothing_to_compact",
+                    "compacted_turns": 0,
+                    "before": before,
+                    "after": before,
+                }
+
+            discarded_turns = turns[:-keep_recent_turns]
+            kept_turns = turns[-keep_recent_turns:]
+            discarded_messages = []
+            for turn in discarded_turns:
+                discarded_messages.extend(turn["messages"])
+
+        # Summarize discarded turns synchronously so the injected note is ready
+        # before we return. The SAME summary is reused for context injection and
+        # daily-memory persistence — one LLM call serves both (mirrors the
+        # context_summary_callback path used by automatic trimming, but sync).
+        # Falls back to a plain-text digest when no LLM is available.
+        summary = ""
+        llm_summary = False
+        flush_mgr = None
+        if self.memory_manager:
+            flush_mgr = getattr(self.memory_manager, "flush_manager", None)
+        if flush_mgr:
+            try:
+                raw = flush_mgr._summarize_messages(discarded_messages, max_messages=0) or ""
+                summary = flush_mgr._clean_summary_output(raw)
+                llm_summary = bool(summary.strip())
+            except Exception as e:
+                logger.warning(f"[Agent] compact summarize failed: {e}")
+
+        if not summary.strip():
+            fragments = []
+            for msg in discarded_messages:
+                text = _extract_text_from_content(msg.get("content", ""))
+                if text:
+                    fragments.append(f"{msg.get('role', '?')}: {text[:200]}")
+            summary = "\n".join(fragments[-20:])
+
+        # Persist the same LLM summary to daily memory (no second LLM call).
+        # Skip when we only have the plain-text fallback — it isn't worth
+        # recording as long-term memory.
+        if flush_mgr and llm_summary:
+            try:
+                user_id = getattr(self, "_current_user_id", None)
+                flush_mgr.write_daily_summary(summary, user_id=user_id, reason="trim")
+            except Exception as e:
+                logger.debug(f"[Agent] compact write_daily_summary skipped: {e}")
+
+        # Rebuild kept turns, injecting the summary into the first kept user
+        # text block (same as auto-trim) to avoid two adjacent user messages
+        # that would break strict user/assistant alternation on some providers.
+        turn_count = len(discarded_turns)
+        with self.messages_lock:
+            new_messages = []
+            for turn in kept_turns:
+                new_messages.extend(turn["messages"])
+
+            target_block = find_first_user_text_block(kept_turns)
+            if target_block is not None:
+                target_block["text"] = build_compaction_summary_text(
+                    summary, turn_count, target_block.get("text", "")
+                )
+            else:
+                # Fallback: no injectable target, prepend a standalone note.
+                new_messages.insert(0, {
+                    "role": "user",
+                    "content": [{
+                        "type": "text",
+                        "text": build_compaction_summary_text(summary, turn_count, ""),
+                    }],
+                })
+
+            self.messages = new_messages
+            after = len(self.messages)
+
+        logger.info(
+            f"[Agent] Manual compact: {turn_count} turns summarized, "
+            f"{before} -> {after} messages"
+        )
+        return {
+            "ok": True,
+            "reason": "compacted",
+            "compacted_turns": turn_count,
+            "before": before,
+            "after": after,
+        }

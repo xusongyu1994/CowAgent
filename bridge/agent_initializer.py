@@ -17,6 +17,14 @@ from common.utils import expand_path
 # Module-level lock to serialize scheduler init across concurrent sessions
 _scheduler_init_lock = threading.Lock()
 
+# Guards the in-flight memory-sync set below so concurrent session inits for
+# the same workspace don't each dispatch a redundant background sync thread.
+_memory_sync_lock = threading.Lock()
+# Workspaces with a memory sync currently running in the background. A new
+# request for the same workspace is dropped instead of forking another thread,
+# so a burst of messages can't stack up dozens of embedding HTTP calls.
+_memory_sync_inflight: set = set()
+
 
 class AgentInitializer:
     """
@@ -38,20 +46,29 @@ class AgentInitializer:
         self.bridge = bridge
         self.agent_bridge = agent_bridge
     
-    def initialize_agent(self, session_id: Optional[str] = None) -> Agent:
+    def initialize_agent(
+        self,
+        session_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> Agent:
         """
         Initialize agent for a session
         
         Args:
             session_id: Session ID (None for default agent)
+            agent_id: Agent profile identifier. Omit for the configured default.
         
         Returns:
             Initialized agent instance
         """
-        from config import conf
-        
-        # Get workspace from config
-        workspace_root = expand_path(conf().get("agent_workspace", "~/cow"))
+        from agent.registry import get_agent_registry
+        from common.runtime_identity import current_identity
+
+        # An explicit agent_id wins (admin, warmup, tests); otherwise follow
+        # the identity routing established for this message.
+        identity = current_identity()
+        profile = get_agent_registry().get(agent_id or identity.agent_id)
+        workspace_root = profile.workspace
         
         # Migrate API keys
         self._migrate_config_to_env(workspace_root)
@@ -73,7 +90,9 @@ class AgentInitializer:
         tools = self._load_tools(workspace_root, memory_manager, memory_tools, session_id)
         
         # Initialize scheduler if needed
-        self._initialize_scheduler(tools, session_id)
+        self._initialize_scheduler(
+            tools, session_id, workspace_root=workspace_root, agent_id=profile.id
+        )
         
         # Load context files
         context_files = load_context_files(workspace_root)
@@ -84,6 +103,8 @@ class AgentInitializer:
         # Build system prompt
         prompt_builder = PromptBuilder(workspace_dir=workspace_root, language="zh")
         runtime_info = self._get_runtime_info(workspace_root)
+        runtime_info["agent_id"] = profile.id
+        runtime_info["agent_name"] = profile.name
         
         system_prompt = prompt_builder.build(
             tools=tools,
@@ -117,6 +138,19 @@ class AgentInitializer:
             if hasattr(agent, 'model') and agent.model:
                 memory_manager.flush_manager.llm_model = agent.model
 
+        agent.agent_id = profile.id
+        agent.agent_profile = profile
+        agent.workspace_dir = workspace_root
+
+        # Bind the system-prompt model line to the agent's *effective* model so a
+        # per-session override (see AgentLLMModel.set_session_override) shows up
+        # there too. Without this the prompt keeps reporting the global config
+        # model, and the LLM — which reads that line — answers with the wrong
+        # model name even though the actual API call used the session's model.
+        llm = getattr(agent, "model", None)
+        if llm is not None and hasattr(llm, "model"):
+            runtime_info["_get_model"] = lambda: getattr(llm, "model", None) or conf().get("model", "unknown")
+
         # Restore persisted conversation history for this session
         if session_id:
             self._restore_conversation_history(agent, session_id)
@@ -146,7 +180,7 @@ class AgentInitializer:
 
         try:
             from agent.memory import get_conversation_store
-            store = get_conversation_store()
+            store = get_conversation_store(agent.workspace_dir)
             max_turns = conf().get("agent_max_context_turns", 20)
             # Scheduler tasks run on a stable isolated session per task and
             # can fire many times a day; a smaller restore window keeps prompt
@@ -272,11 +306,15 @@ class AgentInitializer:
         memory_tools = []
         
         try:
-            from agent.memory import MemoryManager, MemoryConfig
+            from agent.memory import MemoryManager, MemoryConfig, register_memory_config
             from agent.tools import MemorySearchTool, MemoryGetTool
             from config import conf
 
             memory_config = MemoryConfig(workspace_root=workspace_root)
+            # Publish per workspace, not process-wide: this runs once per Agent,
+            # and a single global slot would leave the last one to initialize
+            # owning where every Agent's memory is written.
+            register_memory_config(memory_config)
 
             embedding_provider = self._init_embedding_provider(
                 memory_config, session_id=session_id
@@ -313,22 +351,50 @@ class AgentInitializer:
         return create_default_embedding_provider()
 
     def _sync_memory(self, memory_manager, session_id: Optional[str] = None):
-        """Sync memory database"""
+        """Bring the memory index up to date with the workspace files.
+
+        Runs entirely on a background daemon thread. sync() re-embeds any file
+        whose hash changed (MEMORY.md / memory/*.md / knowledge/*.md), and each
+        embed_batch is a blocking HTTP call that can take 20-50s from China-side
+        networks. Daily memory files change on nearly every session, so keeping
+        this on the init path made every user's first message wait for that
+        round-trip. The index is only read on the *next* memory search, so a
+        slightly stale index for the current turn is an acceptable trade-off —
+        the same design MCP tool loading already uses.
+
+        Idempotent per workspace: a burst of concurrent session inits dispatches
+        at most one sync thread, so messages can't stack up embedding calls.
+        """
+        workspace_key = None
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_closed():
-                raise RuntimeError("Event loop is closed")
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        
-        try:
-            if loop.is_running():
-                asyncio.create_task(memory_manager.sync())
-            else:
-                loop.run_until_complete(memory_manager.sync())
-        except Exception as e:
-            logger.warning(f"[AgentInitializer] Memory sync failed: {e}")
+            workspace_key = str(memory_manager.config.get_workspace())
+        except Exception:
+            workspace_key = None
+
+        with _memory_sync_lock:
+            if workspace_key is not None and workspace_key in _memory_sync_inflight:
+                return
+            if workspace_key is not None:
+                _memory_sync_inflight.add(workspace_key)
+
+        def _run():
+            try:
+                loop = asyncio.new_event_loop()
+                try:
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(memory_manager.sync())
+                finally:
+                    loop.close()
+            except Exception as e:
+                logger.warning(f"[AgentInitializer] Memory sync failed: {e}")
+            finally:
+                if workspace_key is not None:
+                    with _memory_sync_lock:
+                        _memory_sync_inflight.discard(workspace_key)
+
+        threading.Thread(
+            target=_run, daemon=True, name="memory-sync"
+        ).start()
     
     def _load_tools(self, workspace_root: str, memory_manager, memory_tools: List, session_id: Optional[str] = None):
         """Load all tools"""
@@ -371,13 +437,32 @@ class AgentInitializer:
                     # config.json's `tools.<name>` section) instead of replacing
                     # it, otherwise per-tool user configs (e.g. browser.cdp_endpoint)
                     # would be silently dropped.
-                    if tool_name in ['read', 'write', 'edit', 'bash', 'grep', 'find', 'ls', 'web_fetch', 'send', 'browser']:
+                    if tool_name in ['read', 'write', 'edit', 'bash', 'search_files', 'ls', 'web_fetch', 'send', 'browser']:
                         merged_config = dict(getattr(tool, 'config', None) or {})
                         merged_config.update(file_config)
                         tool.config = merged_config
                         tool.cwd = merged_config.get("cwd", getattr(tool, 'cwd', None))
+                        if hasattr(tool, 'timeout'):
+                            # create_tool() builds the instance before tool_configs is
+                            # merged in, so a config-derived .timeout is frozen at its
+                            # __init__-time default; re-derive it here like cwd above,
+                            # for any tool that has one (not name-gated to grep,
+                            # so a future tool with a .timeout attribute isn't missed).
+                            tool.timeout = merged_config.get("timeout", getattr(tool, 'timeout', None))
                         if 'memory_manager' in merged_config:
                             tool.memory_manager = merged_config['memory_manager']
+                        # Re-derive config-derived attributes that were set during
+                        # __init__ (before tool.config was populated from user config).
+                        # bash is the only tool with such attributes (default_timeout,
+                        # safety_mode); the general pattern works for any tool.
+                        if hasattr(tool, 'default_timeout'):
+                            tool.default_timeout = merged_config.get(
+                                "timeout", tool.default_timeout
+                            )
+                        if hasattr(tool, 'safety_mode'):
+                            tool.safety_mode = merged_config.get(
+                                "safety_mode", tool.safety_mode
+                            )
                     tools.append(tool)
             except Exception as e:
                 logger.warning(f"[AgentInitializer] Failed to load tool {tool_name}: {e}")
@@ -404,34 +489,52 @@ class AgentInitializer:
         
         return tools
     
-    def _initialize_scheduler(self, tools: List, session_id: Optional[str] = None):
+    def _initialize_scheduler(
+        self,
+        tools: List,
+        session_id: Optional[str] = None,
+        workspace_root: str = None,
+        agent_id: str = None,
+    ):
         """Initialize scheduler service if needed.
 
         Serialize the check-and-set under a module-level lock so concurrent
         first-time session inits cannot each create a new SchedulerService
         (which would leak background scanning threads).
         """
-        if not self.agent_bridge.scheduler_initialized:
+        if agent_id not in self.agent_bridge.scheduler_agent_ids:
             with _scheduler_init_lock:
-                if not self.agent_bridge.scheduler_initialized:
+                if agent_id not in self.agent_bridge.scheduler_agent_ids:
                     try:
                         from agent.tools.scheduler.integration import init_scheduler
-                        if init_scheduler(self.agent_bridge):
+                        if init_scheduler(
+                            self.agent_bridge,
+                            workspace_root=workspace_root,
+                            agent_id=agent_id,
+                        ):
+                            self.agent_bridge.scheduler_agent_ids.add(agent_id)
                             self.agent_bridge.scheduler_initialized = True
                             if session_id is None:
-                                logger.info("[AgentInitializer] Scheduler service initialized")
+                                logger.info(
+                                    f"[AgentInitializer] Scheduler initialized "
+                                    f"for agent={agent_id}"
+                                )
                     except Exception as e:
                         logger.warning(f"[AgentInitializer] Failed to initialize scheduler: {e}")
         
         # Inject scheduler dependencies
-        if self.agent_bridge.scheduler_initialized:
+        if agent_id in self.agent_bridge.scheduler_agent_ids:
             try:
                 from agent.tools.scheduler.integration import get_task_store, get_scheduler_service
                 from agent.tools import SchedulerTool
                 from config import conf
                 
-                task_store = get_task_store()
-                scheduler_service = get_scheduler_service()
+                task_store = get_task_store(
+                    workspace_root=workspace_root, agent_id=agent_id
+                )
+                scheduler_service = get_scheduler_service(
+                    workspace_root=workspace_root, agent_id=agent_id
+                )
                 
                 for tool in tools:
                     if isinstance(tool, SchedulerTool):
@@ -447,6 +550,7 @@ class AgentInitializer:
                         else:
                             ct = raw_ct
                         tool.config["channel_type"] = ct
+                        tool.config["agent_id"] = agent_id
             except Exception as e:
                 logger.warning(f"[AgentInitializer] Failed to inject scheduler dependencies: {e}")
     
@@ -598,7 +702,9 @@ class AgentInitializer:
                     time.sleep(wait_seconds)
 
                     self._flush_all_agents()
-                    last_run_date = datetime.datetime.now().date()
+                    # Record the scheduled date: a run that crosses midnight must
+                    # not mark the new day as already done.
+                    last_run_date = target.date()
                 except Exception as e:
                     logger.warning(f"[DailyFlush] Error in daily flush loop: {e}")
                     time.sleep(3600)
@@ -608,11 +714,10 @@ class AgentInitializer:
 
     def _flush_all_agents(self):
         """Flush memory for all active agent sessions, then run Deep Dream."""
-        agents = []
-        if self.agent_bridge.default_agent:
-            agents.append(("default", self.agent_bridge.default_agent))
-        for sid, agent in self.agent_bridge.agents.items():
-            agents.append((sid, agent))
+        agents = [
+            (f"{agent_id}:{session_id or 'default'}", agent)
+            for agent_id, session_id, agent in self.agent_bridge.iter_agent_instances()
+        ]
 
         if not agents:
             return
@@ -620,11 +725,14 @@ class AgentInitializer:
         # Phase 1: flush daily summaries
         flushed = 0
         flush_threads = []
-        dream_candidate = None
+        dream_candidates = {}
         for label, agent in agents:
             try:
                 if not agent.memory_manager:
                     continue
+                dream_candidates.setdefault(
+                    agent.agent_id, agent.memory_manager.flush_manager
+                )
                 with agent.messages_lock:
                     messages = list(agent.messages)
                 if not messages:
@@ -635,8 +743,6 @@ class AgentInitializer:
                     t = agent.memory_manager.flush_manager._last_flush_thread
                     if t:
                         flush_threads.append(t)
-                if dream_candidate is None:
-                    dream_candidate = agent.memory_manager.flush_manager
             except Exception as e:
                 logger.warning(f"[DailyFlush] Failed for session {label}: {e}")
 
@@ -648,10 +754,13 @@ class AgentInitializer:
             t.join(timeout=60)
 
         # Phase 2: Deep Dream — distill daily memories → MEMORY.md + dream diary
-        if dream_candidate:
+        for agent_id, dream_candidate in dream_candidates.items():
             try:
                 result = dream_candidate.deep_dream()
                 if result:
-                    logger.info("[DeepDream] Memory distillation completed successfully")
+                    logger.info(
+                        f"[DeepDream] Memory distillation completed for "
+                        f"agent={agent_id}"
+                    )
             except Exception as e:
-                logger.warning(f"[DeepDream] Failed: {e}")
+                logger.warning(f"[DeepDream] Failed for agent={agent_id}: {e}")

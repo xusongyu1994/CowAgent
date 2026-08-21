@@ -11,12 +11,12 @@
 @Date 2023/11/19
 """
 
-import importlib.util
 import json
 import logging
 import os
 import ssl
 import threading
+import time
 # -*- coding=utf-8 -*-
 import uuid
 
@@ -28,14 +28,18 @@ from bridge.context import ContextType
 from bridge.reply import Reply, ReplyType
 from channel.chat_channel import ChatChannel, check_prefix
 from channel.feishu.feishu_message import FeishuMessage
-from channel.feishu.feishu_static_card import build_text_delivery
+from channel.feishu.feishu_static_card import (
+    build_text_delivery,
+    resolve_markdown_images,
+    upload_public_image_to_feishu,
+)
 from channel.feishu.feishu_progress_card import FeishuProgressState
 from channel.feishu.feishu_scheduler_card import (
     build_scheduler_card,
     handle_scheduler_action,
     tasks_for_receivers,
 )
-from common import utils
+from common import state_dir, utils
 from common.expired_dict import ExpiredDict
 from common.log import logger
 from common.singleton import singleton
@@ -46,17 +50,24 @@ logging.getLogger("Lark").setLevel(logging.WARNING)
 
 URL_VERIFICATION = "url_verification"
 
-# Lazy-check for lark_oapi SDK availability without importing it at module level.
-# The full `import lark_oapi` pulls in 10k+ files and takes 4-10s, so we defer
-# the actual import to _startup_websocket() where it is needed.
-LARK_SDK_AVAILABLE = importlib.util.find_spec("lark_oapi") is not None
+# Lazy import of the lark_oapi SDK. The full `import lark_oapi` pulls in 10k+
+# files and takes 4-10s, so we defer the actual import to where it is needed.
+# In desktop mode the SDK is not bundled; the first import downloads a trimmed
+# bundle into a writable per-user dir (see channel/feishu/lark_install.py).
+from channel.feishu import lark_install
+
 lark = None  # will be populated on first use via _ensure_lark_imported()
 
 
 def _ensure_lark_imported():
-    """Import lark_oapi on first use (takes 4-10s due to 10k+ source files)."""
+    """Import lark_oapi on first use (takes 4-10s due to 10k+ source files).
+
+    In desktop mode, if the SDK is missing this fetches it on demand (requires
+    network the first time) instead of failing outright.
+    """
     global lark
     if lark is None:
+        lark_install.ensure(allow_install=True)
         import lark_oapi as _lark
         lark = _lark
     return lark
@@ -155,14 +166,6 @@ def _register_via_qr_in_terminal() -> bool:
     Returns True if credentials were obtained AND persisted; False otherwise.
     The caller should fall back to the original "missing credentials" error in that case.
     """
-    if not LARK_SDK_AVAILABLE:
-        logger.error(
-            "[FeiShu] 缺少 feishu_app_id / feishu_app_secret。"
-            "未安装 lark-oapi SDK，无法在终端发起扫码创建。"
-            "请执行 pip install -U 'lark-oapi>=1.5.5' 后重试，或手动在 config.json 中填入凭据。"
-        )
-        return False
-
     try:
         lark_mod = _ensure_lark_imported()
     except Exception as e:
@@ -242,15 +245,23 @@ class FeiShuChanel(ChatChannel):
     # 飞书原生支持发送音频（opus 格式，通过文件上传接口）和图片，
     # 所有回复类型均已处理，置为空列表以启用语音和图片回复。
     NOT_SUPPORT_REPLYTYPE = []
+    # Backstop for the offline backlog: a replay this old is discarded even if it
+    # somehow arrives with a create_time after startup.
+    STALE_MSG_MAX_AGE_S = 600
 
     def __init__(self):
         super().__init__()
         # 历史消息id暂存，用于幂等控制
         self.receivedMsgs = ExpiredDict(60 * 60 * 7.1)
+        # Route recall events back to the session that accepted the message.
+        self._message_sessions = ExpiredDict(60 * 60 * 7.1)
         self._http_server = None
         self._ws_client = None
         self._ws_thread = None
         self._bot_open_id = None  # cached bot open_id for @-mention matching
+        # When this channel started serving. Set in startup(); 0 means "unknown",
+        # which lets every message through rather than dropping it silently.
+        self._startup_ts = 0.0
         logger.debug("[FeiShu] app_id={}, app_secret={}, verification_token={}, event_mode={}".format(
             self.feishu_app_id, self.feishu_app_secret, self.feishu_token, self.feishu_event_mode))
         # 无需群校验和前缀
@@ -258,11 +269,19 @@ class FeiShuChanel(ChatChannel):
         conf()["single_chat_prefix"] = [""]
 
         # 验证配置
-        if self.feishu_event_mode == 'websocket' and not LARK_SDK_AVAILABLE:
-            logger.error("[FeiShu] websocket mode requires lark_oapi. Please install: pip install lark-oapi")
-            raise Exception("lark_oapi not installed")
+        if self.feishu_event_mode == 'websocket':
+            try:
+                _ensure_lark_imported()
+            except ImportError as e:
+                logger.error(f"[FeiShu] websocket mode requires lark_oapi: {e}")
+                raise Exception("lark_oapi not installed / could not be installed")
 
     def startup(self):
+        # Recorded here, at the very top, rather than once the connection is up:
+        # cold start plus the long-connection handshake can take a minute or two,
+        # and a message the user sends while waiting for the client to come up is
+        # a new message that must be answered — not backlog to discard.
+        self._startup_ts = time.time()
         self.feishu_app_id = conf().get('feishu_app_id')
         self.feishu_app_secret = conf().get('feishu_app_secret')
         self.feishu_token = conf().get('feishu_token')
@@ -383,6 +402,20 @@ class FeiShuChanel(ChatChannel):
             except Exception as e:
                 logger.error(f"[FeiShu] websocket handle message error: {e}", exc_info=True)
 
+        def handle_message_recalled_event(
+            data: lark.im.v1.P2ImMessageRecalledV1,
+        ) -> None:
+            """Cancel only the task created by the recalled Feishu message."""
+            try:
+                logger.info("[FeiShu] websocket received message recall event")
+                event_dict = json.loads(lark.JSON.marshal(data))
+                self._handle_message_recalled_event(event_dict.get("event", {}))
+            except Exception as e:
+                logger.error(
+                    f"[FeiShu] websocket handle message recall error: {e}",
+                    exc_info=True,
+                )
+
         def handle_card_action(data):
             """Handle Card 2.0 button callbacks and update the card in place."""
             try:
@@ -399,6 +432,7 @@ class FeiShuChanel(ChatChannel):
         event_handler = (
             lark.EventDispatcherHandler.builder("", "")
             .register_p2_im_message_receive_v1(handle_message_event)
+            .register_p2_im_message_recalled_v1(handle_message_recalled_event)
             .register_p2_card_action_trigger(handle_card_action)
             .build()
         )
@@ -506,8 +540,7 @@ class FeiShuChanel(ChatChannel):
 
         from agent.tools.scheduler.task_store import TaskStore
 
-        workspace_root = utils.expand_path(conf().get("agent_workspace", "~/cow"))
-        return TaskStore(os.path.join(workspace_root, "scheduler", "tasks.json"))
+        return TaskStore(str(state_dir.scheduler_file()))
 
     def _send_scheduler_card(self, feishu_msg, is_group: bool, receive_id_type: str) -> bool:
         """Reply to ``/tasks`` with tasks scoped to the current chat."""
@@ -587,6 +620,29 @@ class FeiShuChanel(ChatChannel):
         )
         return response
 
+    def _handle_message_recalled_event(self, event: dict):
+        """Cancel one recalled message while preserving later queued messages."""
+        message_id = event.get("message_id")
+        if not message_id:
+            logger.warning(f"[FeiShu] invalid message recall event: {event}")
+            return 0, False
+
+        session_id = self._message_sessions.get(message_id)
+        if not session_id:
+            logger.info(
+                f"[FeiShu] ignored recall for unknown message, message_id={message_id}"
+            )
+            return 0, False
+
+        result = self.cancel_message(session_id, message_id)
+        self._message_sessions.pop(message_id, None)
+        logger.info(
+            "[FeiShu] recalled message cancelled, "
+            f"message_id={message_id}, session_id={session_id}, "
+            f"queued={result[0]}, active={result[1]}"
+        )
+        return result
+
     def _handle_message_event(self, event: dict):
         """
         处理消息事件的核心逻辑
@@ -605,13 +661,26 @@ class FeiShuChanel(ChatChannel):
             return
         self.receivedMsgs[msg_id] = True
 
-        # Filter out stale messages from before channel startup (offline backlog)
-        import time as _time
+        # Drop the offline backlog Feishu replays after a reconnect, without
+        # dropping slow-but-current messages. The test is where the message sits
+        # relative to THIS startup, not how old it is: an absolute age cutoff also
+        # killed brand-new messages whose delivery merely lagged (Feishu draining
+        # its queue after a reconnect), and left no margin for clock skew.
+        # MAX_AGE is only a backstop for a replay so large it outlives startup.
         create_time_ms = msg.get("create_time")
         if create_time_ms:
-            msg_age_s = _time.time() - int(create_time_ms) / 1000
-            if msg_age_s > 60:
-                logger.warning(f"[FeiShu] stale msg filtered (age={msg_age_s:.0f}s), msg_id={msg_id}")
+            create_time_s = int(create_time_ms) / 1000
+            msg_age_s = time.time() - create_time_s
+            stale_reason = None
+            if self._startup_ts and create_time_s < self._startup_ts:
+                stale_reason = "sent before channel startup"
+            elif msg_age_s > self.STALE_MSG_MAX_AGE_S:
+                stale_reason = f"older than {self.STALE_MSG_MAX_AGE_S}s"
+            if stale_reason:
+                logger.warning(
+                    f"[FeiShu] stale msg filtered ({stale_reason}, age={msg_age_s:.0f}s), "
+                    f"msg_id={msg_id}, chat_id={msg.get('chat_id')}"
+                )
                 return
 
         is_group = False
@@ -713,13 +782,17 @@ class FeiShuChanel(ChatChannel):
 
         context = self._compose_context(
             feishu_msg.ctype,
-            feishu_msg.content,
+            feishu_msg.content_with_quote(),
             isgroup=is_group,
             msg=feishu_msg,
             receive_id_type=receive_id_type,
             no_need_at=True
         )
         if context:
+            # Feishu recall events only include message_id/chat_id. Keep the
+            # accepted route and use message_id as the agent cancellation key.
+            context["request_id"] = msg_id
+            self._message_sessions[msg_id] = context["session_id"]
             # 流式回复模式：向 context 注入 on_event 回调，agent 每产出一段文字时会调用它。
             # 回调内部先发送一条占位消息获取 message_id，之后通过 PATCH 接口原地更新内容，
             # 实现打字机效果。回调结束时设置 context["feishu_streamed"]=True，
@@ -752,10 +825,15 @@ class FeiShuChanel(ChatChannel):
         content_key = "text"
         prepared_content_json = None
         if reply.type == ReplyType.TEXT:
-            msg_type, prepared_content_json = build_text_delivery(
+            # Render Markdown text replies as Feishu cards; falls back to plain text automatically.
+            delivery_text = resolve_markdown_images(
                 reply.content,
-                enabled=conf().get("feishu_markdown_card", True),
+                lambda url: upload_public_image_to_feishu(
+                    url,
+                    access_token,
+                ),
             )
+            msg_type, prepared_content_json = build_text_delivery(delivery_text)
         elif reply.type == ReplyType.IMAGE_URL:
             # 图片上传
             reply_content = self._upload_image_url(reply.content, access_token)
@@ -883,13 +961,13 @@ class FeiShuChanel(ChatChannel):
             logger.error(f"[FeiShu] send message failed, code={res.get('code')}, msg={res.get('msg')}")
 
     def _make_feishu_stream_callback(self, context, access_token):
-        """Route to progress or plain streaming callback based on config.
+        """Route to detailed or plain streaming callback based on config.
 
-        feishu_progress_card 默认关闭：普通对话走原有的打字机文本卡片
-        (_make_feishu_stream_callback_plain)。开启后才使用带状态头、
-        Reasoning/Tools 面板与耗时的富进度卡片。
+        feishu_detailed_card 默认开启：普通对话使用带状态头、
+        思考/工具面板与耗时的详细卡片。关闭后回退到原有的打字机文本卡片
+        (_make_feishu_stream_callback_plain)。
         """
-        if conf().get("feishu_progress_card", False):
+        if conf().get("feishu_detailed_card", True):
             return self._make_feishu_stream_callback_progress(context, access_token)
         return self._make_feishu_stream_callback_plain(context, access_token)
 
@@ -1172,11 +1250,21 @@ class FeiShuChanel(ChatChannel):
                 with lock:
                     progress_state.consume(event)
                     if card_id[0]:
-                        snapshot = progress_state.current_text
+                        snapshot = progress_state.display_text
                         should_push = True
 
                 if should_push:
                     push_queue.put(snapshot)
+
+            elif event_type in ("tool_execution_start", "tool_execution_end"):
+                # Refresh the Tools panel as each tool starts/finishes so users
+                # see live status and per-tool elapsed time.
+                with lock:
+                    progress_state.consume(event)
+                    has_card = card_id[0] is not None
+                if has_card:
+                    _drain_push_queue()
+                    _update_full_card(streaming=True)
 
             elif event_type == "message_end":
                 # 工具轮结束后原地刷新 Reasoning / Tools 面板，保留同一张卡片。
@@ -1196,9 +1284,18 @@ class FeiShuChanel(ChatChannel):
                 # Finalize the same card with a status header and elapsed footer.
                 with lock:
                     progress_state.consume(event)
-                    final_text = progress_state.current_text
+                    # Full visible text = committed prior turns + last turn.
+                    final_text = progress_state.display_text
                     has_card = card_id[0] is not None
                     init_busy = init_in_flight[0]
+                final_text = resolve_markdown_images(
+                    final_text,
+                    lambda url: upload_public_image_to_feishu(url, access_token),
+                )
+                with lock:
+                    # Collapse the accumulated text into current_text so the
+                    # final render/push carries the whole flow exactly once.
+                    progress_state.finalize_text(final_text)
                 context["feishu_streamed"] = True
 
                 if not has_card and not init_busy:
@@ -1465,9 +1562,15 @@ class FeiShuChanel(ChatChannel):
             if not cid:
                 return
 
+            preview_text = final_text
+            final_text = resolve_markdown_images(
+                final_text,
+                lambda url: upload_public_image_to_feishu(url, access_token),
+            )
+
             # 1) 通过整卡更新接口把 streaming_mode 关掉，并改写 summary
             #    （settings 接口的 config 不接受 summary 字段，会报 code=2200）
-            preview_src = (final_text or "").strip().replace("\n", " ")
+            preview_src = (preview_text or "").strip().replace("\n", " ")
             preview = preview_src[:30] if preview_src else ""
             full_card = {
                 "schema": "2.0",
@@ -2064,6 +2167,7 @@ class FeishuController:
     FAILED_MSG = '{"success": false}'
     SUCCESS_MSG = '{"success": true}'
     MESSAGE_RECEIVE_TYPE = "im.message.receive_v1"
+    MESSAGE_RECALLED_TYPE = "im.message.recalled_v1"
     CARD_ACTION_TYPE = "card.action.trigger"
 
     def GET(self):
@@ -2103,6 +2207,8 @@ class FeishuController:
             # 3. Handle message events.
             if event_type == self.MESSAGE_RECEIVE_TYPE and event:
                 channel._handle_message_event(event)
+            elif event_type == self.MESSAGE_RECALLED_TYPE and event:
+                channel._handle_message_recalled_event(event)
 
             return self.SUCCESS_MSG
 

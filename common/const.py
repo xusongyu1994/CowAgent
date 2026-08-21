@@ -37,7 +37,8 @@ CLAUDE_4_6_OPUS = "claude-opus-4-6"      # Claude Opus 4.6
 CLAUDE_4_SONNET = "claude-sonnet-4-0"    # Claude Sonnet 4.0
 CLAUDE_4_5_SONNET = "claude-sonnet-4-5"  # Claude Sonnet 4.5 - Agent recommended model
 CLAUDE_4_6_SONNET = "claude-sonnet-4-6"  # Claude Sonnet 4.6 - Agent recommended model
-CLAUDE_SONNET_5 = "claude-sonnet-5"      # Claude Sonnet 5 - default flagship model for Claude
+CLAUDE_SONNET_5 = "claude-sonnet-5"      # Claude Sonnet 5 - balanced Claude 5 flagship
+CLAUDE_OPUS_5 = "claude-opus-5"          # Claude Opus 5 - default flagship model for Claude
 
 # Gemini (Google)
 GEMINI_PRO = "gemini-1.0-pro"
@@ -51,7 +52,9 @@ GEMINI_3_FLASH_PRE = "gemini-3-flash-preview"  # Gemini 3 Flash Preview - Agent 
 GEMINI_3_PRO_PRE = "gemini-3-pro-preview"  # Gemini 3 Pro Preview
 GEMINI_31_PRO_PRE = "gemini-3.1-pro-preview"  # Gemini 3.1 Pro Preview - Agent recommended model
 GEMINI_31_FLASH_LITE_PRE = "gemini-3.1-flash-lite-preview"  # Gemini 3.1 Flash Lite Preview - Agent recommended model
-GEMINI_35_FLASH = "gemini-3.5-flash"  # Gemini 3.5 Flash - Agent recommended model
+GEMINI_35_FLASH = "gemini-3.5-flash"  # Gemini 3.5 Flash
+GEMINI_36_FLASH = "gemini-3.6-flash"  # Gemini 3.6 Flash
+GEMINI_37_FLASH = "gemini-3.7-flash"  # Gemini 3.7 Flash - Agent recommended model (default)
 
 # OpenAI
 GPT35 = "gpt-3.5-turbo"
@@ -115,6 +118,7 @@ QWEN35_PLUS = "qwen3.5-plus"  # Qwen3.5 Plus - Omni model (MultiModalConversatio
 QWEN36_PLUS = "qwen3.6-plus"  # Qwen3.6 Plus - Omni model (MultiModalConversation)
 QWEN37_PLUS = "qwen3.7-plus"  # Qwen3.7 Plus - Omni model (MultiModalConversation)
 QWEN37_MAX = "qwen3.7-max"  # Qwen3.7 Max - Agent recommended model
+QWEN38_MAX = "qwen3.8-max"  # Qwen3.8 Max - native effort model (multimodal endpoint)
 QWQ_PLUS = "qwq-plus"
 
 # MiniMax
@@ -125,7 +129,8 @@ MINIMAX_TEXT_01 = "MiniMax-Text-01"  # MiniMax multimodal (vision)
 MINIMAX_ABAB6_5 = "abab6.5-chat"  # MiniMax abab6.5
 
 # GLM (Zhipu AI)
-GLM_5_2 = "glm-5.2"  # GLM-5.2 - Agent recommended model (default)
+GLM_5_3 = "glm-5.3"  # GLM-5.3 - Agent recommended model (default)
+GLM_5_2 = "glm-5.2"  # GLM-5.2
 GLM_5_1 = "glm-5.1"  # GLM-5.1
 GLM_5_TURBO = "glm-5-turbo"  # GLM-5-Turbo
 GLM_5 = "glm-5"  # GLM-5
@@ -204,12 +209,12 @@ MODEL_LIST = [
               MIMO, MIMO_V2_5_PRO, MIMO_V2_5, MIMO_V2_PRO, MIMO_V2_OMNI, MIMO_V2_FLASH,
 
               # Claude
-              CLAUDE_SONNET_5, CLAUDE_FABLE_5, CLAUDE3, CLAUDE_4_8_OPUS, CLAUDE_4_7_OPUS, CLAUDE_4_6_SONNET, CLAUDE_4_6_OPUS, CLAUDE_4_OPUS, CLAUDE_4_5_SONNET, CLAUDE_4_SONNET, CLAUDE_3_OPUS, CLAUDE_3_OPUS_0229,
+              CLAUDE_OPUS_5, CLAUDE_SONNET_5, CLAUDE_FABLE_5, CLAUDE3, CLAUDE_4_8_OPUS, CLAUDE_4_7_OPUS, CLAUDE_4_6_SONNET, CLAUDE_4_6_OPUS, CLAUDE_4_OPUS, CLAUDE_4_5_SONNET, CLAUDE_4_SONNET, CLAUDE_3_OPUS, CLAUDE_3_OPUS_0229,
               CLAUDE_35_SONNET, CLAUDE_35_SONNET_1022, CLAUDE_35_SONNET_0620, CLAUDE_3_SONNET, CLAUDE_3_HAIKU,
               "claude", "claude-3-haiku", "claude-3-sonnet", "claude-3-opus", "claude-3.5-sonnet",
 
               # Gemini
-              GEMINI_35_FLASH, GEMINI_31_FLASH_LITE_PRE, GEMINI_31_PRO_PRE, GEMINI_3_PRO_PRE, GEMINI_3_FLASH_PRE, GEMINI_25_PRO_PRE, GEMINI_25_FLASH_PRE,
+              GEMINI_37_FLASH, GEMINI_36_FLASH, GEMINI_35_FLASH, GEMINI_31_FLASH_LITE_PRE, GEMINI_31_PRO_PRE, GEMINI_3_PRO_PRE, GEMINI_3_FLASH_PRE, GEMINI_25_PRO_PRE, GEMINI_25_FLASH_PRE,
               GEMINI_20_FLASH, GEMINI_20_flash_exp, GEMINI_15_PRO, GEMINI_15_flash, GEMINI_PRO, GEMINI,
 
               # OpenAI
@@ -224,11 +229,11 @@ MODEL_LIST = [
               O1, O1_MINI,
 
               # GLM (Zhipu AI)
-              ZHIPU_AI, GLM_5_2, GLM_5_1, GLM_5_TURBO, GLM_5, GLM_4, GLM_4_PLUS, GLM_4_flash, GLM_4_LONG, GLM_4_ALLTOOLS,
+              ZHIPU_AI, GLM_5_3, GLM_5_2, GLM_5_1, GLM_5_TURBO, GLM_5, GLM_4, GLM_4_PLUS, GLM_4_flash, GLM_4_LONG, GLM_4_ALLTOOLS,
               GLM_4_0520, GLM_4_AIR, GLM_4_AIRX, GLM_4_7,
 
               # Qwen
-              QWEN37_PLUS, QWEN37_MAX, QWEN36_PLUS, QWEN35_PLUS, QWEN3_MAX, QWEN_MAX, QWEN_PLUS, QWEN_TURBO, QWEN_LONG,
+              QWEN37_PLUS, QWEN37_MAX, QWEN38_MAX, QWEN36_PLUS, QWEN35_PLUS, QWEN3_MAX, QWEN_MAX, QWEN_PLUS, QWEN_TURBO, QWEN_LONG,
 
               # Doubao
               DOUBAO, DOUBAO_SEED_2_1_PRO, DOUBAO_SEED_2_1_TURBO,
@@ -249,6 +254,11 @@ MODEL_LIST = [
             ]
 
 MODEL_LIST = MODEL_LIST + GITEE_AI_MODEL_LIST + MODELSCOPE_MODEL_LIST
+
+# Fallback model when `model` is missing from the config. Keep in sync with
+# config-template.json so a config without an explicit model behaves the same
+# as a fresh install.
+DEFAULT_MODEL = DEEPSEEK_V4_FLASH
 
 # channel
 FEISHU = "feishu"

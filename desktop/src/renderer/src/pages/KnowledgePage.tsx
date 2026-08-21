@@ -143,8 +143,8 @@ function findFileByName(list: KnowledgeList, filename: string): { path: string; 
 }
 
 // Resolve a relative `.md` link (from a document body) into a knowledge path.
-// Mirrors the web console's bindChatKnowledgeLinks logic: supports
-// `knowledge/…/x.md`, `category/x.md`, and bare/relative `../x.md` (by name).
+// Supports `knowledge/…/x.md`, `category/x.md`, and bare/relative `../x.md`
+// (matched by filename).
 function resolveKnowledgeLink(list: KnowledgeList, href: string): { path: string; title: string } | null {
   const clean = href.split('#')[0].split('?')[0]
   if (!clean.endsWith('.md')) return null
@@ -194,6 +194,8 @@ const KnowledgePage: React.FC<KnowledgePageProps> = ({ baseUrl }) => {
   const [activePath, setActivePath] = useState<string | null>(null)
   const [docTitle, setDocTitle] = useState('')
   const [content, setContent] = useState('')
+  // Absolute dir of the open doc, for resolving doc-relative image srcs.
+  const [docDir, setDocDir] = useState('')
   const [docLoading, setDocLoading] = useState(false)
 
   const [graph, setGraph] = useState<KnowledgeGraphData | null>(null)
@@ -220,9 +222,11 @@ const KnowledgePage: React.FC<KnowledgePageProps> = ({ baseUrl }) => {
     setDocTitle(title)
     setDocLoading(true)
     setContent('')
+    setDocDir('')
     try {
       const res = await apiClient.readKnowledge(path)
       setContent(stripDuplicateH1(res.content || '', title))
+      setDocDir(res.dir || '')
     } catch {
       setContent(`> ${t('knowledge_doc_load_error')}`)
     } finally {
@@ -585,7 +589,7 @@ const KnowledgePage: React.FC<KnowledgePageProps> = ({ baseUrl }) => {
                     <Loader2 size={16} className="animate-spin mr-2" />
                   </div>
                 ) : (
-                  <Markdown content={content} onInternalLink={openInternalLink} />
+                  <Markdown content={content} onInternalLink={openInternalLink} imageBaseDir={docDir} />
                 )}
               </div>
             )}
@@ -1035,7 +1039,7 @@ const FileLeaf: React.FC<{
 }> = ({ path, title, active, onOpen }) => (
   <button
     onClick={() => onOpen(path, title)}
-    className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-btn text-sm cursor-pointer transition-colors text-left ${
+    className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-btn text-[13px] cursor-pointer transition-colors text-left ${
       active ? 'bg-accent-soft text-accent' : 'text-content-secondary hover:bg-surface-2'
     }`}
   >

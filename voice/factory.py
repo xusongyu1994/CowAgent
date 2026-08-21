@@ -74,4 +74,10 @@ def create_voice(voice_type):
         from voice.sr.sr_voice import SRVoice
 
         return SRVoice()
+    elif voice_type == "custom" or voice_type.startswith("custom:"):
+        # User-created OpenAI-compatible vendors (custom_providers); the id
+        # suffix selects which vendor's credentials/endpoint to use.
+        from voice.custom.custom_voice import CustomVoice
+
+        return CustomVoice(voice_type)
     raise RuntimeError

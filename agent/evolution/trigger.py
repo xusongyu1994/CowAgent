@@ -116,8 +116,14 @@ def _scan_loop(agent_bridge) -> None:
 def _scan_once(agent_bridge, cfg) -> None:
     now = time.time()
     # Snapshot to avoid holding the dict while running long evolutions.
-    sessions = list(getattr(agent_bridge, "agents", {}).items())
-    for session_id, agent in sessions:
+    if hasattr(agent_bridge, "iter_agent_instances"):
+        sessions = list(agent_bridge.iter_agent_instances(include_defaults=False))
+    else:
+        sessions = [
+            ("default", session_id, agent)
+            for session_id, agent in getattr(agent_bridge, "agents", {}).items()
+        ]
+    for agent_id, session_id, agent in sessions:
         try:
             # Skip sessions whose agent is mid-run: a long turn must not be
             # reviewed while it is still producing the answer.
@@ -136,13 +142,10 @@ def _scan_once(agent_bridge, cfg) -> None:
             channel_type = getattr(agent, "_evo_channel_type", "") or ""
             receiver = getattr(agent, "_evo_receiver", "") or ""
 
-            # Reset baseline BEFORE running so a long pass / new messages during
-            # it don't double-trigger; turns accrue fresh from here.
-            agent._evo_turns = 0
-
             run_evolution_for_session(
                 agent_bridge,
                 session_id=session_id,
+                agent_id=agent_id,
                 channel_type=channel_type,
                 receiver=receiver,
                 idle_minutes=(now - last_active) / 60 if last_active > 0 else 0.0,

@@ -1,6 +1,9 @@
 import { create } from 'zustand'
 import apiClient from '../api/client'
-import type { ChatMessage, MessageStep, Attachment, StreamEvent, HistoryMessage } from '../types'
+import { useWorkspaceStore } from './workspaceStore'
+import { notifyRunDone } from '../lib/taskNotify'
+import { parseAttachmentMarkers } from '../lib/fileKind'
+import type { Artifact, ChatMessage, MessageStep, Attachment, StreamEvent, HistoryMessage } from '../types'
 
 /**
  * Per-session chat state. Supports parallel sessions: each session keeps its
@@ -33,6 +36,10 @@ interface ChatState {
   loadHistory: (sid: string, page?: number) => Promise<void>
   clearContext: (sid: string) => Promise<boolean>
   clearLocal: (sid: string) => void
+
+  // Append a server-pushed message (scheduler/push) polled outside the SSE
+  // stream. Deduped by requestId so a reply already on screen isn't repeated.
+  receivePush: (sid: string, content: string, requestId?: string) => boolean
 }
 
 // EventSource instances kept outside the store (not serializable).
@@ -61,6 +68,17 @@ function stripCancelMarker(text: string): string {
     .replace(/_\(Cancelled by user\)_/g, '')
     .replace(/_\(Cancelled\)_/g, '')
     .trim()
+}
+
+const SUBSTEP_ARGS_CHARS = 90
+
+/** Tool arguments on one line, for a step in a list of dozens. */
+function summarizeArgs(args?: Record<string, unknown>): string {
+  if (!args || typeof args !== 'object') return ''
+  const joined = Object.entries(args)
+    .map(([key, value]) => `${key}=${typeof value === 'object' ? JSON.stringify(value) : String(value)}`)
+    .join(', ')
+  return joined.length > SUBSTEP_ARGS_CHARS ? joined.slice(0, SUBSTEP_ARGS_CHARS) + '…' : joined
 }
 
 /**
@@ -107,12 +125,16 @@ function attachmentsFromSteps(steps: MessageStep[]): Attachment[] {
 /** Convert a backend history message into a UI ChatMessage. */
 function historyToMessage(m: HistoryMessage): ChatMessage {
   if (m.role === 'user') {
+    // History persists only the prompt text, so the attachment chips have to be
+    // recovered from the `[label: path]` markers appended to it.
+    const { text, attachments } = parseAttachmentMarkers(m.content)
     return {
       id: uid('user'),
       role: 'user',
-      content: m.content,
+      content: text,
       timestamp: m.created_at,
       userSeq: m._seq,
+      attachments,
     }
   }
 
@@ -132,6 +154,8 @@ function historyToMessage(m: HistoryMessage): ChatMessage {
     .map((s) => ({ ...s }))
   const finalContent = m.content || (lastContentIdx >= 0 ? raw[lastContentIdx].content || '' : '')
   const attachments = attachmentsFromSteps(raw)
+  // Artifacts are rebuilt by the backend, which alone knows the workspace root.
+  const artifacts = m.artifacts || []
 
   return {
     id: uid('assistant'),
@@ -144,6 +168,7 @@ function historyToMessage(m: HistoryMessage): ChatMessage {
     extras: m.extras,
     botSeq: m._seq,
     attachments: attachments.length > 0 ? attachments : undefined,
+    artifacts: artifacts.length > 0 ? artifacts : undefined,
   }
 }
 
@@ -168,6 +193,9 @@ export const useChatStore = create<ChatState>((set, get) => {
     const es = apiClient.createSSEStream(requestId)
     streams[sid] = es
     let tailTimer: ReturnType<typeof setTimeout> | null = null
+    // Set on a user-initiated cancel so a trailing error event doesn't fire a
+    // spurious "task failed" notification.
+    let userCancelled = false
 
     const closeStream = () => {
       if (tailTimer) {
@@ -254,11 +282,49 @@ export const useChatStore = create<ChatState>((set, get) => {
                     ...s,
                     status: data.status,
                     result: data.result ?? s.result,
+                    display: data.display ?? s.display,
                     execution_time: data.execution_time,
                     is_error: data.status !== 'success',
+                    permission_denied: data.permission_denied,
+                    permission_mode: data.permission_mode,
                   }
                 : s
             ),
+          }))
+          break
+
+        // A tool call made inside a sub agent, filed under that sub agent's
+        // step so its minutes of work can be followed rather than guessed at.
+        // Ignored when the step is gone: a sub agent cancelled on a timeout
+        // keeps going until its next checkpoint, and what it reports after
+        // that describes work nobody is waiting on.
+        case 'subagent_step':
+          if (!data.card_id || !data.step_id) break
+          updateMsg(sid, botId, (m) => ({
+            ...m,
+            steps: (m.steps || []).map((s) => {
+              if (s.type !== 'tool' || s.id !== data.card_id) return s
+              const substeps = [...(s.substeps || [])]
+              const at = substeps.findIndex((sub) => sub.id === data.step_id)
+              if (at < 0) {
+                if (data.phase !== 'start') return s
+                substeps.push({
+                  id: data.step_id!,
+                  name: data.tool || 'tool',
+                  args: summarizeArgs(data.arguments),
+                  status: 'running',
+                })
+              } else {
+                if (data.phase !== 'end') return s
+                substeps[at] = {
+                  ...substeps[at],
+                  status: data.status || 'success',
+                  execution_time: data.execution_time,
+                  error: data.error,
+                }
+              }
+              return { ...s, substeps }
+            }),
           }))
           break
 
@@ -287,7 +353,29 @@ export const useChatStore = create<ChatState>((set, get) => {
           break
         }
 
+        case 'artifact': {
+          if (!data.abs_path) break
+          const artifact: Artifact = {
+            abs_path: data.abs_path,
+            rel_path: data.rel_path || data.file_name || '',
+            file_name: data.file_name || '',
+            kind: data.kind || 'file',
+            previewable: !!data.previewable,
+            size: data.size || 0,
+            raw_url: data.raw_url || '',
+            preview_url: data.preview_url || '',
+          }
+          updateMsg(sid, botId, (m) =>
+            (m.artifacts || []).some((a) => a.abs_path === artifact.abs_path)
+              ? m
+              : { ...m, artifacts: [...(m.artifacts || []), artifact] }
+          )
+          useWorkspaceStore.getState().addTurnArtifact(artifact)
+          break
+        }
+
         case 'cancelled':
+          userCancelled = true
           updateMsg(sid, botId, (m) => ({ ...m, isCancelled: true }))
           break
 
@@ -316,6 +404,8 @@ export const useChatStore = create<ChatState>((set, get) => {
           }
           // The answer is final: free the UI now (don't wait for onerror).
           completeTurn()
+          notifyRunDone(sid, 'done', data.content || '')
+          useWorkspaceStore.getState().maybeAutoOpen()
           // Backend keeps the stream open for a short tail (e.g. TTS audio via
           // voice_attach). Close it ourselves if nothing else arrives.
           if (tailTimer) clearTimeout(tailTimer)
@@ -334,6 +424,7 @@ export const useChatStore = create<ChatState>((set, get) => {
 
         case 'error':
           updateMsg(sid, botId, (m) => ({ ...m, error: data.message || 'stream error', isStreaming: false }))
+          if (!userCancelled) notifyRunDone(sid, 'error', data.message || 'stream error')
           finishStream()
           break
       }
@@ -373,6 +464,7 @@ export const useChatStore = create<ChatState>((set, get) => {
       }
       patchMessages(sid, (msgs) => [...msgs, userMsg, botMsg])
       patchSession(sid, { isStreaming: true })
+      useWorkspaceStore.getState().resetTurnArtifacts()
 
       try {
         const res = await apiClient.sendMessage(sid, text, {
@@ -525,6 +617,25 @@ export const useChatStore = create<ChatState>((set, get) => {
         delete streams[sid]
       }
       patchSession(sid, { ...EMPTY })
+    },
+
+    receivePush: (sid, content, requestId) => {
+      if (!content) return false
+      const cur = get().sessions[sid]
+      // Already streaming this request via SSE, or the same push already
+      // landed — don't render it twice.
+      if (requestId && cur?.messages.some((m) => m.pushRequestId === requestId)) {
+        return false
+      }
+      const msg: ChatMessage = {
+        id: uid('assistant'),
+        role: 'assistant',
+        content,
+        timestamp: Date.now() / 1000,
+        pushRequestId: requestId,
+      }
+      patchMessages(sid, (msgs) => [...msgs, msg])
+      return true
     },
   }
 })
