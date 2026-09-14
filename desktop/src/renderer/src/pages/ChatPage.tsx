@@ -10,16 +10,19 @@ import {
   Terminal,
   type LucideIcon,
 } from 'lucide-react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import MessageBubble from '../components/MessageBubble'
 import ChatInput, { type ChatInputHandle } from '../components/ChatInput'
+import { TeamChatModal } from '../components/NewChatMenu'
 import { product } from '@product'
 import { t } from '../i18n'
 import apiClient from '../api/client'
 import type { Attachment, ChatMessage } from '../types'
 import { useChatStore } from '../store/chatStore'
-import { useSessionStore } from '../store/sessionStore'
-import { useUIStore } from '../store/uiStore'
+import { useSessionStore, sessionOwner } from '../store/sessionStore'
+import { useAgentStore } from '../store/agentStore'
 import { useWorkspaceStore } from '../store/workspaceStore'
+import { startNewChat } from '../lib/newChat'
 
 interface ChatPageProps {
   baseUrl: string
@@ -46,8 +49,8 @@ const SUGGESTIONS: {
 
 const ChatPage: React.FC<ChatPageProps> = ({ baseUrl }) => {
   const activeId = useSessionStore((s) => s.activeId)
-  const newSession = useSessionStore((s) => s.newSession)
   const loadSessions = useSessionStore((s) => s.loadSessions)
+  const activeAgentId = useAgentStore((s) => s.activeAgentId)
 
   const session = useChatStore((s) => s.sessions[activeId])
   const send = useChatStore((s) => s.send)
@@ -58,7 +61,6 @@ const ChatPage: React.FC<ChatPageProps> = ({ baseUrl }) => {
   const loadHistory = useChatStore((s) => s.loadHistory)
   const ensureSession = useChatStore((s) => s.ensureSession)
   const clearContext = useChatStore((s) => s.clearContext)
-  const setSessionsCollapsed = useUIStore((s) => s.setSessionsCollapsed)
   const wsOnSessionSwitch = useWorkspaceStore((s) => s.onSessionSwitch)
 
   const messages = session?.messages ?? []
@@ -67,6 +69,27 @@ const ChatPage: React.FC<ChatPageProps> = ({ baseUrl }) => {
   const scrollRef = useRef<HTMLDivElement>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const inputResetRef = useRef<ChatInputHandle>(null)
+  const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
+
+  // The Agents page can hand the user straight into a group chat: it navigates
+  // here with ?team=1 to pop the group-chat picker over the conversation. Clear
+  // the flag once consumed so a back/refresh doesn't reopen it.
+  const [teamOpen, setTeamOpen] = useState(false)
+  useEffect(() => {
+    if (searchParams.get('team') === '1') {
+      setTeamOpen(true)
+      searchParams.delete('team')
+      setSearchParams(searchParams, { replace: true })
+    }
+  }, [searchParams, setSearchParams])
+
+  // "Config" action on the context pie: jump to settings and flag the budget
+  // field to scroll/highlight (read in BasicSettings on mount).
+  const handleAdjustContext = useCallback(() => {
+    sessionStorage.setItem('cow_focus_max_tokens', '1')
+    navigate('/settings')
+  }, [navigate])
   const [loadingMore, setLoadingMore] = useState(false)
   const titlePendingRef = useRef(false)
 
@@ -82,6 +105,24 @@ const ChatPage: React.FC<ChatPageProps> = ({ baseUrl }) => {
       loadHistory(activeId, 1)
     }
   }, [activeId, ensureSession, loadHistory])
+
+  // History lives in the owner Agent's store. If the owner of the open
+  // conversation changes under us (the roster resolved after the first load,
+  // or the backend list corrected who owns it), what we loaded came from the
+  // wrong store — fetch it again from the right one. Idle sessions only.
+  const loadedOwnerRef = useRef<{ sid: string; owner: string } | null>(null)
+  useEffect(() => {
+    const owner = sessionOwner(activeId)
+    const prev = loadedOwnerRef.current
+    loadedOwnerRef.current = { sid: activeId, owner }
+    // A session switch is handled by the effect above; only a same-session
+    // owner change means the loaded history came from the wrong store.
+    if (!prev || prev.sid !== activeId || prev.owner === owner) return
+    // Unscoped (pre-roster) requests already read the default Agent's store.
+    if (prev.owner === '' && owner === useAgentStore.getState().defaultAgentId) return
+    const s = useChatStore.getState().sessions[activeId]
+    if (s && !s.isStreaming) loadHistory(activeId, 1)
+  }, [activeId, activeAgentId, loadHistory])
 
   // Keep the workspace panel scoped to the active session (project vs default).
   useEffect(() => {
@@ -162,11 +203,14 @@ const ChatPage: React.FC<ChatPageProps> = ({ baseUrl }) => {
       const sid = activeId
       const isFirst = (useChatStore.getState().sessions[sid]?.messages.length ?? 0) === 0
       titlePendingRef.current = isFirst
+      // Resolve the owner before the await: the title request must land in the
+      // same store the message did, even if the user switches meanwhile.
+      const owner = sessionOwner(sid) || undefined
       await send(sid, text, attachments)
       // After the first message, refresh the list and ask backend to title it.
       if (isFirst) {
         try {
-          await apiClient.generateSessionTitle(sid, text)
+          await apiClient.generateSessionTitle(sid, text, undefined, owner)
         } catch {
           /* ignore */
         }
@@ -177,19 +221,11 @@ const ChatPage: React.FC<ChatPageProps> = ({ baseUrl }) => {
     [activeId, send, loadSessions]
   )
 
-  const handleNewChat = useCallback(() => {
-    // Inherit the current session's project so a new chat stays in the same
-    // space; fall back to the default workspace when none is bound.
-    const inherited = useSessionStore.getState().currentProject()
-    const id = newSession()
-    ensureSession(id)
-    loadHistory(id, 1)
-    // Show the fresh chat in the list immediately (under the inherited space),
-    // and expand the session list so the user sees the new session.
-    useSessionStore.getState().addOptimistic(id, inherited)
-    setSessionsCollapsed(false)
-    if (inherited) apiClient.selectProject(id, inherited.path).catch(() => {})
-  }, [newSession, ensureSession, loadHistory, setSessionsCollapsed])
+  const handleNewChat = useCallback(async () => {
+    // A new chat re-scopes the workspace panel, closing any open editor.
+    if (!(await useWorkspaceStore.getState().guardUnsavedEdit())) return
+    startNewChat()
+  }, [])
 
   const handleClearContext = useCallback(async () => {
     await clearContext(activeId)
@@ -305,7 +341,7 @@ const ChatPage: React.FC<ChatPageProps> = ({ baseUrl }) => {
                     className="flex-1 h-px"
                     style={{ background: 'linear-gradient(to right, transparent, var(--border-strong), transparent)' }}
                   />
-                  <span className="text-xs whitespace-nowrap">{t('context_cleared')}</span>
+                  <span className="text-xs whitespace-nowrap">{msg.content || t('context_cleared')}</span>
                   <span
                     className="flex-1 h-px"
                     style={{ background: 'linear-gradient(to right, transparent, var(--border-strong), transparent)' }}
@@ -336,7 +372,14 @@ const ChatPage: React.FC<ChatPageProps> = ({ baseUrl }) => {
         onClearContext={handleClearContext}
         isStreaming={isStreaming}
         sessionId={activeId}
+        onAdjustContext={handleAdjustContext}
         ref={inputResetRef}
+      />
+
+      <TeamChatModal
+        open={teamOpen}
+        onClose={() => setTeamOpen(false)}
+        onStarted={() => setTeamOpen(false)}
       />
     </div>
   )

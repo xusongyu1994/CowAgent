@@ -49,6 +49,10 @@ class ChatChannel(Channel):
         context.kwargs = kwargs
         if "channel_type" not in context:
             context["channel_type"] = self.channel_type
+        # Multi-instance routing + team: stamp the bound Agent, instance id and
+        # teammates so the router/bridge treat this as a bound (and possibly
+        # team) conversation. All empty on a legacy single-instance channel.
+        self.stamp_instance_context(context)
         if "origin_ctype" not in context:
             context["origin_ctype"] = ctype
         # context首次传入时，receiver是None，根据类型设置receiver
@@ -450,13 +454,13 @@ class ChatChannel(Channel):
                     # Determine whether it is a remote URL or a local file.
                     if url.startswith(('http://', 'https://')):
                         if media_type == 'video':
-                            media_reply = Reply(ReplyType.FILE, url)
+                            media_reply = Reply(ReplyType.VIDEO_URL, url)
                             media_reply.file_name = os.path.basename(url)
                         else:
                             media_reply = Reply(ReplyType.IMAGE_URL, url)
                     elif os.path.exists(url):
                         if media_type == 'video':
-                            media_reply = Reply(ReplyType.FILE, f"file://{url}")
+                            media_reply = Reply(ReplyType.VIDEO, f"file://{url}")
                             media_reply.file_name = os.path.basename(url)
                         else:
                             media_reply = Reply(ReplyType.IMAGE_URL, f"file://{url}")

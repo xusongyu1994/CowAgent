@@ -34,8 +34,26 @@ available_setting = {
     "custom_providers": [],
     "proxy": "",  # proxy used by openai
     # chatgpt model; when use_azure_chatgpt is true, this is the Azure model deployment name
-    "model": "deepseek-v4-flash",  # options: gpt-4o, gpt-4o-mini, gpt-4-turbo, claude-3-sonnet, wenxin, moonshot, qwen-turbo, xunfei, glm-4, minimax, gemini, etc. See common/const.py for the full list
+    "model": "deepseek-flash",  # options: gpt-4o, gpt-4o-mini, gpt-4-turbo, claude-3-sonnet, wenxin, moonshot, qwen-turbo, xunfei, glm-4, minimax, gemini, etc. See common/const.py for the full list
     "bot_type": "",  # optional; for OpenAI-compatible third-party services set "openai" or "custom" (in custom mode switching model won't auto-switch bot_type). See common/const.py for bot names; inferred from model name if left empty
+    # Fallback chat models, tried in order after the primary one has failed
+    # permanently for a turn (all retries exhausted). Opt-in: an empty `chain`
+    # disables the switch and the error surfaces as before.
+    #
+    # The chain is ordered and unbounded: a turn walks it from the front, and
+    # the number of models the user lists *is* the number of switches on offer
+    # — there is no separate cap to raise. Each entry needs both a provider and
+    # a model; an entry missing either is skipped, and an entry equal to the
+    # primary model (or to an earlier link) is skipped too, so a misconfigured
+    # chain can never bounce a turn back onto the model that just failed.
+    # {"enabled": bool, "chain": [{"provider": str, "model": str}, ...]}
+    "chat_fallback": {
+        "enabled": False,
+        # Each item: {"provider": "openai", "model": "gpt-4o-mini"}.
+        # `provider` is a provider id as used by `bot_type`
+        # (e.g. "openai", "qianfan", "custom:<id>").
+        "chain": [],
+    },
     "use_azure_chatgpt": False,  # whether to use Azure chatgpt
     "azure_deployment_id": "",  # azure model deployment name
     "azure_api_version": "",  # azure api version
@@ -264,14 +282,20 @@ available_setting = {
     # synthesizes one "default" agent from agent_workspace and behaves exactly
     # as before. Each configured workspace is a complete CowAgent workspace.
     "agents": [],
-    # Agent handling conversations with no explicit binding. Defaults to the
-    # first configured agent when unset.
+    # Agent handling conversations that no channel instance binds. Defaults to
+    # the first configured agent when unset.
     "default_agent_id": "",
     # Routes inbound conversations to an agent. Each entry needs channel_type
     # and agent_id; add conversation_id to bind one chat rather than the whole
     # channel. Unbound conversations go to default_agent_id.
     "agent_bindings": [],
-    "agent_max_context_tokens": 64000,  # max context tokens in Agent mode
+    # Manual cap on the Agent-mode input budget, used to control cost / token
+    # burn: history is compacted once the prompt reaches this many tokens, even
+    # when the model's window is far larger. Defaults to 64000. This value is
+    # still clamped below the effective model's window (window - output
+    # reserve), so a small-window model is never asked for more than it allows.
+    # Set 0 to disable the manual cap and follow the model window instead.
+    "agent_max_context_tokens": 64000,
     "agent_max_context_turns": 30,  # max context memory turns in Agent mode
     "agent_max_steps": 30,  # max decision steps per run in Agent mode
     # Default permission mode for sessions that have not picked one of their own:
@@ -289,6 +313,21 @@ available_setting = {
         "max_depth": 1,          # 1 = only the main Agent may spawn (range 1-5)
         "max_concurrent": 3,     # parallel sub agents per spawn call (range 1-10)
         "timeout_seconds": 300,  # budget for one spawn call (range 10-3600)
+    },
+    # Delegation between configured agents. Unlike a sub agent, the target is a
+    # standing peer that answers in its own workspace. The call is synchronous:
+    # the delegating Agent waits for the teammate's result. The tool only
+    # appears in a team conversation (two+ enabled agents with members). Set to
+    # false to withhold it entirely.
+    "agent_delegation": {
+        "enabled": True,
+        # {"<source>": ["<target>", ...]} or "*" for any. Unset means every
+        # agent may delegate to every other one. Targets are further bounded to
+        # the teammates in the current conversation.
+        "allowed_targets": None,
+        "max_depth": 3,               # delegation hops in one chain (range 1-8)
+        "timeout_seconds": 600,       # budget for one delegated run (range 0.01-600)
+        "max_message_chars": 8000,    # size limit for one delegated task
     },
     "enable_thinking": False,  # Enable deep-thinking mode for thinking-capable models
     "reasoning_effort": "high",  # Provider-native reasoning depth; allowed values depend on the active provider/model
@@ -504,6 +543,9 @@ def load_config():
     # only missing namespaces are filled in from the legacy section.
     _merge_legacy_namespace(config, legacy="tool",  canonical="tools")
     _merge_legacy_namespace(config, legacy="skill", canonical="skills")
+    # A backup model configured before the fallback chain must survive the
+    # upgrade, so normalize it into the current shape before anything reads it.
+    _migrate_chat_fallback(config)
 
     # Fresh desktop installs default to the stricter "workspace-write"; every
     # other case keeps the template's "full-access". A packaged client only
@@ -692,6 +734,40 @@ def _merge_duplicate_keys(pairs):
     return out
 
 
+def _migrate_chat_fallback(cfg) -> None:
+    """Upgrade the single-model ``chat_fallback`` to the chain shape.
+
+    Before the fallback chain, ``chat_fallback`` held one ``provider`` and one
+    ``model`` (plus a ``max_switches`` cap). An existing config with a backup
+    model configured would otherwise load as an empty chain — silently
+    disabling a safety net the user had turned on — so fold those fields into
+    a one-entry chain here. ``max_switches`` is dropped rather than carried
+    over: the chain length is the new bound, and the old counter never
+    actually bounded anything (the fallback was already sticky for a run).
+    """
+    raw = cfg.get("chat_fallback")
+    if not isinstance(raw, dict):
+        return
+    chain = raw.get("chain")
+    if isinstance(chain, list):
+        raw.pop("max_switches", None)
+        return
+    provider = (raw.get("provider") or "").strip()
+    model = (raw.get("model") or "").strip()
+    entry = []
+    if provider and model:
+        entry = [{"provider": provider, "model": model}]
+    raw.pop("provider", None)
+    raw.pop("model", None)
+    raw.pop("max_switches", None)
+    raw["chain"] = entry
+    if entry:
+        logger.warning(
+            "[INIT] chat_fallback.provider/model is deprecated; migrated into "
+            "chat_fallback.chain. Please rewrite it as a list in config.json."
+        )
+
+
 def _merge_legacy_namespace(cfg, legacy: str, canonical: str) -> None:
     """Fold deprecated singular keys (``tool`` / ``skill``) into their plural
     canonical counterparts at load time. Canonical entries always win."""
@@ -878,20 +954,30 @@ def get_appdata_dir():
     return data_path
 
 
-def get_weixin_credentials_path():
+def get_weixin_credentials_path(instance_id: str = ""):
     """Resolve the Weixin credentials (token) file path.
 
     Honors an explicit ``weixin_credentials_path`` from config. Otherwise the
     packaged desktop build (COW_DATA_DIR set) keeps it under the data dir
     (~/.cow) so all user data stays together, while source deployments retain
     the legacy ~/.weixin_cow_credentials.json default unchanged.
+
+    ``instance_id`` isolates the credentials file when several Weixin instances
+    run in one process, each logged into a different account: their tokens must
+    not share (and overwrite) one file. Empty (the single-instance default)
+    keeps the legacy path byte-for-byte, so existing installs are untouched.
     """
     configured = conf().get("weixin_credentials_path")
     if configured:
-        return os.path.expanduser(configured)
-    if os.environ.get("COW_DATA_DIR"):
-        return os.path.join(get_data_root(), "weixin_credentials.json")
-    return os.path.expanduser("~/.weixin_cow_credentials.json")
+        base = os.path.expanduser(configured)
+    elif os.environ.get("COW_DATA_DIR"):
+        base = os.path.join(get_data_root(), "weixin_credentials.json")
+    else:
+        base = os.path.expanduser("~/.weixin_cow_credentials.json")
+    if not instance_id:
+        return base
+    root, ext = os.path.splitext(base)
+    return f"{root}.{instance_id}{ext or '.json'}"
 
 
 def subscribe_msg():

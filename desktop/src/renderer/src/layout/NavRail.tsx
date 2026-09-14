@@ -7,6 +7,7 @@ import {
   Zap,
   Radio,
   Clock,
+  Users,
   Settings,
   PanelLeftClose,
   PanelLeftOpen,
@@ -30,6 +31,7 @@ import type { Theme } from '../theme/themes'
 import brandLogo from '../assets/logo.png'
 import { t, getLang, setLang, Lang } from '../i18n'
 import { useUIStore } from '../store/uiStore'
+import { guardDocEditors } from '../store/docEditorStore'
 import { useTheme } from '../hooks/useTheme'
 import { usePlatform } from '../hooks/usePlatform'
 import { useUpdateStore, hasPendingUpdate, hasAvailableUpdate } from '../store/updateStore'
@@ -39,7 +41,7 @@ import { product } from '@product'
 // Fallback shown when app.getVersion() is unavailable (dev/web preview). Keep
 // in sync with desktop/package.json "version"; the packaged app overrides this
 // with the real value via IPC, so it only matters outside a packaged build.
-const FALLBACK_VERSION = '2.1.5'
+const FALLBACK_VERSION = '2.1.9'
 
 // External links opened in the user's default browser. The window-open handler
 // in the main process routes window.open() through shell.openExternal.
@@ -72,6 +74,10 @@ const NAV_ITEMS: NavItem[] = [
   { path: '/settings', labelKey: 'menu_settings', icon: Settings },
 ]
 
+// The Team entry only exists once the install runs more than one Agent, so a
+// single-Agent client shows exactly the original menu. Inserted after Chat.
+const AGENTS_ITEM: NavItem = { path: '/agents', labelKey: 'menu_agents', icon: Users }
+
 interface NavRailProps {
   onLangChange: () => void
 }
@@ -88,6 +94,18 @@ const NavRail: React.FC<NavRailProps> = ({ onLangChange }) => {
 
   const collapsed = navCollapsed
   const width = collapsed ? 'w-[56px]' : 'w-[208px]'
+
+  // Leaving a page unmounts its document editor, so settle any unsaved work
+  // first - here, while declining can still stop the navigation.
+  const go = async (path: string) => {
+    if (!(await guardDocEditors())) return
+    navigate(path)
+  }
+
+  // Always surface the Team entry: it is the only way to add a second Agent,
+  // so gating it on multi-Agent mode created a chicken-and-egg trap where a
+  // single-Agent install could never opt into a team. Inserted after Chat.
+  const navItems = [NAV_ITEMS[0], AGENTS_ITEM, ...NAV_ITEMS.slice(1)]
 
   const updateState = useUpdateStore()
   // Footer dot: hidden once dismissed for this version (user asked for this).
@@ -196,13 +214,13 @@ const NavRail: React.FC<NavRailProps> = ({ onLangChange }) => {
       <div className="flex-1 flex flex-col min-h-0 border-r border-default">
       {/* Nav items */}
       <nav className="flex-1 overflow-y-auto px-2 py-2 space-y-0.5">
-        {NAV_ITEMS.map((item) => {
+        {navItems.map((item) => {
           const Icon = item.icon
           const isActive = location.pathname === item.path
           return (
             <button
               key={item.path}
-              onClick={() => navigate(item.path)}
+              onClick={() => void go(item.path)}
               title={collapsed ? t(item.labelKey) : undefined}
               className={`group w-full flex items-center gap-3 rounded-btn cursor-pointer transition-colors h-9 ${
                 collapsed ? 'justify-center px-0' : 'px-3'
@@ -237,7 +255,7 @@ const NavRail: React.FC<NavRailProps> = ({ onLangChange }) => {
             upToDate={checkedManually && updateStatusState === 'not-available' && !availableUpdate}
             onLogs={() => {
               setMenuOpen(false)
-              navigate('/logs')
+              void go('/logs')
             }}
             onTheme={toggleTheme}
             themeId={themeId}

@@ -53,6 +53,9 @@ class TestQianfanConstantsAndRouting(unittest.TestCase):
         from bridge.agent_bridge import AgentLLMModel
         from common import const
 
+        # __init__ is bypassed: routing is a pure function of the model name
+        # and config, and the overrides default to "follow the global config"
+        # on the class, which is what is being asked about here.
         model = AgentLLMModel.__new__(AgentLLMModel)
         fake_conf = MagicMock()
         fake_conf.get.side_effect = lambda key, default=None: {

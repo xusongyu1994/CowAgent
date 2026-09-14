@@ -7,12 +7,9 @@ with a budget below ``max_tokens`` (``adaptive`` is a 400), and ``display``
 must be set explicitly or the thinking blocks come back empty.
 """
 import os
-import re
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-sys.modules.setdefault("regex", re)
 
 
 def _bot_with_capture(monkeypatch, model):
@@ -67,8 +64,19 @@ def test_legacy_budget_is_capped(monkeypatch):
     assert captured["request"]["thinking"]["budget_tokens"] == 16000
 
 
-def test_thinking_disabled_is_sent_through(monkeypatch):
+def test_adaptive_model_omits_disabled_thinking(monkeypatch):
+    # Adaptive-only models reject ``thinking.type: disabled`` (verified against
+    # the live API in 1e08c97c), so the field is dropped and the API falls back
+    # to adaptive rather than failing the request.
     bot, captured = _bot_with_capture(monkeypatch, "claude-sonnet-5")
+
+    _call(bot, thinking={"type": "disabled"})
+
+    assert "thinking" not in captured["request"]
+
+
+def test_legacy_model_disabled_thinking_is_sent_through(monkeypatch):
+    bot, captured = _bot_with_capture(monkeypatch, "claude-sonnet-4-5")
 
     _call(bot, thinking={"type": "disabled"})
 

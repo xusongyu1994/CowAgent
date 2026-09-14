@@ -9,11 +9,14 @@ import LoginGate from './components/LoginGate'
 import { useBackend } from './hooks/useBackend'
 import { usePlatform } from './hooks/usePlatform'
 import { usePushPoll } from './hooks/usePushPoll'
+import { useSchedulerNotifyPoll } from './hooks/useSchedulerNotifyPoll'
 import { useUIStore } from './store/uiStore'
 import { useSessionStore } from './store/sessionStore'
 import { useWorkspaceStore } from './store/workspaceStore'
+import { guardDocEditors } from './store/docEditorStore'
 import WorkspacePanel from './components/WorkspacePanel'
 import Lightbox from './components/Lightbox'
+import ConfirmDialog from './components/ConfirmDialog'
 import { initUpdateListener } from './store/updateStore'
 import { useOnboardingStore } from './store/onboardingStore'
 import OnboardingWizard from './components/OnboardingWizard'
@@ -27,6 +30,8 @@ import MemoryPage from './pages/MemoryPage'
 import ChannelsPage from './pages/ChannelsPage'
 import TasksPage from './pages/TasksPage'
 import LogsPage from './pages/LogsPage'
+import AgentsPage from './pages/AgentsPage'
+import { useAgentStore } from './store/agentStore'
 import { product } from '@product'
 
 const App: React.FC = () => {
@@ -126,8 +131,20 @@ const App: React.FC = () => {
     }
   }, [backend.status, authState, maybeOpenOnboarding])
 
+  // Load the team roster once the backend and auth are settled. This is
+  // best-effort: the store swallows every error and degrades to single-Agent,
+  // so a legacy backend (no /api/agents) or a transient failure never blocks
+  // the app — the team affordances simply stay hidden.
+  const refreshRoster = useAgentStore((s) => s.refresh)
+  useEffect(() => {
+    if (backend.status === 'ready' && authState === 'ok') void refreshRoster()
+  }, [backend.status, authState, backend.baseUrl, refreshRoster])
+
   // Poll for scheduler/push messages once the backend and auth are settled.
   usePushPoll(backend.status === 'ready' && authState === 'ok')
+  // Independently watch the global runs ledger so a scheduled task firing into a
+  // non-active session still notifies (usePushPoll only sees the open session).
+  useSchedulerNotifyPoll(backend.status === 'ready' && authState === 'ok')
 
   // A clicked OS notification asks us to open its session.
   useEffect(() => {
@@ -143,8 +160,11 @@ const App: React.FC = () => {
 
   // Handle app-menu / shortcut actions forwarded from the main process.
   useEffect(() => {
-    const off = window.electronAPI?.onMenuAction?.((action) => {
+    const off = window.electronAPI?.onMenuAction?.(async (action) => {
+      // Each of these leaves the current page, taking any open editor with it.
+      if (!(await guardDocEditors())) return
       if (action === 'new-chat') {
+        if (!(await useWorkspaceStore.getState().guardUnsavedEdit())) return
         useSessionStore.getState().newSession()
         navigate('/')
       } else if (action === 'open-settings') {
@@ -194,6 +214,7 @@ const App: React.FC = () => {
     <div className="flex h-screen overflow-hidden bg-base text-content">
       {onboardingOpen && <OnboardingWizard onDone={handleLangChange} />}
       <Lightbox />
+      <ConfirmDialog />
       <NavRail onLangChange={handleLangChange} />
 
       {showSessions && <SessionList />}
@@ -247,6 +268,7 @@ const App: React.FC = () => {
             <Route path="/memory" element={<MemoryPage baseUrl={backend.baseUrl} />} />
             <Route path="/skills" element={<SkillsPage baseUrl={backend.baseUrl} />} />
             <Route path="/channels" element={<ChannelsPage baseUrl={backend.baseUrl} />} />
+            <Route path="/agents" element={<AgentsPage baseUrl={backend.baseUrl} />} />
             <Route path="/tasks" element={<TasksPage baseUrl={backend.baseUrl} />} />
             <Route path="/settings" element={<SettingsPage baseUrl={backend.baseUrl} onLangChange={handleLangChange} />} />
             {/* Legacy /models route now lives as a tab inside settings */}

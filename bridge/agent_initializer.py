@@ -7,7 +7,7 @@ import asyncio
 import datetime
 import threading
 import time
-from typing import Optional, List
+from typing import Dict, List, Optional
 
 from agent.protocol import Agent
 from agent.tools import ToolManager
@@ -173,6 +173,7 @@ class AgentInitializer:
         self,
         session_id: Optional[str] = None,
         agent_id: Optional[str] = None,
+        host_agent_id: Optional[str] = None,
     ) -> Agent:
         """
         Initialize agent for a session
@@ -180,6 +181,10 @@ class AgentInitializer:
         Args:
             session_id: Session ID (None for default agent)
             agent_id: Agent profile identifier. Omit for the configured default.
+            host_agent_id: Agent that owns this conversation, when it is not
+                ``agent_id``. A conversation belongs to the session rather than
+                to whoever happens to be answering, so a guest reads the host's
+                transcript and roster instead of starting a private one.
         
         Returns:
             Initialized agent instance
@@ -190,8 +195,18 @@ class AgentInitializer:
         # An explicit agent_id wins (admin, warmup, tests); otherwise follow
         # the identity routing established for this message.
         identity = current_identity()
-        profile = get_agent_registry().get(agent_id or identity.agent_id)
+        registry = get_agent_registry()
+        profile = registry.get(agent_id or identity.agent_id)
         workspace_root = profile.workspace
+        host_profile = profile
+        if host_agent_id and host_agent_id != profile.id:
+            try:
+                host_profile = registry.get(host_agent_id, require_enabled=False)
+            except Exception as e:
+                logger.warning(
+                    f"[AgentInitializer] Unknown conversation host "
+                    f"'{host_agent_id}', falling back to {profile.id}: {e}"
+                )
         
         # Migrate API keys
         self._migrate_config_to_env(workspace_root)
@@ -214,7 +229,9 @@ class AgentInitializer:
         memory_manager, memory_tools = self._setup_memory_system(workspace_root, session_id)
         
         # Load tools
-        tools = self._load_tools(workspace_root, memory_manager, memory_tools, session_id)
+        tools = self._load_tools(
+            workspace_root, memory_manager, memory_tools, session_id, host_profile.id
+        )
         
         # Initialize scheduler if needed
         self._initialize_scheduler(
@@ -232,6 +249,9 @@ class AgentInitializer:
         runtime_info = self._get_runtime_info(workspace_root)
         runtime_info["agent_id"] = profile.id
         runtime_info["agent_name"] = profile.name
+        runtime_info["_get_teammates"] = self._teammates_getter(
+            session_id, profile.id, host_profile.id
+        )
         
         system_prompt = prompt_builder.build(
             tools=tools,
@@ -241,21 +261,31 @@ class AgentInitializer:
             runtime_info=runtime_info,
         )
         
-        # Get cost control parameters
+        # Get cost control parameters. The context budget is normally derived
+        # from the effective model's context window (see
+        # Agent._get_model_context_window). agent_max_context_tokens is an
+        # optional manual override: 0/unset means "derive from the model", a
+        # positive value forces that input ceiling (still clamped below the
+        # model window in _trim_messages) for gateways / self-hosted models
+        # whose real window we can't infer.
         from config import conf
         max_steps = conf().get("agent_max_steps", 20)
-        max_context_tokens = conf().get("agent_max_context_tokens", 50000)
-        
+        try:
+            max_context_tokens = int(conf().get("agent_max_context_tokens", 0) or 0)
+        except (TypeError, ValueError):
+            max_context_tokens = 0
+        max_context_tokens = max_context_tokens if max_context_tokens > 0 else None
+
         # Create agent
         agent = self.agent_bridge.create_agent(
             system_prompt=system_prompt,
             tools=tools,
             max_steps=max_steps,
+            max_context_tokens=max_context_tokens,
             output_mode="logger",
             workspace_dir=workspace_root,
             skill_manager=skill_manager,
             enable_skills=True,
-            max_context_tokens=max_context_tokens,
             runtime_info=runtime_info  # Pass runtime_info for dynamic time updates
         )
         
@@ -275,19 +305,36 @@ class AgentInitializer:
         # model, and the LLM — which reads that line — answers with the wrong
         # model name even though the actual API call used the session's model.
         llm = getattr(agent, "model", None)
+        # The default Agent has no model of its own: it answers on whatever the
+        # console's model setting says, so that setting stays the one place to
+        # change it. Everyone else may be picked precisely for a model.
+        if llm is not None and hasattr(llm, "set_agent_default"):
+            is_default = profile.id == self.agent_bridge.agent_registry.default_agent_id
+            llm.set_agent_default(
+                None if is_default else profile.bot_type,
+                None if is_default else profile.model,
+            )
         if llm is not None and hasattr(llm, "model"):
             runtime_info["_get_model"] = lambda: getattr(llm, "model", None) or conf().get("model", "unknown")
 
         # Restore persisted conversation history for this session
         if session_id:
-            self._restore_conversation_history(agent, session_id)
+            self._restore_conversation_history(
+                agent, session_id, host_profile.workspace, host_profile.id
+            )
 
         # Start daily memory flush timer (once, on first agent init regardless of session)
         self._start_daily_flush_timer()
 
         return agent
 
-    def _restore_conversation_history(self, agent, session_id: str) -> None:
+    def _restore_conversation_history(
+        self,
+        agent,
+        session_id: str,
+        transcript_workspace: Optional[str] = None,
+        host_agent_id: Optional[str] = None,
+    ) -> None:
         """
         Load persisted conversation messages from SQLite and inject them
         into the agent's in-memory message list.
@@ -305,22 +352,33 @@ class AgentInitializer:
         if not conf().get("conversation_persistence", True):
             return
 
+        reader = getattr(agent, "agent_id", "") or ""
+        shared = self._is_shared_conversation(session_id, host_agent_id or reader)
+
         try:
             from agent.memory import get_conversation_store
-            store = get_conversation_store(agent.workspace_dir)
+            store = get_conversation_store(
+                transcript_workspace or agent.workspace_dir
+            )
             max_turns = conf().get("agent_max_context_turns", 20)
-            # Scheduler tasks run on a stable isolated session per task and
-            # can fire many times a day; a smaller restore window keeps prompt
-            # cost bounded while still letting the agent see "last few" runs
-            # for trend / dedup style logic. Regular chat sessions keep the
-            # original heuristic so user dialogues feel continuous.
+            # Restore honours the session's context boundary (cleared history is
+            # never brought back), so we can afford a fairly generous window and
+            # still keep it under the runtime cap. Regular chats restore ~half of
+            # the runtime budget so a dialogue feels continuous after a restart.
+            # Scheduler tasks run on a stable isolated session and can fire many
+            # times a day, so they keep a smaller window: enough to see the last
+            # few runs for trend / dedup logic while keeping prompt cost bounded.
             if session_id.startswith("scheduler_"):
-                restore_turns = max(1, max_turns // 5)
+                restore_turns = max(1, max_turns // 4)
             else:
-                restore_turns = max(3, max_turns // 6)
-            saved = store.load_messages(session_id, max_turns=restore_turns)
+                restore_turns = max(3, max_turns // 2)
+            saved = store.load_messages(
+                session_id, max_turns=restore_turns, with_authors=shared
+            )
             if saved:
                 filtered = self._filter_text_only_messages(saved)
+                if shared:
+                    filtered = self._attribute_history(filtered, reader)
                 if filtered:
                     with agent.messages_lock:
                         agent.messages = filtered
@@ -334,6 +392,65 @@ class AgentInitializer:
                 f"[AgentInitializer] Failed to restore conversation history for "
                 f"session={session_id}: {e}"
             )
+
+    @staticmethod
+    def _is_shared_conversation(session_id: str, host_agent_id: str) -> bool:
+        """Whether anyone besides the owner was invited into this conversation."""
+        if not session_id:
+            return False
+        try:
+            from agent.workspace import session_prefs
+
+            return bool(session_prefs.get_prefs(session_id, host_agent_id).get("members"))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _attribute_history(messages: list, reader_agent_id: str) -> list:
+        """Name the author of replies this Agent did not write.
+
+        A shared transcript replays every earlier reply in the same
+        ``assistant`` role. Prefixing that role with ``[Name]`` teaches the
+        model to open its own answer the same way. Replay a colleague's turn
+        as a user message instead (``Name(@id)：…``): ``assistant`` stays
+        "mine", so the model has nothing to copy into the reply.
+        """
+        from agent.registry import get_agent_registry
+
+        registry = get_agent_registry()
+        prefixes: Dict[str, str] = {}
+
+        def prefix_of(agent_id: str) -> str:
+            if agent_id not in prefixes:
+                try:
+                    name = registry.get(agent_id, require_enabled=False).name
+                except Exception:
+                    name = agent_id
+                prefixes[agent_id] = f"{name}(@{agent_id})："
+            return prefixes[agent_id]
+
+        attributed = []
+        for message in messages:
+            author = message.get("agent_id") or ""
+            plain = {"role": message["role"], "content": message["content"]}
+            if author and author != reader_agent_id and plain["role"] == "assistant":
+                prefix = prefix_of(author)
+                blocks = plain["content"]
+                if isinstance(blocks, list) and blocks and blocks[0].get("type") == "text":
+                    text = blocks[0].get("text", "")
+                    if not text.startswith(prefix):
+                        text = prefix + text
+                    plain = {
+                        "role": "user",
+                        "content": [{**blocks[0], "text": text}, *blocks[1:]],
+                    }
+                elif isinstance(blocks, str):
+                    plain = {
+                        "role": "user",
+                        "content": blocks if blocks.startswith(prefix) else prefix + blocks,
+                    }
+            attributed.append(plain)
+        return attributed
 
     @staticmethod
     def _filter_text_only_messages(messages: list) -> list:
@@ -387,7 +504,9 @@ class AgentInitializer:
             elif current_turn is not None and msg.get("role") == "assistant":
                 text = _extract_text(msg.get("content"))
                 if text:
-                    current_turn["assistants"].append(text)
+                    current_turn["assistants"].append(
+                        (text, msg.get("agent_id") or "")
+                    )
         if current_turn is not None:
             turns.append(current_turn)
 
@@ -402,11 +521,14 @@ class AgentInitializer:
                 "content": [{"type": "text", "text": user_text}]
             })
             if turn["assistants"]:
-                final_reply = turn["assistants"][-1]
-                filtered.append({
+                final_reply, author = turn["assistants"][-1]
+                reply = {
                     "role": "assistant",
-                    "content": [{"type": "text", "text": final_reply}]
-                })
+                    "content": [{"type": "text", "text": final_reply}],
+                }
+                if author:
+                    reply["agent_id"] = author
+                filtered.append(reply)
 
         return filtered
     
@@ -523,8 +645,10 @@ class AgentInitializer:
             target=_run, daemon=True, name="memory-sync"
         ).start()
     
-    def _load_tools(self, workspace_root: str, memory_manager, memory_tools: List, session_id: Optional[str] = None):
+    def _load_tools(self, workspace_root: str, memory_manager, memory_tools: List, session_id: Optional[str] = None, host_agent_id: Optional[str] = None):
         """Load all tools"""
+        from config import conf
+
         tool_manager = ToolManager()
         tool_manager.load_tools()
         
@@ -549,6 +673,29 @@ class AgentInitializer:
                     from agent.evolution.config import get_evolution_config
                     if not get_evolution_config().enabled:
                         logger.debug("[AgentInitializer] evolution_undo skipped - self-evolution disabled")
+                        continue
+
+                if tool_name == "agent_delegate":
+                    delegation = conf().get("agent_delegation", {})
+                    enabled = delegation is not False and (
+                        not isinstance(delegation, dict)
+                        or delegation.get("enabled", True)
+                    )
+                    enabled_agents = self.agent_bridge.agent_registry.list(
+                        include_disabled=False
+                    )
+                    # Delegation only makes sense once a conversation actually has
+                    # teammates in it. A solo chat - even on an instance with many
+                    # Agents defined - should not carry the tool, so a lone Agent
+                    # never tries to hand work to someone who was not invited.
+                    shared = self._is_shared_conversation(
+                        session_id or "", host_agent_id or ""
+                    )
+                    if not enabled or len(enabled_agents) < 2 or not shared:
+                        logger.debug(
+                            "[AgentInitializer] agent_delegate skipped - "
+                            "needs a shared conversation with 2+ Agents"
+                        )
                         continue
 
                 # Special handling for EnvConfig tool
@@ -684,12 +831,63 @@ class AgentInitializer:
     def _initialize_skill_manager(self, workspace_root: str, session_id: Optional[str] = None):
         """Initialize skill manager"""
         try:
-            from agent.skills import SkillManager
-            skill_manager = SkillManager(custom_dir=os.path.join(workspace_root, "skills"))
-            return skill_manager
+            from agent.skills import build_skill_manager
+            return build_skill_manager(workspace_dir=workspace_root)
         except Exception as e:
             logger.warning(f"[AgentInitializer] Failed to initialize SkillManager: {e}")
             return None
+
+    @staticmethod
+    def _teammates_getter(
+        session_id: Optional[str], agent_id: str, host_agent_id: Optional[str] = None
+    ):
+        """Resolve this conversation's roster lazily, on each prompt build.
+
+        A closure rather than a resolved list: the Agent instance is cached per
+        session, so a roster resolved once here would stay stale until the
+        session was evicted, and inviting somebody would not take effect.
+
+        The roster is stored against the conversation's host, who is in the
+        room too, so a guest sees the host plus the other members, never itself.
+        """
+        host_id = host_agent_id or agent_id
+
+        def resolve():
+            if not session_id:
+                return []
+            try:
+                from agent.registry import get_agent_registry
+                from agent.workspace import session_prefs
+
+                members = session_prefs.get_prefs(session_id, host_id).get("members")
+                if not members:
+                    return []
+                registry = get_agent_registry()
+                roster = []
+                for member_id in [host_id, *members]:
+                    if member_id == agent_id or any(
+                        item["id"] == member_id for item in roster
+                    ):
+                        continue
+                    try:
+                        profile = registry.get(member_id)
+                    except Exception:
+                        # A member that was archived since is simply no longer
+                        # on the team; naming it would invite a failed handover.
+                        continue
+                    roster.append(
+                        {
+                            "id": profile.id,
+                            "name": profile.name,
+                            "description": profile.description or "",
+                        }
+                    )
+                return roster
+            except Exception as e:
+                logger.warning(f"[AgentInitializer] Failed to resolve teammates: {e}")
+                return []
+
+        return resolve
     
     def _get_runtime_info(self, workspace_root: str):
         """Get runtime information with dynamic time support"""

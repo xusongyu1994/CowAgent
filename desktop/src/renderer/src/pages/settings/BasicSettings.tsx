@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { Cpu, Bot, ShieldCheck, Settings, Eye, EyeOff, ArrowRight, Loader2 } from 'lucide-react'
 import { t, getLang, setLang, localizedLabel, type Lang } from '../../i18n'
 import apiClient from '../../api/client'
@@ -16,6 +16,17 @@ const showManagedApiKey = product.models?.showManagedApiKey === true
 const ModelFieldLink = product.models?.ModelFieldLink
 const ApiKeyFieldLink = product.models?.ApiKeyFieldLink
 
+// Numeric settings are kept as raw text while editing so an emptied field stays
+// empty instead of snapping back to a digit the user then cannot delete. Only
+// on save is the text turned into a number, falling back to `fallback` when the
+// field was left blank.
+const digitsOnly = (text: string): string => text.replace(/\D/g, '').replace(/^0+(?=\d)/, '')
+
+const toInt = (text: string, fallback: number): number => {
+  const n = parseInt(text, 10)
+  return Number.isFinite(n) && n >= 0 ? n : fallback
+}
+
 interface BasicSettingsProps {
   baseUrl: string
   onLangChange?: () => void
@@ -25,6 +36,21 @@ interface BasicSettingsProps {
 const BasicSettings: React.FC<BasicSettingsProps> = ({ baseUrl, onLangChange, onOpenModels }) => {
   const [config, setConfig] = useState<ConfigData | null>(null)
   const [loading, setLoading] = useState(true)
+  // When arriving from the context pie's "Config" action, scroll to and briefly
+  // highlight the max-context-tokens field (signal set in sessionStorage).
+  const [highlightBudget, setHighlightBudget] = useState(false)
+  useEffect(() => {
+    if (sessionStorage.getItem('cow_focus_max_tokens') !== '1') return
+    sessionStorage.removeItem('cow_focus_max_tokens')
+    const el = document.getElementById('cfg-max-tokens')
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      ;(el as HTMLInputElement).focus?.({ preventScroll: true })
+    }
+    setHighlightBudget(true)
+    const timer = setTimeout(() => setHighlightBudget(false), 2000)
+    return () => clearTimeout(timer)
+  }, [])
 
   // notifications card (client-side preference, applied instantly)
   const taskNotify = useUIStore((s) => s.taskNotify)
@@ -75,6 +101,9 @@ const BasicSettings: React.FC<BasicSettingsProps> = ({ baseUrl, onLangChange, on
   const [customModel, setCustomModel] = useState('')
   const [showCustom, setShowCustom] = useState(false)
   const [modelStatus, setModelStatus] = useState('')
+  // Remembers the custom model typed per provider so switching vendors and
+  // back doesn't lose it. Keyed by provider id.
+  const customModelByProvider = useRef<Record<string, string>>({})
 
   // managed API key (shown only when the standalone models tab is hidden)
   const [apiKey, setApiKey] = useState('')
@@ -82,9 +111,11 @@ const BasicSettings: React.FC<BasicSettingsProps> = ({ baseUrl, onLangChange, on
   const [apiKeyVisible, setApiKeyVisible] = useState(false)
 
   // agent card
-  const [maxTokens, setMaxTokens] = useState(100000)
-  const [maxTurns, setMaxTurns] = useState(20)
-  const [maxSteps, setMaxSteps] = useState(20)
+  // Manual cap on the input budget (compact once reached, to control cost);
+  // 0 disables the cap and follows the model window.
+  const [maxTokens, setMaxTokens] = useState('64000')
+  const [maxTurns, setMaxTurns] = useState('20')
+  const [maxSteps, setMaxSteps] = useState('20')
   const [thinking, setThinking] = useState(false)
   const [reasoningEffort, setReasoningEffort] = useState('high')
   const [subagent, setSubagent] = useState(true)
@@ -143,9 +174,9 @@ const BasicSettings: React.FC<BasicSettingsProps> = ({ baseUrl, onLangChange, on
       const data = await apiClient.getConfig()
       setConfig(data)
       setModel(data.model || '')
-      setMaxTokens(data.agent_max_context_tokens ?? 100000)
-      setMaxTurns(data.agent_max_context_turns ?? 20)
-      setMaxSteps(data.agent_max_steps ?? 20)
+      setMaxTokens(String(data.agent_max_context_tokens ?? 64000))
+      setMaxTurns(String(data.agent_max_context_turns ?? 20))
+      setMaxSteps(String(data.agent_max_steps ?? 20))
       setThinking(!!data.enable_thinking)
       setReasoningEffort(data.reasoning_effort || 'high')
       setSubagent(data.subagent_enabled !== false)
@@ -181,14 +212,28 @@ const BasicSettings: React.FC<BasicSettingsProps> = ({ baseUrl, onLangChange, on
   }
 
   const handleProviderChange = (id: string) => {
+    // Stash the custom model typed under the provider we're leaving so a
+    // later switch back to it restores the value.
+    if (showCustom || isCustomProviderId(provider)) {
+      const typed = customModel.trim()
+      if (typed) customModelByProvider.current[provider] = typed
+    }
     setProvider(id)
     setShowCustom(false)
+    const remembered = customModelByProvider.current[id]
     if (id.startsWith('custom:') || id === 'custom') {
-      // Prefill with the provider's default model (or the saved one when
-      // re-selecting the active provider) and let the user edit it freely.
+      // Prefill with a remembered value, else the provider's default model (or
+      // the saved one when re-selecting the active provider).
       const meta = config?.providers?.[id] as ProviderMeta | undefined
       const saved = id === config?.bot_type ? config?.model || '' : ''
-      setCustomModel(saved || meta?.models?.[0] || '')
+      setCustomModel(remembered || saved || meta?.models?.[0] || '')
+      setModel('')
+      return
+    }
+    if (remembered) {
+      // A remembered custom model for a preset provider: reopen custom input.
+      setShowCustom(true)
+      setCustomModel(remembered)
       setModel('')
       return
     }
@@ -200,10 +245,21 @@ const BasicSettings: React.FC<BasicSettingsProps> = ({ baseUrl, onLangChange, on
     }
   }
 
+  // Keep the per-provider memory in sync as the user types a custom model.
+  const handleCustomModelInput = (val: string) => {
+    setCustomModel(val)
+    const trimmed = val.trim()
+    if (trimmed) customModelByProvider.current[provider] = trimmed
+    else delete customModelByProvider.current[provider]
+  }
+
   const handleModelChange = (val: string) => {
     if (val === '__custom__') {
       setShowCustom(true)
       setModel('')
+      // Restore any custom model previously typed for this provider.
+      const remembered = customModelByProvider.current[provider]
+      if (remembered) setCustomModel(remembered)
     } else {
       setShowCustom(false)
       setModel(val)
@@ -276,10 +332,15 @@ const BasicSettings: React.FC<BasicSettingsProps> = ({ baseUrl, onLangChange, on
       // value the user set for a different model. Merge with the existing map so
       // other models' saved efforts are not overwritten by the flat config save.
       const effortKey = currentModelKey()
+      // A field left blank keeps whatever is already persisted rather than
+      // silently saving 0, which would drop the context cap or turn limit.
+      const nextMaxTokens = toInt(maxTokens, config?.agent_max_context_tokens ?? 64000)
+      const nextMaxTurns = toInt(maxTurns, config?.agent_max_context_turns ?? 20)
+      const nextMaxSteps = toInt(maxSteps, config?.agent_max_steps ?? 20)
       await apiClient.updateConfig({
-        agent_max_context_tokens: maxTokens,
-        agent_max_context_turns: maxTurns,
-        agent_max_steps: maxSteps,
+        agent_max_context_tokens: nextMaxTokens,
+        agent_max_context_turns: nextMaxTurns,
+        agent_max_steps: nextMaxSteps,
         enable_thinking: thinking,
         reasoning_effort_by_model: {
           ...(config?.reasoning_effort_by_model || {}),
@@ -292,6 +353,10 @@ const BasicSettings: React.FC<BasicSettingsProps> = ({ baseUrl, onLangChange, on
       // otherwise switching model and back would show/submit a stale value.
       const fresh = await apiClient.getConfig()
       setConfig(fresh)
+      // Show what was actually saved, so a field left blank doesn't stay blank.
+      setMaxTokens(String(nextMaxTokens))
+      setMaxTurns(String(nextMaxTurns))
+      setMaxSteps(String(nextMaxSteps))
       setAgentStatus(t('config_saved'))
     } catch {
       setAgentStatus(t('config_save_error'))
@@ -409,7 +474,7 @@ const BasicSettings: React.FC<BasicSettingsProps> = ({ baseUrl, onLangChange, on
               <TextInput
                 className="font-mono"
                 value={customModel}
-                onChange={(e) => setCustomModel(e.target.value)}
+                onChange={(e) => handleCustomModelInput(e.target.value)}
                 placeholder={t('config_custom_model_hint')}
               />
             ) : (
@@ -423,7 +488,7 @@ const BasicSettings: React.FC<BasicSettingsProps> = ({ baseUrl, onLangChange, on
                   <TextInput
                     className="mt-2 font-mono"
                     value={customModel}
-                    onChange={(e) => setCustomModel(e.target.value)}
+                    onChange={(e) => handleCustomModelInput(e.target.value)}
                     placeholder={t('config_custom_model_hint')}
                   />
                 )}
@@ -469,7 +534,7 @@ const BasicSettings: React.FC<BasicSettingsProps> = ({ baseUrl, onLangChange, on
               className={`w-full flex items-center justify-between gap-2 rounded-btn border px-3 py-2.5 cursor-pointer transition-colors text-left ${
                 currentUnconfigured
                   ? 'border-danger-border bg-danger-soft hover:border-danger'
-                  : 'border-default bg-inset hover:border-accent'
+                  : 'border-default bg-inset-2 hover:border-accent'
               }`}
             >
               <span className={`text-xs ${currentUnconfigured ? 'text-danger' : 'text-content-tertiary'}`}>
@@ -501,10 +566,13 @@ const BasicSettings: React.FC<BasicSettingsProps> = ({ baseUrl, onLangChange, on
         <div className="space-y-4">
           <Field label={t('config_max_tokens')} hint={t('config_max_tokens_hint')}>
             <TextInput
+              id="cfg-max-tokens"
               type="number"
-              className="font-mono"
+              className={`font-mono transition-shadow ${
+                highlightBudget ? 'ring-2 ring-accent/50 border-accent' : ''
+              }`}
               value={maxTokens}
-              onChange={(e) => setMaxTokens(parseInt(e.target.value) || 0)}
+              onChange={(e) => setMaxTokens(digitsOnly(e.target.value))}
             />
           </Field>
           <Field label={t('config_max_turns')} hint={t('config_max_turns_hint')}>
@@ -512,7 +580,7 @@ const BasicSettings: React.FC<BasicSettingsProps> = ({ baseUrl, onLangChange, on
               type="number"
               className="font-mono"
               value={maxTurns}
-              onChange={(e) => setMaxTurns(parseInt(e.target.value) || 0)}
+              onChange={(e) => setMaxTurns(digitsOnly(e.target.value))}
             />
           </Field>
           <Field label={t('config_max_steps')} hint={t('config_max_steps_hint')}>
@@ -520,7 +588,7 @@ const BasicSettings: React.FC<BasicSettingsProps> = ({ baseUrl, onLangChange, on
               type="number"
               className="font-mono"
               value={maxSteps}
-              onChange={(e) => setMaxSteps(parseInt(e.target.value) || 0)}
+              onChange={(e) => setMaxSteps(digitsOnly(e.target.value))}
             />
           </Field>
           <div className="flex items-center justify-between py-1">

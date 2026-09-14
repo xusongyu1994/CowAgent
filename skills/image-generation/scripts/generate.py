@@ -10,6 +10,7 @@ OpenAI → Gemini → Seedream → Qwen → MiniMax → LinkAI; missing API keys
 are skipped, and the provider that natively owns the requested model is
 promoted to the front of the queue):
 
+    - gpt-image-2.5-flare / gpt-image-2.5-sunburst → OpenAI
     - gpt-image-2 / gpt-image-1                    → OpenAI
     - nano-banana / gemini-*-image-*               → Gemini
     - doubao-seedream-* / seedream-*               → Seedream (Volcengine Ark)
@@ -124,6 +125,26 @@ def _load_image(source: str) -> bytes:
         return resp.read()
 
 
+def _decode_image_item(item: dict, *, url_first: bool = False) -> bytes | None:
+    """Return the image bytes carried by an OpenAI-compatible result item.
+
+    Some backends send both keys even when only one of them holds a value —
+    e.g. an empty ``b64_json`` next to a usable ``url`` in URL output mode.
+    Branching on key presence would decode the empty string into a 0-byte
+    file, so branch on the value instead and fall through to the other key.
+    Returns None when neither field carries a value.
+    """
+    keys = ("url", "b64_json") if url_first else ("b64_json", "url")
+    for key in keys:
+        value = item.get(key)
+        if not value:
+            continue
+        if key == "b64_json":
+            return base64.b64decode(value)
+        return _load_image(value)
+    return None
+
+
 def _compress_image(data: bytes, max_bytes: int = 4 * 1024 * 1024, max_edge: int = 4096) -> bytes:
     """Compress image to fit size/dimension limits. Requires Pillow only when needed."""
     if len(data) <= max_bytes:
@@ -233,13 +254,14 @@ class ImageProvider(ABC):
 
 
 # ---------------------------------------------------------------------------
-# OpenAI-compatible provider (gpt-image-2, gpt-image-1)
+# OpenAI-compatible provider
+# (gpt-image-2.5-flare, gpt-image-2.5-sunburst, gpt-image-2, gpt-image-1)
 # ---------------------------------------------------------------------------
 
 class OpenAIProvider(ImageProvider):
     """Provider for OpenAI Image API (generations + edits)."""
 
-    DEFAULT_MODEL = "gpt-image-2"
+    DEFAULT_MODEL = "gpt-image-2.5-flare"
 
     def __init__(self, api_key: str, api_base: str, model: str):
         self.api_key = api_key
@@ -262,16 +284,31 @@ class OpenAIProvider(ImageProvider):
                 msg = resp.text or resp.reason
             raise RuntimeError(f"API {resp.status_code}: {msg} (url: {resp.url})")
 
+    @staticmethod
+    def _raise_for_business_error(result: dict):
+        """Raise for OpenAI-compatible backends that report business errors
+        with HTTP 200 plus an `error` field (e.g. LinkAI, Volcengine Ark)."""
+        if isinstance(result, dict) and result.get("error"):
+            err = result["error"]
+            if isinstance(err, dict):
+                msg = err.get("message") or err.get("code") or str(err)
+            else:
+                msg = str(err)
+            raise RuntimeError(f"API error: {msg}")
+
     def _post_json(self, url: str, payload: dict) -> dict:
         headers = {**self._headers(), "Content-Type": "application/json"}
         if _HAS_REQUESTS:
             resp = requests.post(url, headers=headers, json=payload, timeout=300)
             self._raise_for_api_error(resp)
-            return resp.json()
-        data = json.dumps(payload).encode()
-        req = Request(url, data=data, headers=headers, method="POST")
-        with urlopen(req, timeout=300) as r:
-            return json.loads(r.read())
+            result = resp.json()
+        else:
+            data = json.dumps(payload).encode()
+            req = Request(url, data=data, headers=headers, method="POST")
+            with urlopen(req, timeout=300) as r:
+                result = json.loads(r.read())
+        self._raise_for_business_error(result)
+        return result
 
     def _post_multipart(self, url: str, fields: dict, files: list[tuple]) -> dict:
         """POST multipart/form-data using requests (or fall back to urllib)."""
@@ -279,7 +316,9 @@ class OpenAIProvider(ImageProvider):
         if _HAS_REQUESTS:
             resp = requests.post(url, headers=headers, data=fields, files=files, timeout=300)
             self._raise_for_api_error(resp)
-            return resp.json()
+            result = resp.json()
+            self._raise_for_business_error(result)
+            return result
         boundary = uuid.uuid4().hex
         body = b""
         for key, val in fields.items():
@@ -294,7 +333,9 @@ class OpenAIProvider(ImageProvider):
         headers["Content-Type"] = f"multipart/form-data; boundary={boundary}"
         req = Request(url, data=body, headers=headers, method="POST")
         with urlopen(req, timeout=300) as r:
-            return json.loads(r.read())
+            result = json.loads(r.read())
+        self._raise_for_business_error(result)
+        return result
 
     def generate(
         self,
@@ -309,8 +350,12 @@ class OpenAIProvider(ImageProvider):
         # OpenAI Images API expects pixel size like 1024x1024.
         resolved = resolve_size(size, aspect_ratio) if (size or aspect_ratio) else None
         if image_url:
-            return self._edit(prompt, image_url=image_url, quality=quality, size=resolved, output_dir=output_dir)
-        return self._create(prompt, quality=quality, size=resolved, output_dir=output_dir)
+            paths = self._edit(prompt, image_url=image_url, quality=quality, size=resolved, output_dir=output_dir)
+        else:
+            paths = self._create(prompt, quality=quality, size=resolved, output_dir=output_dir)
+        if not paths:
+            raise RuntimeError("provider returned no image (empty data)")
+        return paths
 
     def _create(self, prompt: str, *, quality: str | None, size: str | None, output_dir: str) -> list[str]:
         url = f"{self.api_base}/images/generations"
@@ -360,11 +405,8 @@ class OpenAIProvider(ImageProvider):
     def _save_results(result: dict, output_dir: str) -> list[str]:
         paths = []
         for item in result.get("data", []):
-            if "b64_json" in item:
-                raw = base64.b64decode(item["b64_json"])
-                paths.append(_save_image(raw, output_dir))
-            elif "url" in item:
-                raw = _load_image(item["url"])
+            raw = _decode_image_item(item)
+            if raw:
                 paths.append(_save_image(raw, output_dir))
         return paths
 
@@ -376,7 +418,7 @@ class OpenAIProvider(ImageProvider):
 class LinkAIProvider(ImageProvider):
     """Provider for LinkAI unified image generation API."""
 
-    DEFAULT_MODEL = "gpt-image-2"
+    DEFAULT_MODEL = "gpt-image-2.5-flare"
 
     def __init__(self, api_key: str, api_base: str, model: str):
         self.api_key = api_key
@@ -449,11 +491,8 @@ class LinkAIProvider(ImageProvider):
 
         paths = []
         for item in result.get("data", []):
-            if "url" in item:
-                raw = _load_image(item["url"])
-                paths.append(_save_image(raw, output_dir))
-            elif "b64_json" in item:
-                raw = base64.b64decode(item["b64_json"])
+            raw = _decode_image_item(item, url_first=True)
+            if raw:
                 paths.append(_save_image(raw, output_dir))
         return paths
 
@@ -1024,6 +1063,7 @@ class MinimaxProvider(ImageProvider):
 # When the requested model matches a prefix, that provider is promoted to the
 # front of the queue. All other configured providers still run as fallbacks.
 _MODEL_PREFERRED_PROVIDER: list[tuple[tuple[str, ...], str]] = [
+    (("gpt-image-2.5",), "OpenAI"),
     (("gpt-image",), "OpenAI"),
     (("nano-banana", "gemini-"), "Gemini"),
     (("seedream", "doubao-seedream"), "Seedream"),

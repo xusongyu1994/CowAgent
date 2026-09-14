@@ -7,6 +7,9 @@ from typing import Optional
 
 
 DEEPSEEK_VALUES = ["low", "high", "xhigh", "max"]
+# Thinking-capable DeepSeek models: the V4 series plus the version-less V4.1
+# flagship (deepseek-flash), which takes the same reasoning_effort enum.
+DEEPSEEK_THINKING_MODELS = ("deepseek-v4", "deepseek-flash")
 ZHIPU_VALUES = ["low", "medium", "high", "xhigh", "max"]
 # GLM-5.3 always thinks (rejects thinking.type="disabled") and only exposes
 # three effort tiers. See https://docs.bigmodel.cn GLM-5.3 release notes.
@@ -18,6 +21,7 @@ DASHSCOPE_HIGH_MAX_VALUES = ["high", "max"]
 DASHSCOPE_MAX_ONLY_VALUES = ["max"]
 KIMI_K3_VALUES = ["low", "high", "max"]
 CLAUDE_XHIGH_MODELS = (
+    "claude-fable-5-1",
     "claude-fable-5",
     "claude-mythos-5",
     "claude-opus-5",
@@ -32,9 +36,10 @@ CLAUDE_MAX_ONLY_MODELS = (
     "claude-opus-4-5",
 )
 DASHSCOPE_QWEN38_MODELS = (
-    # qwen3.8-max and its -preview snapshot share the low/medium/xhigh enum
-    # (default xhigh) and always think.
+    # qwen3.8-max/-flash and their -preview snapshots share the low/medium/xhigh
+    # enum (default xhigh) and always think.
     "qwen3.8-max",
+    "qwen3.8-flash",
 )
 DASHSCOPE_HIGH_MAX_MODELS = (
     "glm-5.2",
@@ -89,7 +94,7 @@ def get_reasoning_capability(provider_id: str, model_name: str = "") -> dict:
     base_pid = _base_provider_id(provider_id)
     model = (model_name or "").strip().lower()
 
-    if base_pid == "deepseek" and model.startswith("deepseek-v4"):
+    if base_pid == "deepseek" and model.startswith(DEEPSEEK_THINKING_MODELS):
         return _capability(DEEPSEEK_VALUES, default="high")
 
     if base_pid == "zhipu":
@@ -110,9 +115,9 @@ def get_reasoning_capability(provider_id: str, model_name: str = "") -> dict:
         # unsupported Qwen/GLM/Kimi variants do not inherit another enum set.
         if model.startswith(DASHSCOPE_QWEN38_MODELS):
             return _capability(DASHSCOPE_QWEN38_VALUES, default="xhigh", thinking_only=True)
-        # deepseek-v4 takes the same enum wherever it is hosted; the two
+        # deepseek takes the same enum wherever it is hosted; the two
         # variants only differ in how they map the values internally.
-        if model.startswith("deepseek-v4"):
+        if model.startswith(DEEPSEEK_THINKING_MODELS):
             return _capability(DEEPSEEK_VALUES, default="high")
         if model.startswith(ZHIPU_GLM53_MODELS):
             return _capability(ZHIPU_GLM53_VALUES, default="max", thinking_only=True)
@@ -127,7 +132,7 @@ def get_reasoning_capability(provider_id: str, model_name: str = "") -> dict:
     if base_pid == "linkai":
         # LinkAI is a gateway; only expose passthrough effort for models whose
         # upstream protocol has been verified here.
-        if model.startswith("deepseek-v4"):
+        if model.startswith(DEEPSEEK_THINKING_MODELS):
             return _capability(DEEPSEEK_VALUES, default="high")
         if model.startswith(ZHIPU_GLM53_MODELS):
             return _capability(ZHIPU_GLM53_VALUES, default="max", thinking_only=True)

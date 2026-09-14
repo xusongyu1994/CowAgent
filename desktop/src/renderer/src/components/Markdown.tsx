@@ -127,7 +127,13 @@ md.renderer.rules.image = function (tokens, idx, options, env, self) {
   const token = tokens[idx]
   const src = token.attrGet('src') || ''
   const baseDir = (env as { imageBaseDir?: string } | undefined)?.imageBaseDir
-  if (/^~\//.test(src) || src.startsWith('/')) {
+  if (/^\/(?:api\/file|preview)\b/.test(src)) {
+    // The backend already rewrote a workspace-relative ref to a site-absolute
+    // URL (/api/file?path=... or /preview/...). The renderer isn't same-origin
+    // with the backend, so prefix it with the backend base (and carry the auth
+    // token) rather than treating it as a filesystem path to re-wrap.
+    token.attrSet('src', apiClient.getFileUrl(src))
+  } else if (/^~\//.test(src) || src.startsWith('/')) {
     token.attrSet('src', apiClient.getServeFileUrl(src))
   } else if (baseDir && !/^[a-zA-Z][\w+.-]*:/.test(src)) {
     // Doc-relative image (e.g. knowledge markdown `../images/x.png`): resolve
@@ -151,6 +157,26 @@ md.renderer.rules.image = function (tokens, idx, options, env, self) {
     token.attrSet('src', apiClient.getServeFileUrl(resolved))
   }
   return defaultImage(tokens, idx, options, env, self)
+}
+
+// A table can't shrink below its columns' minimum content width, so a wide
+// comparison table would run past the bubble. Wrap it in a scroller: the table
+// keeps filling the bubble when it fits and scrolls sideways when it doesn't.
+const defaultTableOpen =
+  md.renderer.rules.table_open ||
+  function (tokens, idx, options, _env, self) {
+    return self.renderToken(tokens, idx, options)
+  }
+const defaultTableClose =
+  md.renderer.rules.table_close ||
+  function (tokens, idx, options, _env, self) {
+    return self.renderToken(tokens, idx, options)
+  }
+md.renderer.rules.table_open = function (tokens, idx, options, env, self) {
+  return `<div class="table-wrap">` + defaultTableOpen(tokens, idx, options, env, self)
+}
+md.renderer.rules.table_close = function (tokens, idx, options, env, self) {
+  return defaultTableClose(tokens, idx, options, env, self) + `</div>`
 }
 
 // Wrap fenced code blocks so we can render a header (lang + copy button).

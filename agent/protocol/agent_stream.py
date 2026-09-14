@@ -136,6 +136,30 @@ def _cut_off_message(cause: str, tool_name: Optional[str]) -> str:
     return message
 
 
+def build_tools_schema(tools: list) -> list:
+    """Build the tool definitions handed to the LLM.
+
+    Prefer get_json_schema() when it yields real properties (lets tools augment
+    schema at runtime), otherwise fall back to the static `tool.params` (MCP
+    tools rely on this).
+    """
+    tools_schema = []
+    for tool in tools or []:
+        input_schema = tool.params
+        try:
+            dynamic = (tool.get_json_schema() or {}).get("parameters") or {}
+            if dynamic.get("properties"):
+                input_schema = dynamic
+        except Exception:
+            pass
+        tools_schema.append({
+            "name": tool.name,
+            "description": tool.description,
+            "input_schema": input_schema,
+        })
+    return tools_schema
+
+
 def _parse_tool_args(args_str: str, finish_reason: Optional[str],
                      tool_name: Optional[str] = None) -> Tuple[dict, Optional[str]]:
     """Parse tool args JSON. Returns (args, error_msg); error_msg is None on success.
@@ -486,6 +510,20 @@ class AgentStreamExecutor:
         from config import conf
         return bool(conf().get("enable_thinking", False))
 
+    def _catalog_max_output_tokens(self):
+        """max_tokens for the request, from the model's catalog entry.
+
+        Returns None when the model has no catalogued max_output_tokens, in
+        which case the provider default is used (some gateways reject an
+        explicit max_tokens, so it is only sent when configured)."""
+        if self.model is not None and hasattr(self.model, "catalog_model_meta"):
+            try:
+                value = (self.model.catalog_model_meta() or {}).get("max_output_tokens")
+                return int(value) if value else None
+            except Exception:
+                return None
+        return None
+
     def _should_render_thinking_inline(self) -> bool:
         """Whether ``<think>...</think>`` blocks embedded directly in ``content``
         (MiniMax, some third-party proxies) should be surfaced to the channel.
@@ -693,9 +731,37 @@ class AgentStreamExecutor:
         final_response = ""
         turn = 0
 
+        # Respect a run id an outer scope already set (a subagent spawn or a
+        # delegated task passes one down); only mint a fresh one when this turn
+        # is the top of its own run. Writing through set_agent_run_id keeps the
+        # outbound header-tagging path and RuntimeIdentity on the same id.
         import uuid as _uuid
-        from common.utils import set_agent_run_id, clear_agent_run_id
-        _run_token = set_agent_run_id(_uuid.uuid4().hex)
+        from common.utils import set_agent_run_id, clear_agent_run_id, current_agent_run_id
+        # Captured before minting: once this run sets its own id, nothing
+        # downstream can tell whether it was nested. A sub agent inherits the
+        # parent's run id through identity_scope, so an id already being
+        # present is exactly what "nested" means.
+        _nested_run = bool(current_agent_run_id())
+        _run_token = None
+        if not _nested_run:
+            _run_token = set_agent_run_id(_uuid.uuid4().hex)
+
+        # Reset any fallback routing left over from a *previous* run: a new user
+        # message always starts fresh on the primary model. Within this run the
+        # fallback is deliberately sticky — once the primary has failed a turn
+        # for good we stay on the backup for the remaining steps instead of
+        # re-hitting a provider we already know is down every step (a sustained
+        # outage — dead key, IP block, regional downtime — would otherwise burn
+        # one wasted primary call per step). The primary gets a fresh chance on
+        # the next user message.
+        #
+        # Must run *after* the run id above, not before: the reset is a no-op
+        # for a nested run (see _reset_model_fallback), and only the id tells
+        # the two apart. A nested run keeps the parent's fallback engaged — the
+        # sub agent is running inside the same outage and should inherit the
+        # backup rather than start over on the provider that just failed.
+        self._reset_model_fallback(nested_run=_nested_run)
+
         cancelled = False
         try:
             while turn < self.max_turns:
@@ -712,7 +778,7 @@ class AgentStreamExecutor:
                 self._emit_event("turn_start", {"turn": turn})
 
                 # Call LLM (enable retry_on_empty for better reliability)
-                assistant_msg, tool_calls = self._call_llm_stream(retry_on_empty=True)
+                assistant_msg, tool_calls, stop_reason = self._call_llm_stream(retry_on_empty=True)
                 final_response = assistant_msg
 
                 # A steer that arrived while the model was streaming takes
@@ -729,6 +795,7 @@ class AgentStreamExecutor:
                         "turn": turn,
                         "has_tool_calls": bool(tool_calls),
                         "tool_count": len(tool_calls),
+                        "stop_reason": stop_reason,
                         "steered": True,
                     })
                     continue
@@ -757,7 +824,7 @@ class AgentStreamExecutor:
                             })
                             
                             # 再调用一次 LLM
-                            assistant_msg, tool_calls = self._call_llm_stream(retry_on_empty=False)
+                            assistant_msg, tool_calls, stop_reason = self._call_llm_stream(retry_on_empty=False)
                             final_response = assistant_msg
                             
                             # Remove the injected prompt from history so it doesn't
@@ -795,6 +862,7 @@ class AgentStreamExecutor:
                             self._emit_event("turn_end", {
                                 "turn": turn,
                                 "has_tool_calls": False,
+                                "stop_reason": stop_reason,
                                 "steered": True,
                             })
                             continue
@@ -802,13 +870,15 @@ class AgentStreamExecutor:
                             self._emit_event("turn_end", {
                                 "turn": turn,
                                 "has_tool_calls": False,
+                                "stop_reason": stop_reason,
                                 "steered": True,
                             })
                             continue
-                        logger.debug(f"✅ Done (no tool calls)")
+                        logger.debug(f"✅ Done (no tool calls, stop_reason={stop_reason or 'none'})")
                         self._emit_event("turn_end", {
                             "turn": turn,
-                            "has_tool_calls": False
+                            "has_tool_calls": False,
+                            "stop_reason": stop_reason
                         })
                         break
 
@@ -990,7 +1060,8 @@ class AgentStreamExecutor:
                 self._emit_event("turn_end", {
                     "turn": turn,
                     "has_tool_calls": True,
-                    "tool_count": len(tool_calls)
+                    "tool_count": len(tool_calls),
+                    "stop_reason": stop_reason
                 })
 
             if turn >= self.max_turns:
@@ -1014,7 +1085,7 @@ class AgentStreamExecutor:
                 
                 # Call LLM one more time to get summary (without retry to avoid loops)
                 try:
-                    summary_response, summary_tools = self._call_llm_stream(retry_on_empty=False)
+                    summary_response, summary_tools, _ = self._call_llm_stream(retry_on_empty=False)
                     if summary_response:
                         final_response = summary_response
                         logger.info(f"💭 Summary: {summary_response[:150]}{'...' if len(summary_response) > 150 else ''}")
@@ -1054,7 +1125,8 @@ class AgentStreamExecutor:
             raise
 
         finally:
-            clear_agent_run_id(_run_token)
+            if _run_token is not None:
+                clear_agent_run_id(_run_token)
             if self.steer_inbox is not None:
                 self.steer_inbox.close()
             final_response = final_response.strip() if final_response else final_response
@@ -1102,7 +1174,7 @@ class AgentStreamExecutor:
             from agent.tools import ToolManager
             from agent.tools.mcp.tool_retrieval import (
                 build_retrieval_query,
-                select_mcp_tools,
+                select_mcp_tools_with_metadata,
             )
 
             tm = ToolManager()
@@ -1110,20 +1182,34 @@ class AgentStreamExecutor:
             query = build_retrieval_query(self.messages)
             query_vector = tm.embed_query(query)
 
-            selected = select_mcp_tools(
+            decision = select_mcp_tools_with_metadata(
                 query_vector,
                 tool_vectors,
                 top_k,
                 getattr(self, "_retrieved_mcp_names", set()),
             )
-            if selected is None:
+            if decision is None or decision.fallback_reason is not None:
                 # No provider / empty index / error → full injection.
+                self._emit_tool_retrieval_event(
+                    mcp_tools,
+                    builtin_tools,
+                    top_k,
+                    decision=decision,
+                    mode="fallback",
+                )
                 return all_tools
 
             # Persist the accumulated selection for subsequent turns.
-            self._retrieved_mcp_names = selected
+            self._retrieved_mcp_names = decision.selected
 
-            selected_mcp = [t for t in mcp_tools if t.name in selected]
+            selected_mcp = [t for t in mcp_tools if t.name in decision.selected]
+            self._emit_tool_retrieval_event(
+                mcp_tools,
+                builtin_tools,
+                top_k,
+                decision=decision,
+                mode="retrieved",
+            )
             logger.info(
                 f"[ToolRetrieval] Injecting {len(builtin_tools)} built-in + "
                 f"{len(selected_mcp)}/{len(mcp_tools)} MCP tool(s) (top_k={top_k})"
@@ -1131,10 +1217,124 @@ class AgentStreamExecutor:
             return builtin_tools + selected_mcp
         except Exception as e:
             logger.debug(f"[ToolRetrieval] full injection (retrieval skipped): {e}")
+            self._emit_tool_retrieval_event(
+                mcp_tools if "mcp_tools" in locals() else [],
+                builtin_tools if "builtin_tools" in locals() else [],
+                top_k if "top_k" in locals() else 0,
+                mode="fallback",
+                fallback_reason="retrieval_error",
+            )
             return all_tools
 
+    def _emit_tool_retrieval_event(
+        self,
+        mcp_tools: List[BaseTool],
+        builtin_tools: List[BaseTool],
+        top_k: int,
+        decision=None,
+        mode: str = "fallback",
+        fallback_reason: Optional[str] = None,
+    ) -> None:
+        """Expose sanitized MCP retrieval metadata to streaming consumers."""
+        if not callable(getattr(self, "_emit_event", None)):
+            return
+
+        try:
+            fallback_reason = fallback_reason or (
+                decision.fallback_reason
+                if decision is not None
+                else "selection_unavailable"
+            )
+            selected = decision.selected if decision is not None else set()
+            ranked = decision.ranked if decision is not None else []
+            candidate_count = decision.candidate_count if decision is not None else 0
+            rank_limit = max(top_k, 0)
+            injected_names = (
+                sorted(tool.name for tool in mcp_tools)
+                if mode == "fallback" else sorted(selected)
+            )
+            self._emit_event("tool_retrieval", {
+                "enabled": True,
+                "mode": mode,
+                "total_mcp_tools": len(mcp_tools),
+                "selected_mcp_tools": (
+                    len([tool for tool in mcp_tools if tool.name in selected])
+                    if mode == "retrieved" else len(mcp_tools)
+                ),
+                "builtin_tools": len(builtin_tools),
+                "top_k": top_k,
+                "candidate_count": candidate_count,
+                "selected_tools": injected_names,
+                "ranked_tools": [
+                    {"name": name, "score": round(float(score), 6)}
+                    for name, score in ranked[:rank_limit]
+                ],
+                "fallback_reason": fallback_reason,
+            })
+        except Exception as e:
+            # Observability must never turn a safe retrieval fallback into an
+            # agent failure, even when a custom event consumer is malformed.
+            logger.debug(f"[ToolRetrieval] event emission skipped: {e}")
+
+    def _reset_model_fallback(self, nested_run: bool = False) -> None:
+        """Drop any fallback routing so the next call uses the primary model.
+
+        ``nested_run`` marks a run that inherited its run id from an outer
+        scope — a sub agent spawn or a delegated task. Those must leave the
+        parent's routing alone: a sub agent is built with the parent's *same*
+        model object, so resetting here would clear the fallback the parent is
+        mid-way through relying on and send both of them back to the provider
+        that just failed.
+
+        Fallback is opt-in and this is a no-op on models that don't support it,
+        so it is safe to call unconditionally at the top of a run.
+        """
+        # The caller captures this *before* minting its own run id — once that
+        # id is set, nothing downstream can tell a nested run from a top-level
+        # one, so the distinction has to be passed in.
+        if nested_run:
+            return
+
+        model = getattr(self, "model", None)
+        reset = getattr(model, "reset_fallback", None)
+        if not callable(reset):
+            return
+        try:
+            reset()
+        except Exception as e:
+            logger.debug(f"[Agent] fallback reset skipped: {e}")
+
+    def _switch_to_fallback(self, fallback_reason: str = "") -> bool:
+        """Advance this turn to the next link in the configured fallback chain.
+
+        Returns True only when the switch actually happened, so the caller can
+        retry the turn on the new model. Every guard lives in
+        ``AgentLLMModel.use_fallback``; this wrapper only covers the cases
+        where there is no such model to ask (tests pass doubles, and the
+        fallback is opt-in so a plain LLMModel simply has no support for it).
+
+        Calling it again after a link has failed advances one more step along
+        the chain, which is what turns a single backup into an ordered list of
+        them; it returns False once the chain is spent.
+
+        Context-overflow and message-format errors are deliberately NOT
+        candidates: they are caused by the conversation, not the provider, and
+        the recovery paths above already rewrite the history for them.
+        """
+        model = getattr(self, "model", None)
+        use_fallback = getattr(model, "use_fallback", None)
+        if not callable(use_fallback):
+            return False
+        try:
+            return bool(use_fallback())
+        except Exception as e:
+            logger.warning(f"[Agent] chat fallback unavailable: {e}")
+            return False
+
     def _call_llm_stream(self, retry_on_empty=True, retry_count=0, max_retries=3,
-                         _overflow_stage: int = 0) -> Tuple[str, List[Dict]]:
+                         _overflow_stage: int = 0,
+                         _on_fallback: bool = False,
+                         _exhausted: Optional[List[str]] = None) -> Tuple[str, List[Dict], Optional[str]]:
         """
         Call LLM with streaming and automatic retry on errors
 
@@ -1144,9 +1344,23 @@ class AgentStreamExecutor:
             max_retries: Maximum number of retries for API errors
             _overflow_stage: Context-overflow recovery escalation level (internal):
                 0 = first hit, 1 = after aggressive trim, 2 = after hard compaction.
+            _on_fallback: Whether this attempt is already running on a fallback
+                link from the chain. A link gets one attempt, not the primary's
+                full retry budget: walking a long chain with full backoff each
+                would outlast the web channel's SSE idle timeout before the
+                last link is even reached.
+            _exhausted: Errors already collected from models this turn has
+                given up on. Reported together when the whole chain is spent,
+                so the failure reads as "every backup is down" rather than
+                blaming whichever link happened to be last.
 
         Returns:
-            (response_text, tool_calls)
+            (response_text, tool_calls, stop_reason), where stop_reason is the
+            provider's finish_reason for this generation, or None when it
+            reported none. A turn that returns text and no tool calls looks
+            finished either way, so stop_reason is the only thing separating a
+            model that chose to stop from one cut off at the output token limit
+            ("length" / "max_tokens").
         """
         # Validate and fix message history (e.g. orphaned tool_result blocks).
         # Context trimming is done once in run_stream() before the loop starts,
@@ -1168,25 +1382,11 @@ class AgentStreamExecutor:
         except Exception as e:
             logger.debug(f"[Agent] MCP sync skipped: {e}")
 
-        # Prepare tool definitions. Prefer get_json_schema() when it yields
-        # real properties (lets tools augment schema at runtime), otherwise
-        # fall back to the static `tool.params` (MCP tools rely on this).
+        # Prepare tool definitions. Kept as None (rather than []) when the agent
+        # has no tools at all, which is what LLMRequest expects.
         tools_schema = None
         if self.tools:
-            tools_schema = []
-            for tool in self._select_tools_for_injection():
-                input_schema = tool.params
-                try:
-                    dynamic = (tool.get_json_schema() or {}).get("parameters") or {}
-                    if dynamic.get("properties"):
-                        input_schema = dynamic
-                except Exception:
-                    pass
-                tools_schema.append({
-                    "name": tool.name,
-                    "description": tool.description,
-                    "input_schema": input_schema,
-                })
+            tools_schema = build_tools_schema(self._select_tools_for_injection())
 
         # Debug: dump the full system prompt and messages sent to the LLM.
         # Gated behind `debug` config to avoid flooding normal logs.
@@ -1210,6 +1410,7 @@ class AgentStreamExecutor:
             temperature=0,
             stream=True,
             tools=tools_schema,
+            max_tokens=self._catalog_max_output_tokens(),
             system=self.system_prompt  # Pass system prompt separately for Claude API
         )
 
@@ -1221,6 +1422,7 @@ class AgentStreamExecutor:
         tool_calls_buffer = {}  # {index: {id, name, arguments}}
         gemini_raw_parts = None  # Preserve Gemini thoughtSignature for round-trip
         stop_reason = None  # Track why the stream stopped
+        stream_usage = None  # Real token usage from the provider, if reported
 
         try:
             stream = self.model.call_stream(request)
@@ -1291,6 +1493,14 @@ class AgentStreamExecutor:
                     else:
                         # Raise exception with full error message for retry logic
                         raise Exception(f"{error_msg} (Status: {status_code}, Code: {error_code}, Type: {error_type})")
+
+                # Capture the provider-reported token usage when present. With
+                # stream_options.include_usage the OpenAI-compatible path emits a
+                # final chunk carrying `usage` (often with an empty `choices`),
+                # but some providers attach it to a normal chunk — so read it
+                # whenever it appears, independent of the choices branch below.
+                if isinstance(chunk, dict) and isinstance(chunk.get("usage"), dict):
+                    stream_usage = chunk["usage"]
 
                 # Parse chunk
                 if isinstance(chunk, dict) and chunk.get("choices"):
@@ -1400,6 +1610,8 @@ class AgentStreamExecutor:
                             retry_count=retry_count,
                             max_retries=max_retries,
                             _overflow_stage=1,
+                            _on_fallback=_on_fallback,
+                            _exhausted=_exhausted,
                         )
 
                 # Trimming exhausted, or this is a message format error.
@@ -1429,7 +1641,42 @@ class AgentStreamExecutor:
                 '429', '500', '502', '503', '504', '512'
             ])
             
-            if is_retryable and retry_count < max_retries:
+            # A fallback link gets a single attempt. Giving every link the
+            # primary's full retry budget would multiply the wait by the chain
+            # length — three rate-limited links alone would sleep past the web
+            # channel's SSE idle timeout (see RATE_LIMIT_MAX_WAIT above) and
+            # the user would see a dropped connection instead of a reply.
+            # Links are tried in order precisely because the whole point is to
+            # move on to a different provider, not to wait out this one.
+            link_retries = 0 if _on_fallback else max_retries
+
+            # A rate limit is the one error where waiting is the wrong move
+            # *when a backup exists*: the backup is a different provider with
+            # its own quota, so switching can answer now instead of after a
+            # 30-60s sleep. With no chain configured there is nothing to switch
+            # to, so keep the old behaviour and wait it out rather than
+            # failing the turn outright.
+            switch_now = False
+            if is_rate_limit and not _on_fallback:
+                available = getattr(self.model, "fallback_available", None)
+                if callable(available):
+                    try:
+                        switch_now = bool(available())
+                    except Exception:
+                        switch_now = False
+                if switch_now:
+                    logger.warning(
+                        "⚠️ Rate limited (429) and a fallback is configured: "
+                        "switching now instead of waiting it out"
+                    )
+
+            # Retrying is only worth it when we are going to wait: either a
+            # plain retryable error, or a rate limit with no backup to move to.
+            # (A rate limit WITH a backup skips straight to the chain below.)
+            should_retry = (is_retryable and not switch_now
+                            and retry_count < link_retries)
+
+            if should_retry:
                 # Rate limit needs longer wait time, but capped so the cumulative
                 # backoff stays within the web stream's idle timeout (see the
                 # RATE_LIMIT_MAX_WAIT note above).
@@ -1438,20 +1685,113 @@ class AgentStreamExecutor:
                 else:
                     wait_time = (retry_count + 1) * 2  # 2s, 4s, 6s for other errors
                 
-                logger.warning(f"⚠️ LLM API error (attempt {retry_count + 1}/{max_retries}): {e}")
+                logger.warning(f"⚠️ LLM API error (attempt {retry_count + 1}/{link_retries}): {e}")
                 logger.info(f"Retrying in {wait_time}s...")
                 time.sleep(wait_time)
                 return self._call_llm_stream(
                     retry_on_empty=retry_on_empty, 
                     retry_count=retry_count + 1,
-                    max_retries=max_retries
+                    max_retries=max_retries,
+                    _overflow_stage=_overflow_stage,
+                    _on_fallback=_on_fallback,
+                    _exhausted=_exhausted,
+                )
+
+            # Retries are exhausted (or the error was never retryable). Before
+            # surfacing the failure, advance to the next link in the configured
+            # fallback chain — a provider-wide outage is exactly what retrying
+            # the same endpoint can never fix, and a backup that is also down
+            # earns the link after it.
+            model_label = getattr(self.model, "model", "") or "primary"
+            spent = list(_exhausted or [])
+            spent.append(f"{model_label}: {error_str}")
+            if self._switch_to_fallback(fallback_reason=error_str):
+                self._emit_event("model_fallback", {
+                    "reason": error_str,
+                    "model": getattr(self.model, "model", ""),
+                })
+                return self._call_llm_stream(
+                    retry_on_empty=retry_on_empty,
+                    retry_count=0,          # fresh attempt on the new model
+                    max_retries=max_retries,
+                    _on_fallback=True,      # one attempt, then the next link
+                    _exhausted=spent,
+                )
+
+            # Every link is spent (or none was configured). Report the whole
+            # chain rather than the last error: naming only the final link
+            # reads as "that one model is broken" when in fact each one was
+            # tried and each one failed.
+            if spent and len(spent) > 1:
+                detail = " | ".join(spent)
+                logger.error(
+                    f"❌ LLM call failed across {len(spent)} models "
+                    f"(primary + fallback chain): {detail}"
+                )
+                raise Exception(_t(
+                    "抱歉，主模型与全部兜底模型均调用失败，请检查模型配置或供应商状态。",
+                    "Sorry, the main model and every fallback model failed. "
+                    "Please check your model configuration or provider status.",
+                ) + f"\n{detail}")
+
+            if retry_count >= max_retries:
+                logger.error(f"❌ LLM API error after {max_retries} retries: {e}", exc_info=True)
+            else:
+                logger.error(f"❌ LLM call error (non-retryable): {e}", exc_info=True)
+            raise
+
+        # Persist the provider-reported usage (if any) so the context-usage
+        # indicator can show a real prompt_tokens count instead of the estimate.
+        # prompt_tokens is the whole input the model saw this turn — system +
+        # tools + history — which is exactly the "used" the chart wants.
+        if stream_usage is not None:
+            try:
+                # Fingerprint the history this usage describes. get_context_usage
+                # compares it against the live history estimate: if trimming /
+                # compaction (or new turns) has since changed the history, the
+                # real prompt_tokens is stale and it falls back to the estimate.
+                est_history = sum(
+                    self.agent._estimate_message_tokens(m) for m in self.messages
+                )
+                self.agent.last_usage = {
+                    "prompt_tokens": int(stream_usage.get("prompt_tokens") or 0),
+                    "completion_tokens": int(stream_usage.get("completion_tokens") or 0),
+                    "total_tokens": int(stream_usage.get("total_tokens") or 0),
+                    # History estimate at capture time (freshness fingerprint).
+                    "_est_history": est_history,
+                }
+            except (TypeError, ValueError):
+                pass
+
+        # Log real provider token usage vs our char-based estimate, so the
+        # accuracy of the context-usage indicator can be judged from the logs.
+        try:
+            if self.agent.last_usage:
+                real_in = self.agent.last_usage.get("prompt_tokens", 0)
+                real_out = self.agent.last_usage.get("completion_tokens", 0)
+                # Rough estimate of what we sent this turn (system + tools +
+                # history), the same numbers the usage chart shows.
+                est_sys = self.agent._estimate_text_tokens(self.system_prompt or "")
+                est_hist = sum(
+                    self.agent._estimate_message_tokens(m) for m in self.messages
+                )
+                est_in = est_sys + est_hist
+                ratio = (est_in / real_in) if real_in else 0
+                logger.info(
+                    f"[Usage] real input={real_in} output={real_out} | "
+                    f"estimate input~={est_in} (sys~={est_sys} hist~={est_hist}) | "
+                    f"est/real={ratio:.2f}"
                 )
             else:
-                if retry_count >= max_retries:
-                    logger.error(f"❌ LLM API error after {max_retries} retries: {e}", exc_info=True)
-                else:
-                    logger.error(f"❌ LLM call error (non-retryable): {e}", exc_info=True)
-                raise
+                model_name = getattr(self.agent.model, "model", "?") if getattr(self.agent, "model", None) else "?"
+                logger.info(
+                    f"[Usage] model={model_name} did NOT return token usage this "
+                    "turn — its streaming path needs stream_options.include_usage "
+                    "or a trailing usage chunk; context indicator falls back to "
+                    "the char estimate"
+                )
+        except Exception as e:
+            logger.debug(f"[Usage] usage log skipped: {e}")
 
         # Parse tool calls
         tool_calls = []
@@ -1497,7 +1837,10 @@ class AgentStreamExecutor:
             return self._call_llm_stream(
                 retry_on_empty=False, 
                 retry_count=retry_count,
-                max_retries=max_retries
+                max_retries=max_retries,
+                _overflow_stage=_overflow_stage,
+                _on_fallback=_on_fallback,
+                _exhausted=_exhausted,
             )
 
         # Filter full_content one more time (in case tags were split across chunks)
@@ -1543,10 +1886,11 @@ class AgentStreamExecutor:
 
         self._emit_event("message_end", {
             "content": full_content,
-            "tool_calls": tool_calls
+            "tool_calls": tool_calls,
+            "stop_reason": stop_reason
         })
 
-        return full_content, tool_calls
+        return full_content, tool_calls, stop_reason
 
     def _required_params(self, tool_name: str) -> list:
         """Parameter names a tool's schema declares as required."""
@@ -2288,13 +2632,13 @@ class AgentStreamExecutor:
         # budget below (window - output reserve) so a full prompt plus the
         # provider's default completion budget can't overflow the window and
         # trigger the "maximum context length ... you requested N tokens" 400
-        # (which otherwise loops). This cap applies even when the user
-        # configured a large agent_max_context_tokens.
+        # (which otherwise loops). The window follows the effective model:
+        # a session override uses that model, message channels the global one.
         output_reserve = self.agent._get_output_reserve_tokens()
         input_ceiling = max(1, context_window - output_reserve)
 
-        # Use configured max_context_tokens if available, but never above the
-        # input ceiling that leaves room for the completion.
+        # An explicit agent cap (sub agents inherit one so they cannot widen
+        # the session's reach) applies, but never above the input ceiling.
         if hasattr(self.agent, 'max_context_tokens') and self.agent.max_context_tokens:
             max_tokens = min(self.agent.max_context_tokens, input_ceiling)
         else:

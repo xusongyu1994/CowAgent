@@ -1,6 +1,7 @@
-import { app, BrowserWindow, session, shell, ipcMain, dialog, nativeImage, Notification, systemPreferences } from 'electron'
+import { app, BrowserWindow, session, shell, ipcMain, dialog, nativeImage, Notification, systemPreferences, crashReporter, Menu, clipboard, net } from 'electron'
 import path from 'path'
 import fs from 'fs'
+import os from 'os'
 import http from 'http'
 import { PythonBackend, BackendError } from './python-manager'
 import { buildAppMenu } from './menu'
@@ -8,12 +9,108 @@ import { createTray, destroyTray, getTray } from './tray'
 import { initUpdater, checkForUpdates, startDownload, quitAndInstall, setUpdateLanguage } from './updater'
 import { setupThemeIPC, loadAppConfig } from './themes'
 import { setupHttpRelayIPC } from './http-relay'
-import { setupAppIconIPC, applyCachedAppIcon, getRuntimeAppIcon } from './app-icon'
+import {
+  setupAppIconIPC,
+  applyCachedAppIcon,
+  applyCachedAppName,
+  repairWindowsShortcuts,
+  getRuntimeAppIcon,
+} from './app-icon'
+
+// Where the packaged backend keeps its writable data (config.json, run.log).
+// Kept in sync with COW_DATA_DIR in python-manager.ts so the desktop shell
+// writes its own diagnostics into the SAME run.log the "open log folder" button
+// reveals and the in-app Logs page tails — one place to look for both layers.
+const COW_DATA_DIR = path.join(os.homedir(), '.cow')
+
+// Mirror the main process's console output and any uncaught crash to run.log.
+// Packaged builds have no terminal, so every console.log/error and every
+// Electron-layer crash (renderer/GPU gone, main-process exception) used to
+// vanish: the backend's run.log covered Python failures, but a white screen or
+// a silent app quit left nothing behind. This closes that gap without a crash
+// server — the evidence lands locally where the user can already find it.
+function initDesktopLogging(): void {
+  let stream: fs.WriteStream | null = null
+  try {
+    fs.mkdirSync(COW_DATA_DIR, { recursive: true })
+    // Append so we never clobber the backend's own run.log history; both sides
+    // are line-based, so interleaving is fine.
+    stream = fs.createWriteStream(path.join(COW_DATA_DIR, 'run.log'), { flags: 'a' })
+    stream.on('error', () => { stream = null })
+  } catch {
+    stream = null
+  }
+
+  const write = (level: string, args: unknown[]) => {
+    if (!stream) return
+    const text = args
+      .map((a) => (typeof a === 'string' ? a : a instanceof Error ? a.stack || a.message : JSON.stringify(a)))
+      .join(' ')
+    try {
+      stream.write(`[MAIN][${new Date().toISOString()}] [${level}] ${text}\n`)
+    } catch {
+      // logging must never break the app
+    }
+  }
+
+  // Wrap console so existing console.* calls throughout main also persist,
+  // while still printing to stdout for `npm run dev`.
+  const patch = (name: 'log' | 'warn' | 'error') => {
+    const original = console[name].bind(console)
+    console[name] = (...args: unknown[]) => {
+      write(name.toUpperCase(), args)
+      original(...args)
+    }
+  }
+  patch('log')
+  patch('warn')
+  patch('error')
+
+  // Native minidumps for hard crashes (segfaults in Electron/Chromium). Stored
+  // locally under userData/Crashpad; no upload server is configured.
+  try {
+    crashReporter.start({ uploadToServer: false })
+  } catch {
+    // crashReporter is best-effort; never let it block startup
+  }
+
+  // Main-process JS errors that would otherwise kill the app silently.
+  process.on('uncaughtException', (err) => {
+    console.error('[crash] uncaughtException:', err?.stack || err)
+  })
+  process.on('unhandledRejection', (reason) => {
+    console.error('[crash] unhandledRejection:', reason instanceof Error ? reason.stack : reason)
+  })
+
+  // Renderer/GPU/utility process crashes. These are the "white screen" and
+  // "window vanished" cases the user sees but that leave no trace by default.
+  app.on('render-process-gone', (_e, _wc, details) => {
+    console.error(`[crash] render-process-gone: reason=${details.reason} exitCode=${details.exitCode}`)
+  })
+  app.on('child-process-gone', (_e, details) => {
+    console.error(`[crash] child-process-gone: type=${details.type} reason=${details.reason} exitCode=${details.exitCode}`)
+  })
+
+  app.on('before-quit', () => {
+    try {
+      stream?.end()
+    } catch {
+      // ignore
+    }
+  })
+}
+
+// Set up main-process logging + crash capture before anything else runs, so the
+// earliest console output and any startup crash are already being persisted.
+initDesktopLogging()
 
 // Force the product name so the Dock/menu shows the app name even in dev mode,
 // where the default Electron binary would otherwise report "Electron". The name
 // can be overridden by the bundled app-config (appName); defaults to CowAgent.
 app.setName(loadAppConfig()?.appName || 'CowAgent')
+  // The web layer may have overridden the name at runtime. Re-apply it here,
+  // before app.getPath('userData') is read anywhere, since setName moves it.
+applyCachedAppName()
 
 // Windows shows notifications only when an AppUserModelID is set; without it
 // they are silently dropped. Harmless on macOS/Linux.
@@ -27,7 +124,10 @@ let pythonBackend: PythonBackend | null = null
 let isQuitting = false
 
 const isDev = !app.isPackaged
-const VITE_DEV_PORTS = [5173, 5174, 5175, 5176]
+// Must match `server.port` in vite.config.ts. A single port, not a range:
+// strictPort there means our server never drifts, so a neighbouring port can
+// only ever belong to somebody else.
+const VITE_DEV_PORTS = [5173]
 
 // Launched by the OS at login (Windows passes --hidden; macOS reports it via
 // getLoginItemSettings().wasOpenedAsHidden). Start minimized to the tray so
@@ -41,10 +141,34 @@ function launchedHidden(): boolean {
   }
 }
 
-function probePort(port: number): Promise<boolean> {
+// The renderer's entry module, as it appears in the index.html Vite serves.
+// Used to tell our own dev server apart from an unrelated one holding the port
+// (another project's Vite, a static file server). Answering the probe is not
+// enough of a test: loading a stranger's page into the window looks exactly
+// like the app being broken.
+const RENDERER_MARKER = 'src/main.tsx'
+
+function probeViteDevServer(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const req = http.get(`http://localhost:${port}`, (res) => {
-      resolve(res.statusCode !== undefined)
+      if (res.statusCode !== 200) {
+        res.resume()
+        resolve(false)
+        return
+      }
+      let body = ''
+      res.setEncoding('utf8')
+      res.on('data', (chunk) => {
+        body += chunk
+        // The document we're after is a few KB. Anything much larger isn't it,
+        // so stop reading rather than buffering an unrelated response.
+        if (body.length > 64 * 1024) {
+          req.destroy()
+          resolve(false)
+        }
+      })
+      res.on('end', () => resolve(body.includes(RENDERER_MARKER)))
+      res.on('error', () => resolve(false))
     })
     req.on('error', () => resolve(false))
     req.setTimeout(500, () => { req.destroy(); resolve(false) })
@@ -53,7 +177,7 @@ function probePort(port: number): Promise<boolean> {
 
 async function findViteDevServer(): Promise<string | null> {
   for (const port of VITE_DEV_PORTS) {
-    if (await probePort(port)) {
+    if (await probeViteDevServer(port)) {
       return `http://localhost:${port}`
     }
   }
@@ -94,6 +218,106 @@ function saveWindowState() {
     fs.writeFileSync(windowStateFile(), JSON.stringify(b))
   } catch {
     /* ignore */
+  }
+}
+
+function isZhLocale(): boolean {
+  try {
+    return /^zh/i.test(app.getLocale() || '')
+  } catch {
+    return false
+  }
+}
+
+// Read an image's bytes regardless of scheme: http(s) backend URLs go through
+// Electron's `net` (honours the app session, so the auth token in the query is
+// enough), while data: URLs are decoded inline.
+async function fetchImageBuffer(srcURL: string): Promise<Uint8Array> {
+  if (srcURL.startsWith('data:')) {
+    const comma = srcURL.indexOf(',')
+    const meta = srcURL.slice(5, comma)
+    const data = srcURL.slice(comma + 1)
+    const buf = meta.includes('base64')
+      ? Buffer.from(decodeURIComponent(data.replace(/\s/g, '')), 'base64')
+      : Buffer.from(decodeURIComponent(data))
+    return new Uint8Array(buf)
+  }
+  // net.fetch lands in Electron 28; the Win7 legacy build (Electron 22) lacks
+  // it, so fall back to a raw http(s) request there. Access it through a loose
+  // type: the Win7 build compiles against Electron 22's typings where `Net` has
+  // no `fetch`, and a hard reference would fail `tsc` even though the runtime
+  // guard below already keeps it off that build.
+  type NetFetchResponse = {
+    ok: boolean
+    status: number
+    arrayBuffer: () => Promise<ArrayBuffer>
+  }
+  const netFetch = (net as unknown as { fetch?: (url: string) => Promise<NetFetchResponse> })
+    ?.fetch
+  if (typeof netFetch === 'function') {
+    const res = await netFetch(srcURL)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    return new Uint8Array(await res.arrayBuffer())
+  }
+  return await new Promise<Uint8Array>((resolve, reject) => {
+    const client = srcURL.startsWith('https:') ? require('https') : http
+    client
+      .get(srcURL, (res: http.IncomingMessage) => {
+        if (!res.statusCode || res.statusCode >= 400) {
+          reject(new Error(`HTTP ${res.statusCode}`))
+          res.resume()
+          return
+        }
+        const chunks: Buffer[] = []
+        res.on('data', (c: Buffer) => chunks.push(c))
+        res.on('end', () => resolve(new Uint8Array(Buffer.concat(chunks))))
+        res.on('error', reject)
+      })
+      .on('error', reject)
+  })
+}
+
+// Pick a sensible download filename: the `path=` query the backend file
+// endpoint uses names the real file, otherwise fall back to the URL tail.
+function imageFileName(srcURL: string): string {
+  try {
+    const u = new URL(srcURL)
+    const p = u.searchParams.get('path')
+    const raw = p ? p.split(/[\\/]/).pop() : u.pathname.split('/').pop()
+    const name = (raw || '').split('?')[0]
+    if (name && /\.[a-z0-9]+$/i.test(name)) return name
+  } catch {
+    /* not a parseable URL (e.g. data:) */
+  }
+  return `image-${Date.now()}.png`
+}
+
+async function saveImageFromUrl(srcURL: string): Promise<void> {
+  try {
+    const buf = await fetchImageBuffer(srcURL)
+    const opts = { defaultPath: path.join(app.getPath('downloads'), imageFileName(srcURL)) }
+    const result = mainWindow
+      ? await dialog.showSaveDialog(mainWindow, opts)
+      : await dialog.showSaveDialog(opts)
+    if (result.canceled || !result.filePath) return
+    fs.writeFileSync(result.filePath, buf)
+  } catch (err) {
+    console.error('[Electron] Save image failed:', err)
+    dialog.showErrorBox(
+      isZhLocale() ? '保存失败' : 'Save failed',
+      isZhLocale() ? '无法保存该图片。' : 'Could not save the image.'
+    )
+  }
+}
+
+async function copyImageFromUrl(srcURL: string): Promise<void> {
+  try {
+    const buf = await fetchImageBuffer(srcURL)
+    const img = nativeImage.createFromBuffer(Buffer.from(buf))
+    if (img.isEmpty()) throw new Error('decode failed')
+    clipboard.writeImage(img)
+  } catch (err) {
+    console.error('[Electron] Copy image failed:', err)
   }
 }
 
@@ -187,6 +411,27 @@ function createWindow() {
       console.warn(`[Electron] Blocked navigation to dropped file: ${url}`)
       e.preventDefault()
     }
+  })
+
+  // Native right-click menu for images. The renderer runs from file:// (or the
+  // dev server), so Chromium's built-in "Save image as…" resolves the src
+  // against the wrong origin and does nothing. Provide our own Save / Copy that
+  // fetch the bytes ourselves — this is what makes chat images (inline and in
+  // the lightbox) downloadable on desktop, matching the browser console.
+  mainWindow.webContents.on('context-menu', (_e, params) => {
+    if (params.mediaType !== 'image' || !params.srcURL) return
+    const zh = isZhLocale()
+    const menu = Menu.buildFromTemplate([
+      {
+        label: zh ? '图片另存为…' : 'Save Image As…',
+        click: () => void saveImageFromUrl(params.srcURL),
+      },
+      {
+        label: zh ? '复制图片' : 'Copy Image',
+        click: () => void copyImageFromUrl(params.srcURL),
+      },
+    ])
+    menu.popup({ window: mainWindow ?? undefined })
   })
 
   // Close-to-tray: hide the window instead of destroying it, so the tray's
@@ -302,6 +547,12 @@ function setupIPC() {
   // for a user whose UI never came up.
   ipcMain.handle('get-data-dir', () => {
     return pythonBackend?.getDataDir() ?? ''
+  })
+
+  // Secret shared with the spawned backend; lets the renderer prove a request
+  // comes from this desktop shell (see COW_DESKTOP_TOKEN in python-manager).
+  ipcMain.handle('get-desktop-token', () => {
+    return pythonBackend?.getDesktopToken() ?? ''
   })
 
   ipcMain.handle('restart-backend', async () => {
@@ -434,11 +685,13 @@ function setupIPC() {
   // Show a native OS notification (e.g. a scheduler reminder or a finished
   // task). Clicking it brings the window forward and asks the renderer to open
   // the given session.
-  ipcMain.handle('notify', (_event, payload: { title?: string; body?: string; sessionId?: string; silent?: boolean }) => {
+  ipcMain.handle('notify', (_event, payload: { title?: string; body?: string; sessionId?: string; silent?: boolean; force?: boolean }) => {
     if (!Notification.isSupported() || !payload?.body) return false
     // Skip when the window is focused: the user is already watching, so a
     // notification (and sound) would just be noise, especially for short tasks.
-    if (mainWindow?.isFocused()) return false
+    // Exception: a scheduled task (force) may fire into a session the user
+    // isn't viewing even while the window is focused, so they must be told.
+    if (!payload.force && mainWindow?.isFocused()) return false
     // Use the runtime app icon if one was set (via set-app-icon), so the
     // notification matches the current window/Dock icon. Falls back to the
     // packaged icon.
@@ -537,6 +790,8 @@ app.whenReady().then(async () => {
   }
   // Re-apply a previously set icon/title before the page loads.
   applyCachedAppIcon()
+  // Undo any damage the last update did to this app's shortcuts.
+  repairWindowsShortcuts()
   await startBackend()
 
   // Wire auto-update: a first silent check a few seconds after launch (so it

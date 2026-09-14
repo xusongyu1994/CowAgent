@@ -424,9 +424,9 @@ class CowCliPlugin(Plugin):
         task_store = get_task_store()
         if task_store is None:
             from agent.tools.scheduler.task_store import TaskStore
-            from common.state_dir import scheduler_file
+            from common.state_dir import scheduler_file_global
 
-            task_store = TaskStore(str(scheduler_file()))
+            task_store = TaskStore(str(scheduler_file_global()))
 
         channel_type = ""
         receiver = ""
@@ -821,7 +821,8 @@ class CowCliPlugin(Plugin):
         from config import get_data_root
         config_path = os.path.join(get_data_root(), "config.json")
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            # utf-8-sig tolerates a UTF-8 BOM (e.g. edited with Windows Notepad).
+            with open(config_path, "r", encoding="utf-8-sig") as f:
                 file_config = _json.load(f)
             file_config.update(updates)
             with open(config_path, "w", encoding="utf-8") as f:
@@ -954,7 +955,7 @@ class CowCliPlugin(Plugin):
         sub_args = parts[1].strip() if len(parts) > 1 else ""
 
         if sub == "list":
-            return self._skill_list(sub_args)
+            return self._skill_list(sub_args, e_context)
         elif sub == "search":
             return self._skill_search(sub_args)
         elif sub == "install":
@@ -1002,10 +1003,24 @@ class CowCliPlugin(Plugin):
         except Exception as e:
             logger.debug(f"[CowCli] skill refresh skipped: {e}")
 
-    def _skill_list_local(self) -> str:
+    def _skill_list_local(self, agent_id=None) -> str:
         from cli.utils import load_skills_config, get_skills_dir, get_builtin_skills_dir
         self._refresh_skill_manager()
         config = load_skills_config()
+
+        # Scope to this Agent's selection: a subset picked in team.json means
+        # /skill list here shows only what this Agent actually draws on, not the
+        # whole shared library. ``None`` selection = every shared skill; an empty
+        # list is a deliberate "none" and must NOT fall through to a disk scan.
+        selection = self._agent_skill_selection(agent_id)
+        scoped = selection is not None
+        if scoped:
+            config = {n: e for n, e in config.items() if n in selection}
+            if not config:
+                return _t(
+                    "该智能体未启用任何技能。\n\n💡 在「智能体」中为它勾选技能",
+                    "This Agent has no skills enabled.\n\n💡 Pick skills for it under Agents",
+                )
 
         if not config:
             skills_dir = get_skills_dir()
@@ -1054,7 +1069,7 @@ class CowCliPlugin(Plugin):
         lines.append(_t("💡 /skill info <名称>: 查看详情", "💡 /skill info <name>: Show details"))
         return "\n".join(lines)
 
-    def _skill_list(self, args: str) -> str:
+    def _skill_list(self, args: str, e_context=None) -> str:
         parts = args.strip().split()
         if "--remote" in parts or "-r" in parts:
             page = 1
@@ -1062,7 +1077,33 @@ class CowCliPlugin(Plugin):
                 if p == "--page" and i + 1 < len(parts) and parts[i + 1].isdigit():
                     page = max(1, int(parts[i + 1]))
             return self._skill_list_remote(page=page)
-        return self._skill_list_local()
+        return self._skill_list_local(self._current_agent_id(e_context))
+
+    def _agent_skill_selection(self, agent_id):
+        """The set of skill names this Agent draws on, or ``None`` for "all".
+
+        Mirrors SkillManager's first gate: a profile with an explicit ``skills``
+        list is a subset; ``None``/absent means the full shared library.
+        """
+        try:
+            from agent.registry import get_agent_registry
+            profile = get_agent_registry().get(agent_id or None, require_enabled=False)
+            return None if profile.skills is None else set(profile.skills)
+        except Exception:
+            return None
+
+    def _current_agent_id(self, e_context):
+        """Resolve which Agent this /skill command is running inside, so the
+        listing can be scoped to that Agent's selection rather than the whole
+        shared library."""
+        if e_context is None:
+            return None
+        try:
+            from bridge.bridge import Bridge
+            agent_bridge = Bridge().get_agent_bridge()
+            return agent_bridge.route_context(e_context["context"])
+        except Exception:
+            return None
 
     _REMOTE_PAGE_SIZE = 10
 
@@ -1228,6 +1269,14 @@ class CowCliPlugin(Plugin):
                     json.dump(config, f, indent=4, ensure_ascii=False)
             except Exception:
                 pass
+
+        # The skill is gone from the shared library, so scrub its name from any
+        # Agent's selection list in team.json instead of leaving dead entries.
+        try:
+            from agent.admin import get_agent_admin_service
+            get_agent_admin_service().prune_skill(name)
+        except Exception as e:
+            logger.debug(f"[CowCli] skill prune skipped: {e}")
 
         return _t(f"✅ 技能 '{name}' 已卸载", f"✅ Skill '{name}' uninstalled")
 
@@ -1482,7 +1531,7 @@ class CowCliPlugin(Plugin):
 
     def _memory_status(self) -> str:
         """Show current memory index status."""
-        from agent.memory.embedding import detect_index_dim
+        from agent.memory.embedding import detect_index_dim, detect_chunker_version
         from config import conf
 
         agent = self._get_agent("")
@@ -1532,6 +1581,18 @@ class CowCliPlugin(Plugin):
                 warnings.append(_t(
                     f"  ⚠️ 索引中存量向量为 {index_dim} 维，与当前配置 {cfg_dim} 维不一致；运行 /memory rebuild-index 重建后向量检索才会生效",
                     f"  ⚠️ Existing vectors are {index_dim}-dim, mismatching the current {cfg_dim}-dim config; run /memory rebuild-index to make vector search work",
+                ))
+
+            # Index predates (or doesn't match) the current chunker. Chunked
+            # files only re-split when their content hash changes, so a chunker
+            # upgrade alone never refreshes old boundaries — suggest a rebuild.
+            # This is only a hint: rebuild re-embeds everything and is costly,
+            # so the user decides.
+            from agent.memory.chunker import TextChunker
+            if detect_chunker_version(memory_manager.storage) != TextChunker.CHUNKER_VERSION:
+                warnings.append(_t(
+                    "  ⚠️ 索引由旧版切分算法生成；建议运行 /memory rebuild-index 以按标题更精准地切分记忆（重建成本较高，由你决定）",
+                    "  ⚠️ Index was built by an older chunking strategy; consider running /memory rebuild-index for heading-aware chunking (a rebuild re-embeds everything, so it's your call)",
                 ))
 
         if warnings:
@@ -1763,7 +1824,8 @@ class CowCliPlugin(Plugin):
         from config import get_data_root
         config_path = os.path.join(get_data_root(), "config.json")
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
+            # utf-8-sig tolerates a UTF-8 BOM (e.g. edited with Windows Notepad).
+            with open(config_path, "r", encoding="utf-8-sig") as f:
                 file_config = _json.load(f)
             file_config["knowledge"] = enabled
             with open(config_path, "w", encoding="utf-8") as f:

@@ -15,7 +15,7 @@ import threading
 import time
 import uuid
 from queue import Queue, Empty
-from typing import List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional
 from urllib.parse import quote
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
@@ -28,6 +28,7 @@ from channel.chat_channel import ChatChannel, check_prefix
 from channel.chat_message import ChatMessage
 from common import const
 from common import i18n
+from common.channel_registry import get_channel_manager
 from common.log import logger
 from common.singleton import singleton
 from config import (
@@ -37,15 +38,66 @@ from config import (
     read_config_template,
     sync_image_generation_custom_provider_env,
 )
+from models import model_catalog
 from models.reasoning_capabilities import provider_reasoning_metadata
 from agent.permission import (
     MODES as PERMISSION_MODES,
     global_mode as permission_global_mode,
     normalize_mode as permission_normalize_mode,
 )
+from channel.web.openai_api import OpenAIChatCompletionsHandler
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg"}
 VIDEO_EXTENSIONS = {".mp4", ".webm", ".avi", ".mov", ".mkv"}
+
+# Cap for a file the desktop client asks us to import by path. Matches the
+# multipart body cap on the HTTP server so both upload routes agree.
+MAX_LOCAL_IMPORT_BYTES = 512 * 1024 * 1024
+
+
+def _live_channel_manager():
+    """Return the running ChannelManager, or None if the app is not up yet.
+
+    app.py runs as ``python app.py``, so ``__main__`` is a *distinct* module
+    object from a later ``import app``; reading ``_channel_mgr`` off
+    ``sys.modules['__main__']`` therefore always yielded None and the console
+    silently refused to start a newly configured channel. The manager is
+    published through ``common.channel_registry`` instead (issue #3120).
+    """
+    try:
+        return get_channel_manager()
+    except Exception:
+        return None
+
+
+def _is_loopback_request() -> bool:
+    """True when the current request came straight from this machine.
+
+    A request that went through a reverse proxy carries forwarding headers even
+    if the proxy itself sits on localhost, so those disqualify it.
+    """
+    env = getattr(web.ctx, "env", {}) or {}
+    if env.get("HTTP_X_FORWARDED_FOR") or env.get("HTTP_X_REAL_IP"):
+        return False
+    addr = (env.get("REMOTE_ADDR") or "").strip()
+    return addr in ("::1", "::ffff:127.0.0.1") or addr.startswith("127.")
+
+
+def _desktop_token_matches() -> bool:
+    """Whether the request carries the secret the desktop shell handed us.
+
+    The shell generates a random token per launch and passes it in via
+    COW_DESKTOP_TOKEN when it spawns the backend, then sends it back on its own
+    requests. A browser tab talking to the same port never sees the env of the
+    process, so it can't forge this; a source run without the shell has no
+    token, and the check simply fails closed.
+    """
+    expected = os.environ.get("COW_DESKTOP_TOKEN", "")
+    if not expected:
+        return False
+    env = getattr(web.ctx, "env", {}) or {}
+    provided = env.get("HTTP_X_COW_DESKTOP_TOKEN", "")
+    return bool(provided) and hmac.compare_digest(provided, expected)
 
 
 @dataclass
@@ -84,7 +136,10 @@ def _read_config_file_for_write() -> dict:
     """
     config_path = os.path.join(get_data_root(), "config.json")
     if os.path.exists(config_path):
-        with open(config_path, "r", encoding="utf-8") as f:
+        # utf-8-sig tolerates a UTF-8 BOM (common when the file was edited with
+        # Windows Notepad / PowerShell). Plain utf-8 would raise "Unexpected
+        # UTF-8 BOM" here and fail every config write from the web console.
+        with open(config_path, "r", encoding="utf-8-sig") as f:
             return json.load(f)
     return read_config_template()
 
@@ -516,9 +571,13 @@ def _steer_reply_text(status, lang: str) -> str:
     return english if en else chinese
 
 
-def _get_upload_dir() -> str:
-    from common.state_dir import tmp_dir
-    return str(tmp_dir())
+def _get_upload_dir(agent_id: str = None) -> str:
+    from agent.registry import get_agent_registry
+
+    workspace = get_agent_registry().get(agent_id).workspace
+    upload_dir = os.path.join(workspace, "tmp")
+    os.makedirs(upload_dir, exist_ok=True)
+    return upload_dir
 
 
 def _get_workspace_root(session_id: str = None, agent_id: str = None) -> str:
@@ -537,8 +596,9 @@ def _get_workspace_root(session_id: str = None, agent_id: str = None) -> str:
                 return project_dir
         except Exception as e:
             logger.debug(f"[WebChannel] project_dir resolve failed: {e}")
-    from common.state_dir import state_root_str
-    return state_root_str()
+    from agent.registry import get_agent_registry
+
+    return get_agent_registry().get(agent_id).workspace
 
 
 _PREVIEW_SECRET = None
@@ -649,6 +709,76 @@ def _build_preview_url(abs_path: str) -> str:
     return f"/preview/{_encode_dir_token(directory)}/{quote(name)}"
 
 
+# Media links the agent embeds in its reply markdown are workspace-relative
+# (e.g. `images/x.png`, saved under the agent workspace by the image/video
+# skills). The browser would resolve those against the console URL and 404,
+# so they only render for the default agent whose workspace happens to match
+# the serve root. Rewriting them to an absolute /api/file URL makes them load
+# for every agent. Only *relative* refs are touched — absolute paths, http(s)
+# URLs, file:// and already-routed /api or /preview links are left untouched,
+# so nothing that worked before (including the default agent) changes.
+_MD_IMAGE_RE = re.compile(r"(!\[[^\]]*\]\()([^)\s]+)(\s*(?:\"[^\"]*\")?\s*\))")
+_HTML_IMG_SRC_RE = re.compile(r"(<img\b[^>]*?\bsrc=[\"'])([^\"']+)([\"'])", re.IGNORECASE)
+
+
+def _is_relative_media_ref(ref: str) -> bool:
+    """True for a workspace-relative media ref that needs absolutizing."""
+    if not ref:
+        return False
+    ref = ref.strip()
+    # Scheme (http, https, data, file, mailto), protocol-relative, site-absolute
+    # (/api/file, /preview), home (~) or Windows drive paths all resolve on their
+    # own — leave them alone.
+    if re.match(r"^[a-zA-Z][\w+.-]*:", ref):
+        return False
+    if ref.startswith(("//", "/", "~")):
+        return False
+    if re.match(r"^[A-Za-z]:[\\/]", ref):
+        return False
+    return True
+
+
+def _rewrite_relative_media(content: str, workspace_root: str) -> str:
+    """Rewrite workspace-relative media refs in markdown/HTML to /api/file URLs.
+
+    ``workspace_root`` is the absolute root the relative refs are anchored to
+    (the agent's workspace, or the open project dir). Refs that escape the root
+    or don't resolve to an existing file are left untouched, so this never turns
+    a harmless relative link into a broken absolute one.
+    """
+    if not content or not workspace_root:
+        return content
+    root_real = os.path.realpath(workspace_root)
+
+    def _to_api_url(ref: str) -> Optional[str]:
+        if not _is_relative_media_ref(ref):
+            return None
+        rel = ref.split("?", 1)[0].split("#", 1)[0]
+        abs_path = os.path.realpath(os.path.join(root_real, rel))
+        # Confine to the workspace root: a ref like `../../etc/passwd` must not
+        # be turned into a servable URL.
+        try:
+            if os.path.commonpath([abs_path, root_real]) != root_real:
+                return None
+        except ValueError:
+            return None
+        if not os.path.isfile(abs_path):
+            return None
+        return f"/api/file?path={quote(abs_path)}"
+
+    def _md_repl(m: re.Match) -> str:
+        url = _to_api_url(m.group(2))
+        return f"{m.group(1)}{url}{m.group(3)}" if url else m.group(0)
+
+    def _img_repl(m: re.Match) -> str:
+        url = _to_api_url(m.group(2))
+        return f"{m.group(1)}{url}{m.group(3)}" if url else m.group(0)
+
+    out = _MD_IMAGE_RE.sub(_md_repl, content)
+    out = _HTML_IMG_SRC_RE.sub(_img_repl, out)
+    return out
+
+
 def _build_artifact_payload(data: dict) -> dict:
     """Turn an agent `artifact` event into an SSE payload for the web clients."""
     file_path = data.get("path", "")
@@ -743,6 +873,43 @@ def _add_subagent_displays(steps) -> None:
             continue
         if isinstance(results, list) and results:
             step["display"] = format_results(results)
+
+
+def _add_delegate_displays(steps) -> None:
+    """Give persisted `agent_delegate` steps the readable form they had live.
+
+    Same story as `_add_subagent_displays`: `display` is kept out of the model's
+    context and so out of storage, so a reloaded page would otherwise show the
+    JSON handed to the model rather than "who → whom" and the teammate's reply.
+    """
+    from agent.tools.agent_delegate.agent_delegate import format_delegate_result
+
+    for step in steps or []:
+        if not isinstance(step, dict) or step.get("name") != "agent_delegate":
+            continue
+        try:
+            payload = json.loads(step.get("result") or "{}")
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(payload, dict) or not payload.get("content"):
+            continue
+        source_id = payload.get("delegated_by") or ""
+        source_name = source_id
+        try:
+            from bridge.bridge import Bridge
+
+            source_name = (
+                Bridge().get_agent_bridge().agent_registry.get(source_id).name
+                or source_id
+            )
+        except Exception:
+            pass
+        step["display"] = format_delegate_result(
+            source_name,
+            payload.get("agent_name") or payload.get("agent_id") or "",
+            payload.get("content") or "",
+            status=payload.get("status") or "done",
+        )
 
 
 def _sanitize_upload_relative_path(relative_path: str) -> str:
@@ -1078,9 +1245,20 @@ class WebChannel(ChatChannel):
                 seqs = self._fetch_latest_pair_seqs(
                     session_id, context.get("agent_id")
                 )
+                # Absolutize workspace-relative media so images/videos the agent
+                # embedded render for non-default agents too. Only affects the
+                # displayed copy; TTS below still reads the original text.
+                display_content = content
+                if reply.type == ReplyType.TEXT and content:
+                    try:
+                        display_content = _rewrite_relative_media(
+                            content, _get_workspace_root(session_id, agent_id)
+                        )
+                    except Exception as e:
+                        logger.debug(f"[WebChannel] media rewrite skipped: {e}")
                 self._publish_sse_event(request_id, {
                     "type": "done",
-                    "content": content,
+                    "content": display_content,
                     "request_id": request_id,
                     "timestamp": time.time(),
                     "user_seq": seqs.get("user_seq"),
@@ -1124,6 +1302,13 @@ class WebChannel(ChatChannel):
                 if reply.type == ReplyType.TEXT and context.get("on_event") is not None:
                     logger.debug(f"Polling skipped SSE text reply for session {session_id}")
                     return
+                if reply.type == ReplyType.TEXT and content:
+                    try:
+                        content = _rewrite_relative_media(
+                            content, _get_workspace_root(session_id, agent_id)
+                        )
+                    except Exception as e:
+                        logger.debug(f"[WebChannel] media rewrite skipped: {e}")
                 response_data = {
                     "type": str(reply.type),
                     "content": content,
@@ -1395,7 +1580,7 @@ class WebChannel(ChatChannel):
                     f"reply={reply}"
                 )
                 return
-            url = self._publish_tts_audio(reply.content)
+            url = self._publish_tts_audio(reply.content, agent_id)
             if not url:
                 logger.warning(f"[WebChannel] TTS publish failed for request {request_id}")
                 return
@@ -1429,21 +1614,22 @@ class WebChannel(ChatChannel):
             self._publish_sse_event(request_id, {"type": "stream_end"})
 
     @staticmethod
-    def _publish_tts_audio(src_path: str) -> str:
+    def _publish_tts_audio(src_path: str, agent_id: str = None) -> str:
         """Move a TTS file into uploads/ and return its public URL."""
         try:
             if not src_path or not os.path.isfile(src_path):
                 logger.warning(f"[WebChannel] publish_tts_audio missing source: {src_path!r}")
                 return ""
             ext = os.path.splitext(src_path)[1].lower() or ".mp3"
-            upload_dir = _get_upload_dir()
+            upload_dir = _get_upload_dir(agent_id)
             os.makedirs(upload_dir, exist_ok=True)
             ts = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
             dst_name = f"voice_reply_{ts}_{random.randint(0, 9999)}{ext}"
             dst_path = os.path.join(upload_dir, dst_name)
             shutil.move(src_path, dst_path)
             logger.debug(f"[WebChannel] publish_tts_audio moved {src_path} -> {dst_path}")
-            return f"/uploads/{dst_name}"
+            suffix = f"?agent_id={agent_id}" if agent_id else ""
+            return f"/uploads/{dst_name}{suffix}"
         except Exception as e:
             logger.warning(f"[WebChannel] publish_tts_audio failed: {e}")
             return ""
@@ -1475,11 +1661,19 @@ class WebChannel(ChatChannel):
             logger.warning(f"[WebChannel] voice cleanup failed: {e}")
 
     def upload_file(self):
-        """Handle file or directory upload via multipart/form-data."""
+        """Handle file or directory upload via multipart/form-data.
+
+        A JSON body ({"local_path": ...}) instead selects the desktop-only
+        import-by-path route, see `_import_local_file`.
+        """
 
         def _reject(message):
             logger.warning("[WebChannel] Upload rejected: %s", message)
             return json.dumps({"status": "error", "message": message})
+
+        content_type = (web.ctx.env.get("CONTENT_TYPE") or "").lower()
+        if content_type.startswith("application/json"):
+            return self._import_local_file(_reject)
 
         try:
             # Trace the request on arrival: it is the only way to tell a client
@@ -1512,7 +1706,7 @@ class WebChannel(ChatChannel):
 
             is_directory_upload = bool(directory_files) or bool(directory_rel_paths) or bool(relative_path) or bool(upload_id)
 
-            upload_dir = _get_upload_dir()
+            upload_dir = _get_upload_dir(_request_agent_id(params))
             if is_directory_upload:
                 if not upload_id:
                     return _reject("Missing upload_id for directory upload")
@@ -1599,6 +1793,78 @@ class WebChannel(ChatChannel):
             logger.error(f"[WebChannel] File upload error: {e}", exc_info=True)
             return json.dumps({"status": "error", "message": str(e)})
 
+    def _import_local_file(self, _reject):
+        """Attach a file that already sits on this machine, by path.
+
+        The desktop client and its backend share a filesystem, so pushing the
+        bytes through an HTTP multipart body only adds a place to fail: the
+        renderer's network stack, keep-alive sockets shared with SSE streams,
+        and on Windows security software proxying localhost traffic all produced
+        intermittent "Failed to fetch" errors that looked like a dead backend.
+        Copying the file directly has none of those moving parts.
+
+        Only the desktop shell may use this: the request must originate on the
+        loopback interface and carry the per-launch token the shell passed to
+        this process. Anyone else (including a browser on the same machine)
+        gets a plain error and falls back to the multipart route.
+        """
+        try:
+            payload = json.loads(web.data() or b"{}")
+        except (ValueError, TypeError):
+            return _reject("Invalid JSON body")
+        if not isinstance(payload, dict):
+            return _reject("Invalid JSON body")
+
+        local_path = str(payload.get("local_path") or "").strip()
+        if not local_path:
+            return _reject("local_path is required")
+
+        if not (_is_loopback_request() and _desktop_token_matches()):
+            return _reject("Import by path is only available to the desktop client")
+
+        if not os.path.isabs(local_path):
+            return _reject("local_path must be absolute")
+        real_path = os.path.realpath(local_path)
+        if not os.path.isfile(real_path):
+            return _reject("File not found")
+        size = os.path.getsize(real_path)
+        if size > MAX_LOCAL_IMPORT_BYTES:
+            return _reject("File too large")
+
+        agent_id = _request_agent_id(payload)
+        if not agent_id:
+            from urllib.parse import parse_qs
+            agent_id = _request_agent_id(parse_qs(web.ctx.env.get("QUERY_STRING") or ""))
+
+        try:
+            upload_dir = _get_upload_dir(agent_id)
+            original_name = os.path.basename(local_path)
+            ext = os.path.splitext(original_name)[1].lower()
+            safe_name = f"web_{uuid.uuid4().hex[:8]}{ext}"
+            save_path = os.path.join(upload_dir, safe_name)
+            shutil.copyfile(real_path, save_path)
+
+            if ext in IMAGE_EXTENSIONS:
+                file_type = "image"
+            elif ext in VIDEO_EXTENSIONS:
+                file_type = "video"
+            else:
+                file_type = "file"
+
+            logger.info(
+                f"[WebChannel] File imported by path: {original_name} -> {save_path} ({file_type}, {size} bytes)"
+            )
+            return json.dumps({
+                "status": "success",
+                "file_path": save_path,
+                "file_name": original_name,
+                "file_type": file_type,
+                "preview_url": f"/uploads/{quote(safe_name, safe='/')}",
+            }, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Local file import error: {e}", exc_info=True)
+            return json.dumps({"status": "error", "message": str(e)})
+
     def post_message(self, override_user_id: Optional[str] = None,
                      override_agent_id: Optional[str] = None):
         """
@@ -1635,6 +1901,9 @@ class WebChannel(ChatChannel):
                 explicit_agent_id=requested_agent,
             )
             prompt = json_data.get('message', '')
+            # Kept before any prefixing or attachment lines, so mention parsing
+            # still sees what the user actually typed.
+            typed_prompt = prompt
             use_sse = json_data.get('stream', True)
             attachments = json_data.get('attachments', [])
             # Tag the message as originating from voice input so the post-reply
@@ -1769,6 +2038,16 @@ class WebChannel(ChatChannel):
             context["receiver"] = session_id
             context["request_id"] = request_id
             context["agent_id"] = resolved_agent_id
+            # Addressing a teammate hands them the turn. The conversation still
+            # belongs to `resolved_agent_id`, so this only changes who answers.
+            # The composer already knows who it wrote; parsing the text is the
+            # fallback for a mention typed by hand or replayed from history.
+            roster = _session_roster(session_id, resolved_agent_id)
+            addressed = (json_data.get("speaker_agent_id") or "").strip()
+            if not addressed or not any(item["id"] == addressed for item in roster):
+                addressed = _addressed_agent_id(typed_prompt, roster)
+            if addressed and addressed != resolved_agent_id:
+                context["speaker_agent_id"] = addressed
             if is_voice_input:
                 # Web channel runs its own TTS post-pipeline via
                 # _maybe_dispatch_auto_tts; don't set desire_rtype here or
@@ -1780,7 +2059,14 @@ class WebChannel(ChatChannel):
 
             threading.Thread(target=self.produce, args=(context,)).start()
 
-            return json.dumps({"status": "success", "request_id": request_id, "stream": use_sse})
+            return json.dumps({
+                "status": "success",
+                "request_id": request_id,
+                "stream": use_sse,
+                # Lets the live bubble carry the right name and face while the
+                # reply streams, before any of it has been persisted.
+                "speaker": context.get("speaker_agent_id") or "",
+            })
 
         except Exception as e:
             logger.error(f"Error processing message: {e}")
@@ -1992,14 +2278,19 @@ class WebChannel(ChatChannel):
             session_id = (json_data.get("session_id") or "").strip()
             lang = (json_data.get("lang") or "zh").lower()
             from bridge.bridge import Bridge
+            from agent.routing import AgentUnavailableError
             agent_bridge = Bridge().get_agent_bridge()
             agent_id = self.request_to_agent.get(request_id)
             if not agent_id:
-                agent_id = agent_bridge.agent_router.resolve(
-                    channel_type="web",
-                    conversation_ids=(session_id,),
-                    explicit_agent_id=json_data.get("agent_id"),
-                )
+                try:
+                    agent_id = agent_bridge.agent_router.resolve(
+                        explicit_agent_id=json_data.get("agent_id"),
+                    )
+                except AgentUnavailableError:
+                    # Session pinned to a since-deleted Agent; nothing in flight
+                    # for it to cancel. Report success with a zero count rather
+                    # than raising on every cancel attempt.
+                    return json.dumps({"status": "success", "cancelled": 0})
 
             registry = get_cancel_registry()
             cancelled = 0
@@ -2046,16 +2337,35 @@ class WebChannel(ChatChannel):
             json_data = json.loads(data)
             session_id = json_data.get('session_id')
             from bridge.bridge import Bridge
+            from agent.routing import AgentUnavailableError
             agent_bridge = Bridge().get_agent_bridge()
-            agent_id = agent_bridge.agent_router.resolve(
-                channel_type="web",
-                conversation_ids=(session_id,),
-                explicit_agent_id=json_data.get("agent_id"),
-            )
+            try:
+                agent_id = agent_bridge.agent_router.resolve(
+                    explicit_agent_id=json_data.get("agent_id"),
+                )
+            except AgentUnavailableError:
+                # The session is pinned to an Agent that has since been deleted
+                # or disabled (a stale client selection). Polling is read-only,
+                # so there is nothing to answer - report no content instead of
+                # raising every tick, which otherwise floods the log.
+                return json.dumps({
+                    "status": "success",
+                    "has_content": False,
+                    "agent_unavailable": True,
+                })
+            if not session_id:
+                return json.dumps({"status": "error", "message": "Invalid session ID"})
+
             session_queue_key = self._session_queue_key(session_id, agent_id)
 
-            if not session_id or session_queue_key not in self.session_queues:
-                return json.dumps({"status": "error", "message": "Invalid session ID"})
+            # A polling client is declaring "I'm listening on this session", so
+            # register a queue for it if one doesn't exist yet. Previously a
+            # queue was only created when the user sent a message, which meant an
+            # idle client (e.g. right after a restart, or a session opened but
+            # not typed in) had nowhere for a scheduled/proactive push to land —
+            # the push was dropped even though the client was actively polling.
+            if session_queue_key not in self.session_queues:
+                self.session_queues[session_queue_key] = Queue()
 
             # 尝试从队列获取响应，不等待
             try:
@@ -2189,6 +2499,8 @@ class WebChannel(ChatChannel):
             '/api/workspace/search', 'WorkspaceSearchHandler',
             '/api/workspace/resolve', 'WorkspaceResolveHandler',
             '/api/workspace/meta', 'WorkspaceMetaHandler',
+            '/api/workspace/read', 'WorkspaceReadHandler',
+            '/api/workspace/write', 'WorkspaceWriteHandler',
             '/api/projects', 'ProjectsHandler',
             '/api/projects/select', 'ProjectSelectHandler',
             '/api/projects/create', 'ProjectCreateHandler',
@@ -2202,6 +2514,7 @@ class WebChannel(ChatChannel):
             '/cancel', 'CancelHandler',
             '/chat', 'ChatHandler',
             '/analysis', 'AnalysisPageHandler',
+            '/v1/chat/completions', 'OpenAIChatCompletionsHandler',
             '/config', 'ConfigHandler',
             '/api/models', 'ModelsHandler',
             '/api/channels', 'ChannelsHandler',
@@ -2209,6 +2522,7 @@ class WebChannel(ChatChannel):
             '/api/feishu/register', 'FeishuRegisterHandler',
             '/api/tools', 'ToolsHandler',
             '/api/skills', 'SkillsHandler',
+            '/api/skills/content', 'SkillContentHandler',
             '/api/memory', 'MemoryHandler',
             '/api/memory/content', 'MemoryContentHandler',
             '/api/knowledge/list', 'KnowledgeListHandler',
@@ -2217,14 +2531,25 @@ class WebChannel(ChatChannel):
             '/api/knowledge/action', 'KnowledgeActionHandler',
             '/api/knowledge/import', 'KnowledgeImportHandler',
             '/api/scheduler', 'SchedulerHandler',
+            '/api/scheduler/runs/detail', 'SchedulerRunDetailHandler',
+            '/api/scheduler/runs/delete', 'SchedulerRunDeleteHandler',
+            '/api/scheduler/runs', 'SchedulerRunsHandler',
             '/api/scheduler/run', 'SchedulerRunHandler',
             '/api/scheduler/toggle', 'SchedulerToggleHandler',
             '/api/scheduler/update', 'SchedulerUpdateHandler',
             '/api/scheduler/delete', 'SchedulerDeleteHandler',
+            '/api/scheduler/create', 'SchedulerCreateHandler',
+            '/api/scheduler/recipients', 'SchedulerRecipientsHandler',
+            '/api/scheduler/instances', 'SchedulerInstancesHandler',
+            '/api/agents', 'AgentsHandler',
+            '/api/agents/([^/]+)/avatar', 'AgentAvatarHandler',
+            '/api/agents/([^/]+)/files/([^/]+)', 'AgentCoreFileHandler',
             '/api/sessions', 'SessionsHandler',
             '/api/sessions/(.*)/generate_title', 'SessionTitleHandler',
             '/api/prompt/optimize', 'PromptOptimizeHandler',
             '/api/sessions/(.*)/clear_context', 'SessionClearContextHandler',
+            '/api/sessions/(.*)/context_usage', 'SessionContextUsageHandler',
+            '/api/sessions/(.*)/compact_context', 'SessionCompactContextHandler',
             '/api/sessions/(.*)/settings', 'SessionSettingsHandler',
             '/api/sessions/(.*)', 'SessionDetailHandler',
             '/api/history', 'HistoryHandler',
@@ -2632,6 +2957,7 @@ class VoiceAsrHandler:
         saved_path = None
         try:
             params = _raw_web_input()
+            agent_id = _request_agent_id(params)
             file_obj = params.get("file")
             if file_obj is None:
                 return json.dumps({"status": "error", "message": "no audio file"})
@@ -2641,7 +2967,7 @@ class VoiceAsrHandler:
             if ext not in (".webm", ".ogg", ".opus", ".mp4", ".m4a", ".mp3", ".wav"):
                 ext = ".webm"
 
-            upload_dir = _get_upload_dir()
+            upload_dir = _get_upload_dir(agent_id)
             os.makedirs(upload_dir, exist_ok=True)
             ts = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
             saved_name = f"voice_input_{ts}_{random.randint(0, 9999)}{ext}"
@@ -2649,7 +2975,8 @@ class VoiceAsrHandler:
             with open(saved_path, "wb") as f:
                 f.write(file_obj.file.read() if hasattr(file_obj, "file") else file_obj.value)
 
-            audio_url = f"/uploads/{saved_name}"
+            suffix = f"?agent_id={agent_id}" if agent_id else ""
+            audio_url = f"/uploads/{saved_name}{suffix}"
 
             from bridge.bridge import Bridge
             reply = Bridge().fetch_voice_to_text(saved_path)
@@ -2701,7 +3028,7 @@ class VoiceTtsHandler:
                 msg = getattr(reply, "content", "") or "tts failed"
                 return json.dumps({"status": "error", "message": str(msg)})
 
-            url = channel._publish_tts_audio(reply.content)
+            url = channel._publish_tts_audio(reply.content, agent_id)
             if not url:
                 return json.dumps({"status": "error", "message": "publish failed"})
 
@@ -2726,7 +3053,8 @@ class UploadsHandler:
     def GET(self, file_name):
         _require_auth()
         try:
-            upload_dir = _get_upload_dir()
+            params = web.input(agent_id='')
+            upload_dir = _get_upload_dir(_request_agent_id(params))
             full_path = os.path.normpath(os.path.join(upload_dir, file_name))
             if not os.path.abspath(full_path).startswith(os.path.abspath(upload_dir)):
                 raise web.notfound()
@@ -2981,14 +3309,21 @@ class ChatHandler:
                 '</body></html>'
             )
 
+        # Content-Type must be explicit: behind a reverse proxy that sends
+        # X-Content-Type-Options: nosniff, a missing type makes browsers
+        # refuse to sniff and render the page as plain text source.
+        web.header('Content-Type', 'text/html; charset=utf-8')
         web.header('Cache-Control', 'no-cache, no-store, must-revalidate')
         web.header('Pragma', 'no-cache')
         file_path = os.path.join(os.path.dirname(__file__), 'chat.html')
         with open(file_path, 'r', encoding='utf-8') as f:
             html = f.read()
         cache_bust = str(int(time.time()))
-        html = html.replace('assets/js/console.js', f'assets/js/console.js?v={cache_bust}')
-        html = html.replace('assets/css/console.css', f'assets/css/console.css?v={cache_bust}')
+        # Every first-party asset the page pulls in, so an upgraded console is
+        # never left running against a browser-cached copy of the old scripts.
+        for asset in ('js/console.js', 'js/workspace.js', 'js/doc-editor.js',
+                      'css/console.css'):
+            html = html.replace(f'assets/{asset}', f'assets/{asset}?v={cache_bust}')
         # Inject the backend-resolved default language for first-load fallback.
         html = html.replace("{{COW_DEFAULT_LANG}}", i18n.get_language())
         return html
@@ -3062,14 +3397,14 @@ class AnalysisPageHandler:
 class ConfigHandler:
 
     _RECOMMENDED_MODELS = [
-        const.DEEPSEEK_V4_FLASH, const.DEEPSEEK_V4_PRO,
+        const.DEEPSEEK_FLASH, const.DEEPSEEK_V4_FLASH, const.DEEPSEEK_V4_PRO,
         const.MINIMAX_M3, const.MINIMAX_M2_7_HIGHSPEED, const.MINIMAX_M2_7,
         # claude-opus-5 is the Claude default; claude-sonnet-5 / claude-fable-5 follow right after it.
-        const.CLAUDE_OPUS_5, const.CLAUDE_SONNET_5, const.CLAUDE_FABLE_5, const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS,
-        const.GEMINI_37_FLASH, const.GEMINI_36_FLASH, const.GEMINI_35_FLASH, const.GEMINI_31_FLASH_LITE_PRE, const.GEMINI_31_PRO_PRE, const.GEMINI_3_FLASH_PRE,
-        const.GPT_56_LUNA, const.GPT_56_TERRA, const.GPT_56_SOL, const.GPT_55, const.GPT_54, const.GPT_54_MINI, const.GPT_54_NANO, const.GPT_5, const.GPT_41, const.GPT_4o,
-        const.GLM_5_3, const.GLM_5_2, const.GLM_5_1, const.GLM_5_TURBO, const.GLM_5, const.GLM_4_7,
-        const.QWEN38_MAX, const.QWEN37_PLUS, const.QWEN37_MAX, const.QWEN36_PLUS,
+        const.CLAUDE_OPUS_5, const.CLAUDE_SONNET_5, const.CLAUDE_FABLE_5_1, const.CLAUDE_FABLE_5, const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS,
+        const.GPT_56_LUNA, const.GPT_6_ASTRA, const.GPT_56_TERRA, const.GPT_56_SOL, const.GPT_55, const.GPT_54, const.GPT_54_MINI, const.GPT_54_NANO, const.GPT_5, const.GPT_41, const.GPT_4o,
+        const.GEMINI_38_FLASH, const.GEMINI_37_FLASH, const.GEMINI_36_FLASH, const.GEMINI_35_FLASH, const.GEMINI_31_FLASH_LITE_PRE, const.GEMINI_31_PRO_PRE, const.GEMINI_3_FLASH_PRE,
+        const.GLM_5_3_FLASH, const.GLM_5_3, const.GLM_5_2, const.GLM_5_1, const.GLM_5_TURBO, const.GLM_5, const.GLM_4_7,
+        const.QWEN38_FLASH, const.QWEN38_MAX, const.QWEN37_PLUS, const.QWEN37_MAX, const.QWEN36_PLUS,
         const.DOUBAO_SEED_2_1_PRO, const.DOUBAO_SEED_2_1_TURBO, const.DOUBAO_SEED_2_CODE,
         const.KIMI_K3, const.KIMI_K2_7_CODE, const.KIMI_K2_7_CODE_HIGHSPEED, const.KIMI_K2_6, const.KIMI_K2_5, const.KIMI_K2,
         const.ERNIE_5_1, const.ERNIE_5, const.ERNIE_X1_1, const.ERNIE_45_TURBO_128K, const.ERNIE_45_TURBO_32K,
@@ -3094,7 +3429,7 @@ class ConfigHandler:
             "api_base_key": "deepseek_api_base",
             "api_base_default": "https://api.deepseek.com/v1",
             "api_base_placeholder": _PLACEHOLDER_V1,
-            "models": [const.DEEPSEEK_V4_FLASH, const.DEEPSEEK_V4_PRO],
+            "models": [const.DEEPSEEK_FLASH, const.DEEPSEEK_V4_FLASH, const.DEEPSEEK_V4_PRO],
         }),
         ("claudeAPI", {
             "label": "Claude",
@@ -3102,7 +3437,7 @@ class ConfigHandler:
             "api_base_key": "claude_api_base",
             "api_base_default": "https://api.anthropic.com/v1",
             "api_base_placeholder": _PLACEHOLDER_V1,
-            "models": [const.CLAUDE_OPUS_5, const.CLAUDE_SONNET_5, const.CLAUDE_FABLE_5, const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS],
+            "models": [const.CLAUDE_OPUS_5, const.CLAUDE_SONNET_5, const.CLAUDE_FABLE_5_1, const.CLAUDE_FABLE_5, const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS],
         }),
         ("openai", {
             "label": "OpenAI",
@@ -3110,7 +3445,7 @@ class ConfigHandler:
             "api_base_key": "open_ai_api_base",
             "api_base_default": "https://api.openai.com/v1",
             "api_base_placeholder": _PLACEHOLDER_V1,
-            "models": [const.GPT_56_LUNA, const.GPT_56_TERRA, const.GPT_56_SOL, const.GPT_55, const.GPT_54, const.GPT_54_MINI, const.GPT_54_NANO, const.GPT_5, const.GPT_41, const.GPT_4o],
+            "models": [const.GPT_56_LUNA, const.GPT_6_ASTRA, const.GPT_56_TERRA, const.GPT_56_SOL, const.GPT_55, const.GPT_54, const.GPT_54_MINI, const.GPT_54_NANO, const.GPT_5, const.GPT_41, const.GPT_4o],
         }),
         ("gemini", {
             "label": "Gemini",
@@ -3118,7 +3453,7 @@ class ConfigHandler:
             "api_base_key": "gemini_api_base",
             "api_base_default": "https://generativelanguage.googleapis.com",
             "api_base_placeholder": _PLACEHOLDER_GEMINI,
-            "models": [const.GEMINI_37_FLASH, const.GEMINI_36_FLASH, const.GEMINI_35_FLASH, const.GEMINI_31_FLASH_LITE_PRE, const.GEMINI_31_PRO_PRE, const.GEMINI_3_FLASH_PRE],
+            "models": [const.GEMINI_38_FLASH, const.GEMINI_37_FLASH, const.GEMINI_36_FLASH, const.GEMINI_35_FLASH, const.GEMINI_31_FLASH_LITE_PRE, const.GEMINI_31_PRO_PRE, const.GEMINI_3_FLASH_PRE],
         }),
         ("minimax", {
             "label": "MiniMax",
@@ -3134,7 +3469,7 @@ class ConfigHandler:
             "api_base_key": "zhipu_ai_api_base",
             "api_base_default": "https://open.bigmodel.cn/api/paas/v4",
             "api_base_placeholder": _PLACEHOLDER_ZHIPU,
-            "models": [const.GLM_5_3, const.GLM_5_2, const.GLM_5_1, const.GLM_5_TURBO, const.GLM_5, const.GLM_4_7],
+            "models": [const.GLM_5_3_FLASH, const.GLM_5_3, const.GLM_5_2, const.GLM_5_1, const.GLM_5_TURBO, const.GLM_5, const.GLM_4_7],
         }),
         ("dashscope", {
             "label": {"zh": "通义千问", "en": "Qwen"},
@@ -3142,7 +3477,7 @@ class ConfigHandler:
             "api_base_key": None,
             "api_base_default": None,
             "api_base_placeholder": "",
-            "models": [const.QWEN38_MAX, const.QWEN37_PLUS, const.QWEN37_MAX, const.QWEN36_PLUS],
+            "models": [const.QWEN38_FLASH, const.QWEN38_MAX, const.QWEN37_PLUS, const.QWEN37_MAX, const.QWEN36_PLUS],
         }),
         ("moonshot", {
             "label": "Kimi",
@@ -3161,7 +3496,7 @@ class ConfigHandler:
             "models": [const.DOUBAO_SEED_2_1_PRO, const.DOUBAO_SEED_2_1_TURBO, const.DOUBAO_SEED_2_PRO, const.DOUBAO_SEED_2_CODE],
         }),
         ("qianfan", {
-            "label": {"zh": "百度千帆", "en": "ERNIE"},
+            "label": {"zh": "百度", "en": "ERNIE"},
             "api_key_field": "qianfan_api_key",
             "api_base_key": "qianfan_api_base",
             "api_base_default": "https://qianfan.baidubce.com/v2",
@@ -3303,7 +3638,9 @@ class ConfigHandler:
                 "bot_type": "openai" if local_config.get("bot_type") == "chatGPT" else local_config.get("bot_type", ""),
                 "use_linkai": bool(local_config.get("use_linkai", False)),
                 "channel_type": local_config.get("channel_type", ""),
-                "agent_max_context_tokens": local_config.get("agent_max_context_tokens", 50000),
+                # Manual cap on the input budget (compact once reached); 0
+                # disables the cap and follows the model window.
+                "agent_max_context_tokens": local_config.get("agent_max_context_tokens", 64000),
                 "agent_max_context_turns": local_config.get("agent_max_context_turns", 20),
                 "agent_max_steps": local_config.get("agent_max_steps", 20),
                 "enable_thinking": bool(local_config.get("enable_thinking", False)),
@@ -3438,6 +3775,32 @@ class ConfigHandler:
                     logger.info("[WebChannel] Bridge bot routing reset due to config change")
                 except Exception as reset_err:
                     logger.warning(f"[WebChannel] Failed to reset bridge: {reset_err}")
+
+            # Evict cached agent runtimes when a config that is baked into the
+            # Agent at construction time changes. These values (context budget,
+            # turn/step caps) are read once in agent_initializer and cached on
+            # the Agent instance, so without eviction an edit only takes effect
+            # after a restart — the user changes the budget in the UI and sees
+            # no change (the context-usage chart keeps the old limit). Clearing
+            # the instances makes the next turn rebuild each agent from the new
+            # config, no restart needed.
+            agent_rebuild_keys = {
+                "agent_max_context_tokens",
+                "agent_max_context_turns",
+                "agent_max_steps",
+            }
+            if any(k in applied for k in agent_rebuild_keys):
+                try:
+                    from bridge.bridge import Bridge
+                    agent_bridge = Bridge().get_agent_bridge()
+                    if agent_bridge is not None:
+                        agent_bridge.clear_all_sessions()
+                        logger.info(
+                            "[WebChannel] Cleared cached agents so new "
+                            f"{sorted(agent_rebuild_keys & applied.keys())} takes effect"
+                        )
+                except Exception as rebuild_err:
+                    logger.warning(f"[WebChannel] Failed to clear agents: {rebuild_err}")
 
             return json.dumps({"status": "success", "applied": applied, "warning": password_warning}, ensure_ascii=False)
         except Exception as e:
@@ -3759,6 +4122,10 @@ class ModelsHandler:
     # Anything not listed here intentionally hides the model dropdown so
     # users cannot pin a chat-only model and silently get a 4xx at runtime.
     _VISION_PROVIDER_MODELS = {
+        # DeepSeek 视觉模型：deepseek-flash（V4.1，原生多模态），其次是
+        # deepseek-v4-flash-vision-exp。deepseek-flash 是项目默认主模型，一把
+        # DeepSeek key 即可同时覆盖对话与视觉。
+        "deepseek":  [const.DEEPSEEK_FLASH, const.DEEPSEEK_V4_FLASH_VISION_EXP],
         # OpenAI ordering puts the GPT-5.6 family first, then GPT-5.5/5.4,
         # GPT-5 and the GPT-4.1/4o backstops.
         "openai":    [
@@ -3776,18 +4143,18 @@ class ModelsHandler:
         ],
         "doubao":    [const.DOUBAO_SEED_2_1_PRO, const.DOUBAO_SEED_2_1_TURBO, const.DOUBAO_SEED_2_PRO],
         "moonshot":  [const.KIMI_K2_6],
-        "dashscope": [const.QWEN37_PLUS, const.QWEN36_PLUS],
+        "dashscope": [const.QWEN38_FLASH, const.QWEN37_PLUS, const.QWEN36_PLUS],
         # claude-sonnet-5 stays first here (unlike the chat lists): the first
         # entry is the auto-picked vision model, and image understanding does
         # not justify the Opus price.
-        "claudeAPI": [const.CLAUDE_SONNET_5, const.CLAUDE_OPUS_5, const.CLAUDE_FABLE_5, const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS],
-        "gemini":    [const.GEMINI_37_FLASH, const.GEMINI_36_FLASH, const.GEMINI_35_FLASH, const.GEMINI_31_FLASH_LITE_PRE, const.GEMINI_31_PRO_PRE, const.GEMINI_3_FLASH_PRE],
+        "claudeAPI": [const.CLAUDE_SONNET_5, const.CLAUDE_OPUS_5, const.CLAUDE_FABLE_5_1, const.CLAUDE_FABLE_5, const.CLAUDE_4_8_OPUS, const.CLAUDE_4_7_OPUS, const.CLAUDE_4_6_SONNET, const.CLAUDE_4_6_OPUS],
+        "gemini":    [const.GEMINI_38_FLASH, const.GEMINI_37_FLASH, const.GEMINI_36_FLASH, const.GEMINI_35_FLASH, const.GEMINI_31_FLASH_LITE_PRE, const.GEMINI_31_PRO_PRE, const.GEMINI_3_FLASH_PRE],
         "qianfan":   [const.ERNIE_45_TURBO_VL],
-        # Zhipu's bot hard-codes the call to glm-5v-turbo regardless of what
-        # name is passed in (see models/zhipuai/zhipuai_bot.py::call_vision),
-        # so listing the chat models here would silently route to the same
-        # endpoint. Surface only the model the runtime can truly dispatch to.
-        "zhipu":     [const.GLM_5V_TURBO],
+        # glm-5.3-flash is natively multimodal and dispatched as-is; the
+        # text-only chat models (glm-5.2, glm-5-turbo, etc.) fall back to the
+        # dedicated glm-5v-turbo vision model (see
+        # models/zhipuai/zhipuai_bot.py::call_vision).
+        "zhipu":     [const.GLM_5_3_FLASH, const.GLM_5V_TURBO],
         # MiniMax's vision endpoint is similarly hard-coded to MiniMax-Text-01
         # (see models/minimax/minimax_bot.py::call_vision); the M2.x chat
         # family is text-only.
@@ -3800,10 +4167,12 @@ class ModelsHandler:
         "linkai":    [
             const.GPT_41_MINI,
             const.GPT_54_MINI,
+            const.QWEN38_FLASH,
             const.QWEN37_PLUS,
             const.DOUBAO_SEED_2_1_PRO,
             const.KIMI_K2_6,
             const.CLAUDE_SONNET_5,
+            const.CLAUDE_FABLE_5_1,
             const.CLAUDE_FABLE_5,
             const.GEMINI_31_FLASH_LITE_PRE,
         ],
@@ -3827,7 +4196,7 @@ class ModelsHandler:
     # The skill itself maps either form to the real vendor endpoint, so the
     # hint is purely cosmetic.
     _IMAGE_PROVIDER_MODELS = {
-        "openai":    ["gpt-image-2", "gpt-image-1"],
+        "openai":    ["gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2", "gpt-image-1"],
         "gemini": [
             {"value": "gemini-3.1-flash-image-preview", "hint": "Nano Banana 2"},
             {"value": "gemini-3-pro-image-preview",     "hint": "Nano Banana Pro"},
@@ -3837,6 +4206,8 @@ class ModelsHandler:
         "dashscope": ["qwen-image-2.0-pro", "qwen-image-2.0"],
         "minimax":   ["image-01"],
         "linkai": [
+            "gpt-image-2.5-flare",
+            "gpt-image-2.5-sunburst",
             "gpt-image-2",
             {"value": "gemini-3.1-flash-image-preview", "hint": "Nano Banana 2"},
             {"value": "gemini-3-pro-image-preview",     "hint": "Nano Banana Pro"},
@@ -3890,13 +4261,22 @@ class ModelsHandler:
         _, active_id = parse_custom_bot_type(bot_type)
 
         meta = ConfigHandler.PROVIDER_MODELS.get("custom") or {}
+        catalog_map = model_catalog.get_catalog_map()
+        hidden_map = model_catalog.get_hidden_map()
         cards = []
         for p in providers:
             pid = p.get("id") or ""
             name = p.get("name") or pid
             raw_key = p.get("api_key") or ""
             raw_base = p.get("api_base") or ""
-            configured = cls._is_real_key(raw_key)
+            # A custom (OpenAI-compatible) provider's API key is optional — some
+            # self-hosted / gateway endpoints need no auth. Treat the provider
+            # as configured once it has an api_base, so a keyless-but-valid
+            # endpoint isn't shown as an unconfigured (greyed-out) vendor.
+            configured = bool(raw_base) or cls._is_real_key(raw_key)
+            # A custom endpoint has no presets, so its overrides are its whole
+            # list and there is nothing to tombstone.
+            catalog = catalog_map.get(f"custom:{pid}") or []
             cards.append({
                 "id": f"custom:{pid}",
                 "label": {"zh": name, "en": name},
@@ -3911,11 +4291,16 @@ class ModelsHandler:
                 # names are intentionally null.
                 "api_key_field": None,
                 "api_base_field": None,
-                "api_key_masked": ConfigHandler._mask_key(raw_key) if configured else "",
+                "api_key_masked": ConfigHandler._mask_key(raw_key) if cls._is_real_key(raw_key) else "",
                 "api_base": raw_base,
                 "api_base_default": "",
                 "api_base_placeholder": meta.get("api_base_placeholder") or "",
-                "models": [p.get("model")] if p.get("model") else [],
+                "catalog": catalog,
+                "hidden": hidden_map.get(f"custom:{pid}") or [],
+                "seed": [],
+                "effective": catalog,
+                "models": ([e["name"] for e in catalog] if catalog
+                           else ([p.get("model")] if p.get("model") else [])),
             })
         return cards
 
@@ -3944,9 +4329,11 @@ class ModelsHandler:
         local_config = conf()
         custom_cards = cls._custom_provider_cards(local_config)
         # Keep the legacy single "custom" card visible alongside the expanded
-        # ones when the flat custom_api_key/base config is active or filled,
-        # so existing single-provider setups never disappear from the UI.
+        # ones when the flat custom_api_key/base config is still active or
+        # filled, so existing single-provider setups never disappear from the UI.
         keep_legacy_custom = cls._legacy_custom_in_use(local_config)
+        catalog_map = model_catalog.get_catalog_map()
+        hidden_map = model_catalog.get_hidden_map()
         items = []
         for pid, p in ConfigHandler.PROVIDER_MODELS.items():
             if pid == "custom" and custom_cards:
@@ -3960,6 +4347,13 @@ class ModelsHandler:
             raw_key = local_config.get(key_field, "") if key_field else ""
             raw_base = local_config.get(base_field, "") if base_field else ""
             configured = cls._is_real_key(raw_key)
+            overrides = catalog_map.get(pid) or []
+            hidden = hidden_map.get(pid) or []
+            seed = [] if pid == "custom" else cls._preset_seed(pid)
+            # The editor prefills from the effective list (presets minus
+            # removals, plus overrides), so the user always edits the full
+            # list — adding one model can no longer wipe the rest.
+            effective = cls._merged_catalog(pid, seed, catalog_map, hidden_map)
             items.append({
                 "id": pid,
                 "label": p["label"],
@@ -3971,7 +4365,17 @@ class ModelsHandler:
                 "api_base": raw_base or (p.get("api_base_default") or ""),
                 "api_base_default": p.get("api_base_default") or "",
                 "api_base_placeholder": p.get("api_base_placeholder") or "",
-                "models": list(p.get("models") or []),
+                # Raw stored overlay (overrides + tombstones), so the editor can
+                # tell what the user actually changed from the presets.
+                "catalog": overrides,
+                "hidden": hidden,
+                # Preset models pre-typed with their real capabilities: the base
+                # the editor diffs against and the "restore presets" reset uses.
+                "seed": seed,
+                # The full effective list the editor loads as its rows.
+                "effective": effective,
+                "models": [e["name"] for e in effective] if effective
+                          else list(p.get("models") or []),
             })
 
         def _sort_key(it):
@@ -4086,7 +4490,88 @@ class ModelsHandler:
             "current_provider": provider_id,
             "current_model": local_config.get("model", ""),
             "providers": provider_ids,
+            # Chat has no preset model list (vendors' models[] drives the
+            # dropdown); a catalog narrows it to text-tagged entries.
+            "provider_models": cls._apply_catalog({}, "text", custom_cards),
             "use_linkai": bool(local_config.get("use_linkai", False)),
+        }
+
+    @staticmethod
+    def _chat_preset_models() -> dict:
+        """{provider_id: [model, ...]} for every chat-capable vendor.
+
+        ``ConfigHandler.PROVIDER_MODELS`` carries per-vendor metadata
+        (label, api_key_field, ...) around the model list; the console's model
+        picker wants only the lists. Used as the base for the fallback card's
+        model lists, so a vendor without a catalog still offers its presets
+        while a catalogued one offers its catalog instead.
+        """
+        out = {}
+        for pid, meta in ConfigHandler.PROVIDER_MODELS.items():
+            models = (meta or {}).get("models")
+            out[pid] = list(models) if isinstance(models, (list, tuple)) else []
+        return out
+
+    @classmethod
+    def _chat_fallback_capability(cls, local_config: dict) -> dict:
+        """The fallback chain, tried in order after the primary model fails.
+
+        Deliberately separate from ``_chat_capability``: the primary model is
+        the one that answers, while this is a safety net that stays idle until
+        an outage. It is opt-in (``enabled`` defaults to false) and every link
+        needs both a provider and a model — a half-filled link is dropped so a
+        partially configured chain can never hijack a healthy setup.
+
+        The chain is ordered and unbounded: the console renders one editable
+        row per link and the runtime walks them front to back, so the number of
+        links the user saves *is* the number of backups a turn gets.
+        """
+        cfg = local_config.get("chat_fallback") or {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+        raw_chain = cfg.get("chain")
+        chain = []
+        if isinstance(raw_chain, list):
+            for item in raw_chain:
+                if not isinstance(item, dict):
+                    continue
+                chain.append({
+                    "provider": (item.get("provider") or "").strip(),
+                    "model": (item.get("model") or "").strip(),
+                })
+        elif isinstance(cfg, dict) and (cfg.get("provider") or cfg.get("model")):
+            # Pre-chain config: surface it as a one-link chain so the console
+            # shows what is configured instead of an empty list.
+            chain = [{
+                "provider": (cfg.get("provider") or "").strip(),
+                "model": (cfg.get("model") or "").strip(),
+            }]
+        # Same provider list as the primary chat card, so the dropdowns always
+        # offer identical choices (including expanded custom:<id>).
+        primary = cls._chat_capability(local_config)
+        # Same model lists too: start from the vendors' presets and let a
+        # catalog override them, which is what the primary card does. Building
+        # this from the presets alone would leave the fallback on a free-form
+        # model field for a vendor whose models the primary card can list.
+        custom_cards = cls._custom_provider_cards(local_config)
+        return {
+            "editable": True,
+            "enabled": bool(cfg.get("enabled", False)),
+            "providers": primary.get("providers", []),
+            # The model picker expects {provider_id: [models]}. PROVIDER_MODELS
+            # is richer ({provider_id: {label, models, ...}}), so reduce it to
+            # just the lists — handing over the raw dict makes the web console
+            # call .slice() on a mapping and throw.
+            "provider_models": cls._apply_catalog(
+                cls._chat_preset_models(), "text", custom_cards),
+            "chain": chain,
+            # Kept for older clients that still read a single backup model:
+            # link 1 of the chain, so a downgraded console does not show blank.
+            "current_provider": chain[0]["provider"] if chain else "",
+            "current_model": chain[0]["model"] if chain else "",
+            # Shown in the UI so it's obvious the fallback is inactive.
+            "primary_provider": primary.get("current_provider", ""),
+            "primary_model": primary.get("current_model", ""),
         }
 
     # Auto-fallback order for vision when no explicit model is pinned.
@@ -4102,7 +4587,7 @@ class ModelsHandler:
         ("doubao",    "ark_api_key",       const.DOUBAO_SEED_2_PRO),
         ("dashscope", "dashscope_api_key", const.QWEN37_PLUS),
         ("claudeAPI", "claude_api_key",    const.CLAUDE_SONNET_5),
-        ("gemini",    "gemini_api_key",    const.GEMINI_37_FLASH),
+        ("gemini",    "gemini_api_key",    const.GEMINI_38_FLASH),
         ("qianfan",   "qianfan_api_key",   const.ERNIE_45_TURBO_VL),
         ("zhipu",     "zhipu_ai_api_key",  const.GLM_5V_TURBO),
         ("minimax",   "minimax_api_key",   const.MINIMAX_TEXT_01),
@@ -4153,7 +4638,7 @@ class ModelsHandler:
         # 2. Main bot — only when it natively supports vision. We approximate
         #    "natively supports" by membership in _VISION_PROVIDER_MODELS,
         #    which is the same set vision.py's _DISCOVERABLE_MODELS covers
-        #    (minus the chat-only DeepSeek family).
+        #    (the DeepSeek family is included since V4 Flash vision).
         if main_provider in cls._VISION_PROVIDER_MODELS:
             hit = _try(main_provider, main_model)
             if hit:
@@ -4229,7 +4714,9 @@ class ModelsHandler:
             "fallback_provider": predicted["provider"],
             "fallback_model": predicted["model"],
             "providers": providers,
-            "provider_models": cls._VISION_PROVIDER_MODELS,
+            "provider_models": cls._apply_catalog(
+                cls._VISION_PROVIDER_MODELS, "vision", custom_cards
+            ),
         }
 
     @classmethod
@@ -4259,7 +4746,7 @@ class ModelsHandler:
             "suggested_provider": suggested,
             "current_model": (local_config.get("voice_to_text_model") or "") if explicit else "",
             "providers": providers,
-            "provider_models": cls._ASR_PROVIDER_MODELS,
+            "provider_models": cls._apply_catalog(cls._ASR_PROVIDER_MODELS, "asr", custom_cards),
         }
 
     @classmethod
@@ -4291,7 +4778,7 @@ class ModelsHandler:
             "current_model": (local_config.get("text_to_voice_model") or "") if ui_provider else "",
             "current_voice": (local_config.get("tts_voice_id") or "") if ui_provider else "",
             "providers": providers,
-            "provider_models": cls._TTS_PROVIDER_MODELS,
+            "provider_models": cls._apply_catalog(cls._TTS_PROVIDER_MODELS, "tts", custom_cards),
             "provider_voices": cls._TTS_PROVIDER_VOICES,
             "reply_mode": cls._tts_reply_mode(local_config),
         }
@@ -4348,7 +4835,7 @@ class ModelsHandler:
             "current_model": local_config.get("embedding_model", "") or "",
             "current_dim": int(local_config.get("embedding_dimensions") or 0) or None,
             "providers": providers,
-            "provider_models": cls._EMBEDDING_PROVIDER_MODELS,
+            "provider_models": cls._apply_catalog(cls._EMBEDDING_PROVIDER_MODELS, "embedding", custom_cards),
         }
 
     # Auto-fallback order for image generation. Mirrors the global priority
@@ -4358,12 +4845,12 @@ class ModelsHandler:
     # provider-card id to the script's per-provider DEFAULT_MODEL so the
     # hint matches what the runtime would actually request.
     _IMAGE_AUTO_ORDER = [
-        ("openai",    "gpt-image-2"),
+        ("openai",    "gpt-image-2.5-flare"),
         ("gemini",    "gemini-3.1-flash-image-preview"),  # nano-banana-2
         ("doubao",    "seedream-5.0-lite"),
         ("dashscope", "qwen-image-2.0"),
         ("minimax",   "image-01"),
-        ("linkai",    "gpt-image-2"),
+        ("linkai",    "gpt-image-2.5-flare"),
     ]
 
     @classmethod
@@ -4455,19 +4942,24 @@ class ModelsHandler:
             "fallback_provider": predicted["provider"],
             "fallback_model": predicted["model"],
             "providers": providers,
-            "provider_models": cls._IMAGE_PROVIDER_MODELS,
+            "provider_models": cls._apply_catalog(cls._IMAGE_PROVIDER_MODELS, "image", custom_cards),
             "runtime_active": True,
         }
 
     # Canonical search provider order. Mirrors PROVIDER_ORDER in
     # agent/tools/web_search/web_search.py — keep them in sync.
-    _SEARCH_PROVIDERS = ("bocha", "qianfan", "zhipu", "linkai")
+    _SEARCH_PROVIDERS = ("bocha", "qianfan", "zhipu", "linkai", "anysearch", "serply", "tavily", "searxng", "keenable")
 
     _SEARCH_PROVIDER_LABELS = {
         "bocha":   {"zh": "博查", "en": "Bocha"},
         "zhipu":   {"zh": "智谱", "en": "GLM"},
-        "qianfan": {"zh": "百度千帆", "en": "ERNIE"},
+        "qianfan": {"zh": "百度", "en": "ERNIE"},
         "linkai":  {"zh": "LinkAI", "en": "LinkAI"},
+        "anysearch": {"zh": "AnySearch", "en": "AnySearch"},
+        "serply":  {"zh": "Serply", "en": "Serply"},
+        "tavily":  {"zh": "Tavily", "en": "Tavily"},
+        "searxng": {"zh": "SearXNG", "en": "SearXNG"},
+        "keenable": {"zh": "Keenable", "en": "Keenable"},
     }
 
     @classmethod
@@ -4483,6 +4975,27 @@ class ModelsHandler:
             return local_config.get("qianfan_api_key") or os.environ.get("QIANFAN_API_KEY", "")
         if provider == "linkai":
             return local_config.get("linkai_api_key") or os.environ.get("LINKAI_API_KEY", "")
+        if provider == "anysearch":
+            tools_cfg = local_config.get("tools") or {}
+            block = tools_cfg.get("web_search") or {} if isinstance(tools_cfg, dict) else {}
+            return (block.get("anysearch_api_key") if isinstance(block, dict) else "") or os.environ.get(
+                "ANYSEARCH_API_KEY", "")
+        if provider == "serply":
+            tools_cfg = local_config.get("tools") or {}
+            block = tools_cfg.get("web_search") or {} if isinstance(tools_cfg, dict) else {}
+            return (block.get("serply_api_key") if isinstance(block, dict) else "") or os.environ.get(
+                "SERPLY_API_KEY", "")
+        if provider == "tavily":
+            tools_cfg = local_config.get("tools") or {}
+            block = tools_cfg.get("web_search") or {} if isinstance(tools_cfg, dict) else {}
+            return (block.get("tavily_api_key") if isinstance(block, dict) else "") or os.environ.get(
+                "TAVILY_API_KEY", "")
+        if provider == "keenable":
+            tools_cfg = local_config.get("tools") or {}
+            block = tools_cfg.get("web_search") or {} if isinstance(tools_cfg, dict) else {}
+            return (block.get("keenable_api_key") if isinstance(block, dict) else "") or os.environ.get(
+                "KEENABLE_API_KEY", "")
+        # searxng uses an instance URL, not an API key — handled in _search_capability
         return ""
 
     @classmethod
@@ -4496,11 +5009,24 @@ class ModelsHandler:
         if not isinstance(ws_cfg, dict):
             ws_cfg = {}
 
+        anonymous_on = bool(ws_cfg.get("anysearch_anonymous"))
+        keenable_anonymous_on = bool(ws_cfg.get("keenable_anonymous"))
+        searxng_url = (ws_cfg.get("searxng_url") or "").strip() if isinstance(ws_cfg, dict) else ""
         providers = []
         configured_ids = []
         for pid in cls._SEARCH_PROVIDERS:
-            ok = cls._is_real_key(cls._search_provider_key(pid, local_config))
-            raw_key = cls._search_provider_key(pid, local_config) if ok else ""
+            raw_key = cls._search_provider_key(pid, local_config)
+            if pid == "anysearch":
+                # AnySearch: real key, or an explicit anonymous opt-in.
+                ok = cls._is_real_key(raw_key) or anonymous_on
+            elif pid == "keenable":
+                # Keenable: real key, or an explicit anonymous opt-in.
+                ok = cls._is_real_key(raw_key) or keenable_anonymous_on
+            elif pid == "searxng":
+                # SearXNG: self-hosted, no auth — available when instance URL is set.
+                ok = bool(searxng_url)
+            else:
+                ok = cls._is_real_key(raw_key)
             providers.append({
                 "id": pid,
                 "label": cls._SEARCH_PROVIDER_LABELS.get(pid, pid),
@@ -4508,7 +5034,13 @@ class ModelsHandler:
                 # bocha owns its key under tools.web_search; the other three
                 # piggy-back on a model-vendor credential. Frontend uses
                 # this hint to decide which credential editor to surface.
-                "needs_dedicated_key": pid == "bocha",
+                # Lets the frontend badge "匿名/anonymous" only in anonymous mode.
+                "anonymous": pid in ("anysearch", "keenable") and ok and not raw_key,
+                "needs_dedicated_key": pid in ("bocha", "anysearch", "serply", "tavily", "keenable"),
+                "needs_url": pid == "searxng",
+                # SearXNG stores an instance URL (not a secret), so echo it back
+                # verbatim to prefill/edit; other providers mask their key.
+                "url_masked": searxng_url if pid == "searxng" else "",
                 "api_key_masked": ConfigHandler._mask_key(raw_key) if raw_key else "",
             })
             if ok:
@@ -4542,6 +5074,7 @@ class ModelsHandler:
     def _capabilities(cls, local_config: dict) -> dict:
         return {
             "chat":      cls._chat_capability(local_config),
+            "chat_fallback": cls._chat_fallback_capability(local_config),
             "vision":    cls._vision_capability(local_config),
             "asr":       cls._asr_capability(local_config),
             "tts":       cls._tts_capability(local_config),
@@ -4549,6 +5082,182 @@ class ModelsHandler:
             "image":     cls._image_capability(local_config),
             "search":    cls._search_capability(local_config),
         }
+
+    @classmethod
+    def _apply_catalog(cls, presets: dict, capability, custom_cards=None) -> dict:
+        """Layer per-provider catalog overlays onto a capability's model list.
+
+        A provider without any overlay keeps its presets untouched. When the
+        user has an overlay, the provider's effective list (preset base minus
+        tombstones, plus overrides) is filtered to `capability` ("text" for the
+        main chat model) so only models that can serve this role are offered."""
+        merged = dict(presets)
+        catalog_map = model_catalog.get_catalog_map()
+        hidden_map = model_catalog.get_hidden_map()
+        ids = [pid for pid in list(merged.keys()) + list(ConfigHandler.PROVIDER_MODELS.keys())
+               if pid != "custom"]
+        ids += [c["id"] for c in (custom_cards or [])]
+        for pid in dict.fromkeys(ids):  # dedupe, keep order
+            if not catalog_map.get(pid) and not hidden_map.get(pid):
+                continue  # no overlay: presets stand as-is
+            base_seed = [] if pid.startswith("custom:") else cls._preset_seed(pid)
+            effective = cls._merged_catalog(pid, base_seed, catalog_map, hidden_map)
+            merged[pid] = [
+                {"value": e["name"]} for e in effective
+                if capability is None or capability in (e.get("capabilities") or [])
+            ]
+        return merged
+
+    # Researched specs (context window / max output) for built-in preset
+    # models, from the vendors' official docs. Optional "capabilities" unions
+    # extra tags the preset lists don't reflect yet (e.g. native-multimodal
+    # models). Fields left off fall back to auto-detection.
+    _PRESET_MODEL_META = {
+        "deepseek-flash": {"capabilities": ["text", "vision"], "context_window": 1000000, "max_output_tokens": 393216},
+        "deepseek-v4-flash": {"context_window": 1000000, "max_output_tokens": 393216},
+        "deepseek-v4-pro": {"context_window": 1000000, "max_output_tokens": 393216},
+        "glm-5.3-flash": {"context_window": 1000000, "max_output_tokens": 131072},
+        "glm-5.3": {"context_window": 1000000, "max_output_tokens": 131072},
+        "glm-5.2": {"context_window": 1000000, "max_output_tokens": 131072},
+        "glm-5.1": {"context_window": 200000},
+        "glm-5-turbo": {"context_window": 200000},
+        "glm-5": {"context_window": 200000},
+        "glm-4.7": {"context_window": 200000},
+        "glm-5v-turbo": {"capabilities": ["text", "vision"]},
+        "qwen3.8-flash": {"context_window": 1000000},
+        "qwen3.8-max": {"context_window": 1000000},
+        "qwen3.7-plus": {"context_window": 1000000},
+        "qwen3.7-max": {"context_window": 1000000},
+        "qwen3.6-plus": {"context_window": 128000},
+        "kimi-k3": {"capabilities": ["text", "vision"], "context_window": 1048576},
+        "kimi-k2.7-code": {"context_window": 262144},
+        "kimi-k2.7-code-highspeed": {"context_window": 262144},
+        "kimi-k2.6": {"context_window": 262144},
+        "kimi-k2.5": {"context_window": 262144},
+        "doubao-seed-2-1-pro-260628": {"context_window": 256000, "max_output_tokens": 32000},
+        "doubao-seed-2-1-turbo-260628": {"context_window": 256000, "max_output_tokens": 32000},
+        "doubao-seed-2-0-pro-260215": {"context_window": 256000},
+        "doubao-seed-2-0-code-preview-260215": {"context_window": 256000},
+        "ernie-5.1": {"context_window": 128000},
+        "ernie-5.0": {"capabilities": ["text", "vision"], "context_window": 128000},
+        "ernie-x1.1": {"context_window": 64000},
+        "ernie-4.5-turbo-128k": {"context_window": 128000, "max_output_tokens": 16000},
+        "ernie-4.5-turbo-32k": {"context_window": 32000, "max_output_tokens": 16000},
+        "ernie-4.5-turbo-vl": {"capabilities": ["text", "vision"], "context_window": 128000, "max_output_tokens": 16000},
+        "MiniMax-M3": {"capabilities": ["text", "vision"], "context_window": 1000000, "max_output_tokens": 512000},
+        "MiniMax-M2.7": {"capabilities": ["text", "vision"], "context_window": 204800, "max_output_tokens": 196608},
+        "MiniMax-M2.7-highspeed": {"capabilities": ["text", "vision"], "context_window": 204800, "max_output_tokens": 196608},
+        "MiniMax-Text-01": {"context_window": 1000000},
+        "mimo-v2.5-pro": {"context_window": 1000000, "max_output_tokens": 131072},
+        "mimo-v2.5": {"context_window": 1000000, "max_output_tokens": 131072},
+        "gpt-5.6-luna": {"context_window": 1050000, "max_output_tokens": 128000},
+        "gpt-5.6-terra": {"context_window": 1050000, "max_output_tokens": 128000},
+        "gpt-5.6-sol": {"context_window": 1050000, "max_output_tokens": 128000},
+        "gpt-5.5": {"context_window": 1050000, "max_output_tokens": 128000},
+        "gpt-5.4": {"context_window": 1050000, "max_output_tokens": 128000},
+        "gpt-5.4-mini": {"context_window": 1050000, "max_output_tokens": 128000},
+        "gpt-5.4-nano": {"context_window": 1050000, "max_output_tokens": 128000},
+        "gpt-5": {"context_window": 400000, "max_output_tokens": 128000},
+        "gpt-4.1": {"context_window": 1047576, "max_output_tokens": 32768},
+        "gpt-4.1-mini": {"context_window": 1047576, "max_output_tokens": 32768},
+        "gpt-4o": {"context_window": 128000, "max_output_tokens": 16384},
+        "claude-opus-5": {"context_window": 1000000, "max_output_tokens": 128000},
+        "claude-sonnet-5": {"context_window": 1000000, "max_output_tokens": 128000},
+        "claude-fable-5": {"context_window": 1000000, "max_output_tokens": 128000},
+        "claude-opus-4-8": {"context_window": 200000, "max_output_tokens": 64000},
+        "claude-opus-4-7": {"context_window": 200000, "max_output_tokens": 64000},
+        "claude-sonnet-4-6": {"context_window": 200000, "max_output_tokens": 64000},
+        "claude-opus-4-6": {"context_window": 200000, "max_output_tokens": 64000},
+        "gemini-3.7-flash": {"context_window": 1048576, "max_output_tokens": 65536},
+        "gemini-3.6-flash": {"context_window": 1048576, "max_output_tokens": 65536},
+        "gemini-3.5-flash": {"context_window": 1048576, "max_output_tokens": 65536},
+        "gemini-3.1-flash-lite-preview": {"context_window": 1048576, "max_output_tokens": 65536},
+        "gemini-3.1-pro-preview": {"context_window": 1048576, "max_output_tokens": 65536},
+        "gemini-3-flash-preview": {"context_window": 1048576, "max_output_tokens": 65536},
+    }
+
+    @classmethod
+    def _preset_seed(cls, pid: str) -> List[dict]:
+        """Type-tagged catalog entries for a built-in vendor's preset models.
+
+        Membership in the per-capability preset lists IS the type: the chat
+        list -> "text", the vision list -> "vision", etc. Tags merge across
+        lists (gpt-4o -> text+vision, mimo-v2.5 -> text+vision+tts), so the
+        catalog editor seeds each preset with its real capabilities."""
+        merged: "OrderedDict[str, dict]" = OrderedDict()
+
+        def add(name, cap):
+            if not name:
+                return
+            entry = merged.setdefault(name, {"name": name, "capabilities": []})
+            if cap not in entry["capabilities"]:
+                entry["capabilities"].append(cap)
+
+        for m in ConfigHandler.PROVIDER_MODELS.get(pid, {}).get("models") or []:
+            add(m if isinstance(m, str) else m.get("value"), "text")
+        tables = (
+            ("vision", cls._VISION_PROVIDER_MODELS),
+            ("asr", cls._ASR_PROVIDER_MODELS),
+            ("tts", cls._TTS_PROVIDER_MODELS),
+            ("embedding", cls._EMBEDDING_PROVIDER_MODELS),
+            ("image", cls._IMAGE_PROVIDER_MODELS),
+        )
+        for cap, table in tables:
+            for m in table.get(pid) or []:
+                add(m if isinstance(m, str) else m.get("value"), cap)
+        from agent.protocol.agent import resolve_family_spec
+        for entry in merged.values():
+            extra = cls._PRESET_MODEL_META.get(entry["name"]) or {}
+            for cap in extra.get("capabilities", []):
+                if cap not in entry["capabilities"]:
+                    entry["capabilities"].append(cap)
+            # Explicit researched specs win; otherwise fall back to the runtime
+            # family table so the editor shows the same budget that actually
+            # takes effect (e.g. gpt-6-astra -> 1M/128K) instead of a blank.
+            fam_window, fam_output = resolve_family_spec(entry["name"])
+            window = extra.get("context_window") or fam_window
+            output = extra.get("max_output_tokens") or fam_output
+            if window:
+                entry["context_window"] = window
+            if output:
+                entry["max_output_tokens"] = output
+        return list(merged.values())
+
+    @classmethod
+    def _merged_catalog(cls, pid, base_seed=None, catalog_map=None, hidden_map=None) -> List[dict]:
+        """The provider's effective model list: preset base, minus removals,
+        with user overrides layered on.
+
+        The catalog is an overlay, not a replacement — a preset the user never
+        touched stays on the list (and keeps following the code-side metadata),
+        an overridden preset takes the user's values, a tombstoned preset drops
+        out, and an override with a new name is appended.
+
+        ``base_seed`` is the preset base; for a built-in vendor it defaults to
+        ``_preset_seed(pid)``, and a custom provider passes ``[]`` (no presets,
+        so its overrides are simply its whole list)."""
+        if catalog_map is None:
+            catalog_map = model_catalog.get_catalog_map()
+        if hidden_map is None:
+            hidden_map = model_catalog.get_hidden_map()
+        overrides = catalog_map.get(pid) or []
+        hidden = set(hidden_map.get(pid) or [])
+        if base_seed is None:
+            base_seed = [] if pid == "custom" else cls._preset_seed(pid)
+
+        override_by_name = {e["name"]: e for e in overrides}
+        merged: "OrderedDict[str, dict]" = OrderedDict()
+        for entry in base_seed:
+            name = entry.get("name")
+            if not name or name in hidden:
+                continue
+            merged[name] = override_by_name.get(name, entry)
+        # Appended models (overrides the presets don't carry), order preserved.
+        for entry in overrides:
+            name = entry.get("name")
+            if name and name not in merged:
+                merged[name] = entry
+        return list(merged.values())
 
     def GET(self):
         _require_auth()
@@ -4582,6 +5291,8 @@ class ModelsHandler:
                 return self._handle_set_active_custom_provider(data)
             if action == "set_capability":
                 return self._handle_set_capability(data)
+            if action == "save_catalog":
+                return self._handle_save_catalog(data)
             if action == "set_voice_reply_mode":
                 return self._handle_set_voice_reply_mode(data)
             if action == "set_search_credential":
@@ -4800,8 +5511,15 @@ class ModelsHandler:
             existing["name"] = name
             if api_base:
                 existing["api_base"] = api_base
-            if api_key:
-                existing["api_key"] = api_key
+            # The API key is optional for custom providers. Distinguish "field
+            # omitted => keep existing" from "explicit empty => clear it" by
+            # presence of the key, mirroring the model handling below. A masked,
+            # untouched value is omitted by the UI, so it never reaches here.
+            if "api_key" in data:
+                if api_key:
+                    existing["api_key"] = api_key
+                else:
+                    existing.pop("api_key", None)
             # Only touch model when explicitly provided in the payload; an
             # explicit empty string clears it, a missing key keeps it (the
             # UI modal no longer sends model, so manual config survives edits).
@@ -4853,6 +5571,7 @@ class ModelsHandler:
                 new_bot_type = "custom"  # revert to legacy
 
         self._persist_custom_providers(remaining, new_bot_type)
+        model_catalog.remove_catalog(f"custom:{provider_id}")
         logger.info(f"[ModelsHandler] custom provider id={provider_id} deleted")
         return json.dumps({"status": "success", "id": provider_id})
 
@@ -4872,6 +5591,23 @@ class ModelsHandler:
         logger.info(f"[ModelsHandler] active custom provider set to id={provider_id}")
         return json.dumps({"status": "success", "active_id": provider_id})
 
+    def _handle_save_catalog(self, data: dict) -> str:
+        """Replace one provider's model catalog wholesale (empty list -> back
+        to presets). Metadata-only: no bridge reset needed, the budget and
+        max_output_tokens resolution read the catalog per call."""
+        provider_id = (data.get("provider_id") or "").strip()
+        if not provider_id:
+            return json.dumps({"status": "error", "message": "provider_id is required"})
+        if provider_id not in ConfigHandler.PROVIDER_MODELS and not provider_id.startswith("custom:"):
+            return json.dumps({"status": "error", "message": f"unknown provider: {provider_id}"})
+        try:
+            entries = model_catalog.save_catalog(
+                provider_id, data.get("models"), data.get("hidden"))
+        except ValueError as e:
+            return json.dumps({"status": "error", "message": str(e)})
+        logger.info(f"[ModelsHandler] catalog saved: provider={provider_id} models={len(entries)}")
+        return json.dumps({"status": "success", "provider_id": provider_id, "models": entries})
+
     def _handle_set_capability(self, data: dict) -> str:
         capability = (data.get("capability") or "").strip()
         provider_id = (data.get("provider_id") or "").strip()
@@ -4879,6 +5615,13 @@ class ModelsHandler:
 
         if capability == "chat":
             return self._set_chat(provider_id, model)
+        if capability == "chat_fallback":
+            return self._set_chat_fallback(
+                provider_id,
+                model,
+                bool(data.get("enabled")),
+                chain=data.get("chain"),
+            )
         if capability == "vision":
             return self._set_vision(provider_id, model)
         if capability == "asr":
@@ -5021,6 +5764,110 @@ class ModelsHandler:
         logger.info(f"[ModelsHandler] chat updated: {applied}")
         self._reset_bridge()
         return json.dumps({"status": "success", "applied": applied})
+
+    def _normalized_custom_provider(self, provider_id: str):
+        """Resolve a ``custom:<id>`` provider id, or None for a builtin one.
+
+        Returns ``(provider_entry, error_json)``; exactly one is set. Kept
+        separate so a chain can reuse it per link instead of duplicating the
+        lookup.
+        """
+        if not provider_id:
+            return None, None
+        if provider_id.startswith("custom:"):
+            from models.custom_provider import parse_custom_bot_type
+            _, custom_id = parse_custom_bot_type(provider_id)
+            providers = self._normalize_custom_providers(conf().get("custom_providers"))
+            custom_provider = next((p for p in providers if p.get("id") == custom_id), None)
+            if custom_provider is None:
+                return None, json.dumps({"status": "error",
+                                         "message": f"unknown custom provider id: {custom_id}"})
+            return custom_provider, None
+        if provider_id not in ConfigHandler.PROVIDER_MODELS:
+            return None, json.dumps({"status": "error",
+                                     "message": f"unknown provider: {provider_id}"})
+        return None, None
+
+    def _set_chat_fallback(self, provider_id: str, model: str, enabled: bool,
+                           chain=None) -> str:
+        """Persist the fallback chain under ``chat_fallback``.
+
+        ``chain`` is an ordered list of ``{"provider", "model"}`` links, tried
+        front to back after the primary model fails a turn for good. It is
+        unbounded: however many links are saved is how many backups a turn
+        gets, so there is no cap to configure.
+
+        For callers still sending the single-model shape (``provider_id`` /
+        ``model``), the pair is folded into a one-link chain, so an older
+        client keeps working against the new config.
+
+        Validation mirrors ``_set_chat`` (custom:<id> ids included), with two
+        differences: the chain is opt-in via ``enabled``, and turning it on
+        requires at least one fully specified link so a half-configured
+        fallback can never hijack a healthy primary model. Individual links
+        that are incomplete or repeat the primary model are dropped rather
+        than rejected — one bad row should not block saving the good ones.
+        """
+        links = []
+        if chain is not None:
+            if not isinstance(chain, list):
+                return json.dumps({"status": "error", "message": "chain must be a list"})
+            raw_links = chain
+        else:
+            raw_links = [{"provider": provider_id or "", "model": model or ""}]
+
+        for item in raw_links:
+            if not isinstance(item, dict):
+                continue
+            link_provider = (item.get("provider") or "").strip()
+            link_model = (item.get("model") or "").strip()
+            if not link_provider and not link_model:
+                continue  # an empty row the user never filled in
+            custom_provider, err = self._normalized_custom_provider(link_provider)
+            if err:
+                return err
+            # Fall back to the custom provider's default model when none given.
+            if not link_model and custom_provider:
+                link_model = custom_provider.get("model") or ""
+            if not link_provider or not link_model:
+                continue  # half a link routes nowhere
+            links.append({"provider": link_provider, "model": link_model})
+
+        # Enabling needs at least one usable link; disabling is always allowed
+        # (it is the safe direction, and lets a user clear a broken entry).
+        if enabled and not links:
+            return json.dumps({
+                "status": "error",
+                "message": "at least one provider/model pair is required to enable the fallback",
+            })
+
+        local_config = conf()
+        file_cfg = self._read_file_config()
+        payload = {
+            "enabled": bool(enabled),
+            "chain": links,
+        }
+        # Written as a whole so a stale key from an older shape can't survive.
+        local_config["chat_fallback"] = dict(payload)
+        file_cfg["chat_fallback"] = dict(payload)
+        self._write_file_config(file_cfg)
+
+        # Turning the fallback off must take effect now, not on the next run
+        # boundary. A model that had already switched to the backup keeps its
+        # engaged fallback state on the long-lived AgentLLMModel, so clear it
+        # across all live agents — otherwise disabling the fallback appears to
+        # do nothing and the backup model keeps answering.
+        if not enabled:
+            try:
+                from bridge.bridge import Bridge
+                Bridge().get_agent_bridge().clear_all_model_fallbacks()
+            except Exception as clear_err:
+                logger.warning(
+                    f"[ModelsHandler] failed to clear engaged fallbacks: {clear_err}"
+                )
+
+        logger.info(f"[ModelsHandler] chat fallback updated: {payload}")
+        return json.dumps({"status": "success", "applied": payload})
 
     def _set_vision(self, provider_id: str, model: str) -> str:
         # Source of truth: tools.vision.{provider, model}. The provider field
@@ -5231,20 +6078,59 @@ class ModelsHandler:
         return json.dumps({"status": "success", "strategy": strategy, "provider": provider})
 
     def _handle_set_search_credential(self, data: dict) -> str:
-        """Persist the bocha API key under tools.web_search.bocha_api_key.
+        """Persist a dedicated search-provider key under tools.web_search.
 
-        The other three providers (zhipu/qianfan/linkai) reuse model-vendor
-        credentials, so they go through set_provider with the standard
-        model-vendor flow.
+        bocha, anysearch, serply and keenable own their keys here; anysearch
+        and keenable also take an ``anonymous`` flag that, with an empty key,
+        turns on their keyless tier (``<provider>_anonymous``). zhipu/qianfan/
+        linkai reuse model-vendor credentials and go through set_provider
+        instead.
         """
-        api_key = (data.get("api_key") or "").strip() if isinstance(data.get("api_key"), str) else ""
-        local_config = conf()
-        file_cfg = self._read_file_config()
-        self._set_nested_namespace_value(local_config, "tools", "web_search", "bocha_api_key", api_key)
-        self._set_nested_namespace_value(file_cfg,     "tools", "web_search", "bocha_api_key", api_key)
-        self._write_file_config(file_cfg)
-        logger.info(f"[ModelsHandler] search credential set: bocha_api_key={'***' if api_key else ''}")
-        return json.dumps({"status": "success", "provider": "bocha"})
+        provider = (data.get("provider") or "bocha").strip().lower()
+        if provider not in ("bocha", "anysearch", "serply", "tavily", "searxng", "keenable"):
+            return json.dumps({"status": "error", "message": f"unsupported search provider: {provider!r}"})
+
+        if provider in ("anysearch", "keenable"):
+            anonymous = data.get("anonymous", False)
+
+            api_key = (data.get("api_key") or "").strip() if isinstance(data.get("api_key"), str) else ""
+            key_field = f"{provider}_api_key"
+            anonymous_field = f"{provider}_anonymous"
+            anonymous_on = bool(anonymous and not api_key)
+
+            local_config = conf()
+            file_cfg = self._read_file_config()
+
+            self._set_nested_namespace_value(local_config, "tools", "web_search", key_field, api_key)
+            self._set_nested_namespace_value(file_cfg, "tools", "web_search", key_field, api_key)
+
+            self._set_nested_namespace_value(local_config, "tools", "web_search", anonymous_field, anonymous_on)
+            self._set_nested_namespace_value(file_cfg, "tools", "web_search", anonymous_field, anonymous_on)
+
+            self._write_file_config(file_cfg)
+            logger.info(
+                f"[ModelsHandler] search credential set: {key_field}={'***' if api_key else ''}, {anonymous_field}={anonymous_on}")
+            return json.dumps({"status": "success", "provider": provider})
+        if provider == "searxng":
+            # SearXNG uses an instance URL, not an API key.
+            instance_url = (data.get("url") or "").strip() if isinstance(data.get("url"), str) else ""
+            local_config = conf()
+            file_cfg = self._read_file_config()
+            self._set_nested_namespace_value(local_config, "tools", "web_search", "searxng_url", instance_url)
+            self._set_nested_namespace_value(file_cfg, "tools", "web_search", "searxng_url", instance_url)
+            self._write_file_config(file_cfg)
+            logger.info(f"[ModelsHandler] search credential set: searxng_url={'***' if instance_url else ''}")
+            return json.dumps({"status": "success", "provider": provider})
+        else:
+            key_field = f"{provider}_api_key"
+            api_key = (data.get("api_key") or "").strip() if isinstance(data.get("api_key"), str) else ""
+            local_config = conf()
+            file_cfg = self._read_file_config()
+            self._set_nested_namespace_value(local_config, "tools", "web_search", key_field, api_key)
+            self._set_nested_namespace_value(file_cfg, "tools", "web_search", key_field, api_key)
+            self._write_file_config(file_cfg)
+            logger.info(f"[ModelsHandler] search credential set: {key_field}={'***' if api_key else ''}")
+            return json.dumps({"status": "success", "provider": provider})
 
     @staticmethod
     def _reset_bridge() -> None:
@@ -5389,9 +6275,7 @@ class ChannelsHandler:
     @staticmethod
     def _get_weixin_login_status() -> str:
         try:
-            import sys
-            app_module = sys.modules.get('__main__') or sys.modules.get('app')
-            mgr = getattr(app_module, '_channel_mgr', None) if app_module else None
+            mgr = _live_channel_manager()
             if mgr:
                 ch = mgr.get_channel("weixin")
                 if ch and hasattr(ch, 'login_status'):
@@ -5417,6 +6301,84 @@ class ChannelsHandler:
     @classmethod
     def _active_channel_set(cls) -> set:
         return set(cls._parse_channel_list(conf().get("channel_type", "")))
+
+    @staticmethod
+    def _multi_agent_mode() -> bool:
+        """True once the install has crossed into multi-Agent territory.
+
+        The team.json file only exists after a second Agent (or channel
+        instance) is created; until then everything lives in config.json and the
+        channels view stays single-instance, exactly as a legacy install expects.
+        """
+        from agent import team
+        return team.team_file(conf()).exists()
+
+    @classmethod
+    def _channel_instances_view(cls) -> list:
+        """Per-instance channel cards for every multi-instance-ready type.
+
+        Expands ``channel_instances`` into one card each, carrying instance_id,
+        the bound agent_id and masked credentials, so the console can show and
+        edit each bot independently. Covers all MULTI_INSTANCE_READY types
+        (feishu, dingtalk, qq, telegram, slack, discord), not just feishu.
+        """
+        from common import i18n
+        from channel.channel_instances import (
+            resolve_channel_instances,
+            MULTI_INSTANCE_READY,
+        )
+        from agent import team
+
+        settings = team.resolve(conf())
+        is_hant = i18n.get_language() == i18n.ZH_HANT
+        out = []
+        for inst in resolve_channel_instances(settings):
+            if inst.channel_type not in MULTI_INSTANCE_READY:
+                continue
+            ch_def = cls.CHANNEL_DEFS.get(inst.channel_type)
+            if not ch_def:
+                continue
+            fields_out = []
+            for f in ch_def["fields"]:
+                raw_val = (inst.credentials or {}).get(f["key"], "")
+                if f["type"] == "secret" and raw_val:
+                    display_val = cls._mask_secret(str(raw_val))
+                else:
+                    display_val = raw_val
+                label_val = f["label"]
+                if is_hant and isinstance(label_val, str):
+                    label_val = i18n.to_traditional(label_val)
+                elif is_hant and isinstance(label_val, dict):
+                    label_val = label_val.copy()
+                    label_val["zh-Hant"] = i18n.to_traditional(label_val.get("zh", ""))
+                fields_out.append({
+                    "key": f["key"],
+                    "label": label_val,
+                    "type": f["type"],
+                    "value": display_val,
+                    "default": f.get("default", ""),
+                })
+            label_val = ch_def["label"]
+            if is_hant and isinstance(label_val, str):
+                label_val = i18n.to_traditional(label_val)
+            elif is_hant and isinstance(label_val, dict):
+                label_val = label_val.copy()
+                label_val["zh-Hant"] = i18n.to_traditional(label_val.get("zh", ""))
+            out.append({
+                "name": inst.channel_type,
+                "instance_id": inst.instance_id,
+                "channel_type": inst.channel_type,
+                "agent_id": inst.agent_id or "",
+                # User-editable label; empty falls back client-side to the id.
+                "instance_name": inst.name or "",
+                "members": list(inst.members or []),
+                "label": label_val,
+                "icon": ch_def["icon"],
+                "color": ch_def["color"],
+                "active": True,
+                "fields": fields_out,
+            })
+        return out
 
     def GET(self):
         _require_auth()
@@ -5474,7 +6436,20 @@ class ChannelsHandler:
                 if ch_name == "weixin" and ch_name in active_channels:
                     ch_info["login_status"] = self._get_weixin_login_status()
                 channels.append(ch_info)
-            return json.dumps({"status": "success", "channels": channels}, ensure_ascii=False)
+
+            from channel.channel_instances import MULTI_INSTANCE_READY
+            multi_agent = self._multi_agent_mode()
+            payload = {
+                "status": "success",
+                "channels": channels,
+                "multi_agent": multi_agent,
+                "multi_instance_types": sorted(MULTI_INSTANCE_READY),
+            }
+            # In multi-Agent mode the multi-instance-ready types (feishu) render
+            # one card per channel_instances record instead of one per type.
+            if multi_agent:
+                payload["instances"] = self._channel_instances_view()
+            return json.dumps(payload, ensure_ascii=False)
         except Exception as e:
             logger.error(f"[WebChannel] Channels API error: {e}")
             return json.dumps({"status": "error", "message": str(e)})
@@ -5492,6 +6467,32 @@ class ChannelsHandler:
 
             if channel_name not in self.CHANNEL_DEFS:
                 return json.dumps({"status": "error", "message": f"unknown channel: {channel_name}"})
+
+            # Multi-Agent + a multi-instance-ready type (feishu) manages each bot
+            # as its own channel_instances record in team.json rather than the
+            # legacy flat config.json path. instance_id empty on connect means
+            # "create a new instance".
+            from channel.channel_instances import MULTI_INSTANCE_READY
+            instance_id = (body.get("instance_id") or "").strip()
+            # A multi-instance-ready type (feishu) is only an *instance* when it
+            # carries an instance_id (connect with an empty id creates one). But
+            # the same type can still be active the legacy way — enabled in
+            # config.json's channel_type before this install went multi-Agent —
+            # in which case its card has no instance_id. Disconnect/rename on
+            # such a card must fall through to the legacy per-type path, or it
+            # would be rejected ("instance_id is required") and never removed.
+            is_instance_op = action in ("save", "connect") or bool(instance_id)
+            if self._multi_agent_mode() and channel_name in MULTI_INSTANCE_READY and is_instance_op:
+                if action == "save":
+                    return self._handle_instance_save(channel_name, instance_id, body.get("config", {}))
+                elif action == "connect":
+                    return self._handle_instance_connect(channel_name, instance_id, body.get("config", {}))
+                elif action == "disconnect":
+                    return self._handle_instance_disconnect(channel_name, instance_id)
+                elif action == "rename":
+                    return self._handle_instance_rename(channel_name, instance_id, body.get("name", ""))
+                else:
+                    return json.dumps({"status": "error", "message": f"unknown action: {action}"})
 
             if action == "save":
                 return self._handle_save(channel_name, body.get("config", {}))
@@ -5512,6 +6513,11 @@ class ChannelsHandler:
 
         local_config = conf()
         applied = {}
+        # Track which applied keys actually changed value, so a save that leaves
+        # every credential untouched (e.g. the user re-saved the form, or only
+        # an unrelated setting moved) does not needlessly tear down and
+        # reconnect a live channel.
+        changed = {}
         for key, value in updates.items():
             if key not in valid_keys:
                 continue
@@ -5524,6 +6530,8 @@ class ChannelsHandler:
                     value = int(value)
                 elif field_def["type"] == "bool":
                     value = bool(value)
+            if local_config.get(key) != value:
+                changed[key] = value
             local_config[key] = value
             applied[key] = value
 
@@ -5536,16 +6544,19 @@ class ChannelsHandler:
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(file_cfg, f, indent=4, ensure_ascii=False)
 
-        logger.info(f"[WebChannel] Channel '{channel_name}' config updated: {list(applied.keys())}")
+        logger.info(
+            f"[WebChannel] Channel '{channel_name}' config saved: {list(applied.keys())}, "
+            f"changed: {list(changed.keys())}"
+        )
 
+        # Only a real change to this channel's config warrants a restart. An
+        # idempotent save must not interrupt a connected channel.
         should_restart = False
         active_channels = self._active_channel_set()
-        if channel_name in active_channels:
+        if channel_name in active_channels and changed:
             should_restart = True
             try:
-                import sys
-                app_module = sys.modules.get('__main__') or sys.modules.get('app')
-                mgr = getattr(app_module, '_channel_mgr', None) if app_module else None
+                mgr = _live_channel_manager()
                 if mgr:
                     threading.Thread(
                         target=mgr.restart,
@@ -5620,7 +6631,7 @@ class ChannelsHandler:
                 import sys
                 app_module = sys.modules.get('__main__') or sys.modules.get('app')
                 clear_fn = getattr(app_module, '_clear_singleton_cache', None) if app_module else None
-                mgr = getattr(app_module, '_channel_mgr', None) if app_module else None
+                mgr = _live_channel_manager()
                 if mgr is None:
                     logger.warning(f"[WebChannel] ChannelManager not available, cannot start '{channel_name}'")
                     return
@@ -5668,7 +6679,7 @@ class ChannelsHandler:
             try:
                 import sys
                 app_module = sys.modules.get('__main__') or sys.modules.get('app')
-                mgr = getattr(app_module, '_channel_mgr', None) if app_module else None
+                mgr = _live_channel_manager()
                 clear_fn = getattr(app_module, '_clear_singleton_cache', None) if app_module else None
                 if mgr:
                     mgr.stop(channel_name)
@@ -5688,6 +6699,226 @@ class ChannelsHandler:
             "status": "success",
             "channel_type": new_channel_type,
         }, ensure_ascii=False)
+
+    # ------------------------------------------------------------------
+    # Multi-instance channel management (team.json driven, e.g. feishu)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _channel_mgr():
+        return _live_channel_manager()
+
+    def _clean_credentials(self, channel_name: str, updates: dict) -> dict:
+        """Keep only real, unmasked credential values for this channel type."""
+        ch_def = self.CHANNEL_DEFS[channel_name]
+        valid_keys = {f["key"] for f in ch_def["fields"]}
+        secret_keys = {f["key"] for f in ch_def["fields"] if f["type"] == "secret"}
+        creds = {}
+        for key, value in (updates or {}).items():
+            if key not in valid_keys:
+                continue
+            if key in secret_keys:
+                # Skip empty or still-masked secrets so a save that leaves the
+                # secret untouched does not overwrite it with the mask.
+                if not value or (len(str(value)) > 8 and "*" * 4 in str(value)):
+                    continue
+            creds[key] = value
+        return creds
+
+    def _handle_instance_connect(self, channel_name: str, instance_id: str, updates: dict):
+        """Create (empty id) or reconnect a channel instance, stored in team.json."""
+        from channel.channel_instances import upsert_instance
+
+        creds = self._clean_credentials(channel_name, updates)
+        # Weixin scans its token during the QR flow (before the instance exists),
+        # which lands in the global config. Fold it into this instance's own
+        # credentials so the instance is self-contained: it stays logged in
+        # across restarts and never depends on the transient global value.
+        if channel_name == "weixin" and not creds.get("weixin_token"):
+            token = conf().get("weixin_token", "")
+            if token:
+                creds["weixin_token"] = token
+                base_url = conf().get("weixin_base_url", "")
+                if base_url:
+                    creds["weixin_base_url"] = base_url
+                # Consume the transient QR token so the *next* Weixin instance
+                # created (a different account) does not inherit this one's
+                # token from the global config.
+                conf()["weixin_token"] = ""
+        inst = upsert_instance(
+            conf(),
+            channel_type=channel_name,
+            instance_id=instance_id,
+            credentials=creds,
+        )
+
+        downloading = False
+        if channel_name == "feishu":
+            try:
+                from channel.feishu import lark_install
+                downloading = lark_install.needs_download()
+            except Exception as e:
+                logger.warning(f"[WebChannel] Could not check Feishu SDK state: {e}")
+
+        def _do_start():
+            try:
+                mgr = self._channel_mgr()
+                if mgr is None:
+                    logger.warning(
+                        f"[WebChannel] ChannelManager unavailable, cannot start '{inst.instance_id}'"
+                    )
+                    return
+                mgr.add_channel(inst)
+                logger.info(f"[WebChannel] Channel instance '{inst.instance_id}' start completed")
+            except Exception as e:
+                logger.error(
+                    f"[WebChannel] Failed to start channel instance '{inst.instance_id}': {e}",
+                    exc_info=True,
+                )
+
+        threading.Thread(target=_do_start, daemon=True).start()
+        return json.dumps({
+            "status": "success",
+            "instance_id": inst.instance_id,
+            "downloading": downloading,
+        }, ensure_ascii=False)
+
+    def _handle_instance_save(self, channel_name: str, instance_id: str, updates: dict):
+        """Update one instance's credentials in team.json and restart it."""
+        from channel.channel_instances import get_instance, upsert_instance
+
+        if not instance_id:
+            return json.dumps({"status": "error", "message": "instance_id is required"})
+        before = get_instance(conf(), instance_id)
+        creds = self._clean_credentials(channel_name, updates)
+        inst = upsert_instance(
+            conf(),
+            channel_type=channel_name,
+            instance_id=instance_id,
+            credentials=creds,
+        )
+        # Only restart when a credential actually changed, so re-saving an
+        # unchanged form does not tear down a live connection.
+        changed = not before or (dict(before.credentials or {}) != dict(inst.credentials or {}))
+        if changed:
+            def _do_restart():
+                try:
+                    mgr = self._channel_mgr()
+                    if mgr is None:
+                        return
+                    mgr.restart(inst)
+                except Exception as e:
+                    logger.error(
+                        f"[WebChannel] Failed to restart instance '{inst.instance_id}': {e}",
+                        exc_info=True,
+                    )
+            threading.Thread(target=_do_restart, daemon=True).start()
+        logger.info(
+            f"[WebChannel] Channel instance '{inst.instance_id}' saved, "
+            f"restart={'yes' if changed else 'no'}"
+        )
+        return json.dumps({"status": "success", "instance_id": inst.instance_id}, ensure_ascii=False)
+
+    def _handle_instance_rename(self, channel_name: str, instance_id: str, name):
+        """Set an instance's friendly label. Does not touch credentials or the
+        live connection, so renaming never interrupts a running channel."""
+        from channel.channel_instances import upsert_instance
+
+        if not instance_id:
+            return json.dumps({"status": "error", "message": "instance_id is required"})
+        inst = upsert_instance(
+            conf(),
+            channel_type=channel_name,
+            instance_id=instance_id,
+            name=str(name or ""),
+        )
+        logger.info(f"[WebChannel] Channel instance '{inst.instance_id}' renamed to '{inst.name}'")
+        return json.dumps(
+            {"status": "success", "instance_id": inst.instance_id, "name": inst.name},
+            ensure_ascii=False,
+        )
+
+    def _handle_instance_disconnect(self, channel_name: str, instance_id: str):
+        """Remove one instance record from team.json and stop its channel."""
+        from channel.channel_instances import remove_instance, read_raw_instances
+
+        if not instance_id:
+            return json.dumps({"status": "error", "message": "instance_id is required"})
+
+        # A legacy channel (enabled the old way via config.json's channel_type)
+        # is folded into channel_instances on every team.json write by
+        # bootstrap_legacy_instances. Just dropping the record isn't enough:
+        # remove_instance itself writes team.json, whose bootstrap immediately
+        # re-materializes the record straight from channel_type — so the card
+        # comes right back. Prune the type from channel_type *first* (when this
+        # is the last instance of it), so by the time remove_instance writes,
+        # the bootstrap has nothing to recreate.
+        remaining = [
+            r for r in read_raw_instances(conf())
+            if str(r.get("instance_id") or "").strip() != instance_id
+        ]
+        self._prune_legacy_channel_type(channel_name, remaining)
+
+        remove_instance(conf(), instance_id)
+
+        def _do_stop():
+            try:
+                mgr = self._channel_mgr()
+                if mgr is None:
+                    return
+                remover = getattr(mgr, "remove_channel", None)
+                if callable(remover):
+                    remover(instance_id)
+                else:
+                    mgr.stop(instance_id)
+                logger.info(f"[WebChannel] Channel instance '{instance_id}' disconnected")
+            except Exception as e:
+                logger.warning(
+                    f"[WebChannel] Failed to stop instance '{instance_id}': {e}",
+                    exc_info=True,
+                )
+
+        threading.Thread(target=_do_stop, daemon=True).start()
+        return json.dumps({"status": "success", "instance_id": instance_id}, ensure_ascii=False)
+
+    def _prune_legacy_channel_type(self, channel_name: str, remaining):
+        """Drop *channel_name* from config.json's channel_type once no instance
+        of that type is left (``remaining`` = the instance records that will
+        survive this disconnect).
+
+        Without this, bootstrap_legacy_instances (which runs on every team.json
+        write and is keyed off channel_type) would recreate the instance we just
+        removed, so the disconnect would never stick. Only prunes when the last
+        instance of the type is gone, so removing one of several Feishu bots
+        leaves the type — and the others — untouched.
+        """
+        from channel.channel_instances import _normalize_type
+
+        target = _normalize_type(channel_name)
+        if any(_normalize_type(str(r.get("channel_type") or "")) == target for r in remaining):
+            return
+
+        existing = self._parse_channel_list(conf().get("channel_type", ""))
+        pruned = [ch for ch in existing if _normalize_type(ch) != target]
+        if len(pruned) == len(existing):
+            return
+        new_channel_type = ",".join(pruned)
+
+        conf()["channel_type"] = new_channel_type
+        try:
+            config_path = os.path.join(get_data_root(), "config.json")
+            file_cfg = _read_config_file_for_write()
+            file_cfg["channel_type"] = new_channel_type
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(file_cfg, f, indent=4, ensure_ascii=False)
+            logger.info(
+                f"[WebChannel] Pruned legacy channel_type '{channel_name}', "
+                f"channel_type={new_channel_type}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[WebChannel] Failed to prune legacy channel_type '{channel_name}': {e}",
+                exc_info=True,
+            )
 
 
 class WeixinQrHandler:
@@ -5720,9 +6951,7 @@ class WeixinQrHandler:
     @staticmethod
     def _get_running_channel():
         try:
-            import sys
-            app_module = sys.modules.get('__main__') or sys.modules.get('app')
-            mgr = getattr(app_module, '_channel_mgr', None) if app_module else None
+            mgr = _live_channel_manager()
             if mgr:
                 return mgr.get_channel("weixin")
         except Exception:
@@ -6038,6 +7267,32 @@ class FeishuRegisterHandler:
             return json.dumps({"status": "error", "message": str(e)})
 
 
+def _request_agent_id(source) -> str:
+    value = getattr(source, "agent_id", None)
+    if value is None:
+        value = getattr(source, "agent", None)
+    if value is None and isinstance(source, dict):
+        value = source.get("agent_id") or source.get("agent")
+    # web.py merges query string and form body, so a field present in both
+    # arrives as a list. Collapse it to a single id rather than letting an
+    # unhashable list reach registry lookups.
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    return value or None
+
+
+def _resolve_instance_agent_id(instance_id: str) -> str:
+    """The Agent a channel instance is currently bound to, or "" for none.
+
+    Thin alias over the scheduler's resolver so there is one implementation of
+    "which Agent owns this instance" shared by task execution, the task list,
+    and task creation. A legacy single-instance channel (instance_id ==
+    channel_type) has no explicit binding and resolves to "" -> default Agent.
+    """
+    from agent.tools.scheduler.integration import _resolve_instance_agent_id as _resolve
+    return _resolve(instance_id)
+
+
 class ToolsHandler:
     def GET(self):
         _require_auth()
@@ -6073,17 +7328,34 @@ class ToolsHandler:
             return json.dumps({"status": "error", "message": str(e)})
 
 
+def _skill_service(agent_id: str = ''):
+    """
+    A SkillService over the skills the console manages.
+
+    Skills stay anchored to the agent's state root even while a session has a
+    project open, so this deliberately resolves the workspace without a session.
+    ``agent_id`` selects which agent's skills to manage, so a multi-agent setup
+    keeps each agent's library isolated.
+    """
+    from agent.skills.manager import SkillManager
+    from agent.skills.service import SkillService
+    from common import state_dir
+    workspace_root = _get_workspace_root(agent_id=agent_id or None)
+    custom_dir = str(state_dir.skills_dir(base=workspace_root))
+    return SkillService(SkillManager(custom_dir=custom_dir))
+
+
 class SkillsHandler:
     def GET(self):
         _require_auth()
         web.header('Content-Type', 'application/json; charset=utf-8')
         try:
-            from agent.skills.service import SkillService
-            from agent.skills.manager import SkillManager
             from common import i18n
-            workspace_root = _get_workspace_root()
-            manager = SkillManager(custom_dir=os.path.join(workspace_root, "skills"))
-            service = SkillService(manager)
+            params = web.input(agent_id='')
+            # The library page lists everything installed, unnarrowed by the
+            # Agent's selection: a skill it has not selected still has to be
+            # visible here for the selection to be editable at all.
+            service = _skill_service(_request_agent_id(params))
             skills = service.query()
             if i18n.get_language() == i18n.ZH_HANT:
                 for skill in skills:
@@ -6100,16 +7372,12 @@ class SkillsHandler:
         _require_auth()
         web.header('Content-Type', 'application/json; charset=utf-8')
         try:
-            from agent.skills.service import SkillService
-            from agent.skills.manager import SkillManager
             body = json.loads(web.data())
             action = body.get("action")
             name = body.get("name")
             if not action or not name:
                 return json.dumps({"status": "error", "message": "action and name are required"})
-            workspace_root = _get_workspace_root()
-            manager = SkillManager(custom_dir=os.path.join(workspace_root, "skills"))
-            service = SkillService(manager)
+            service = _skill_service(_request_agent_id(body))
             if action == "open":
                 service.open({"name": name})
             elif action == "close":
@@ -6193,6 +7461,7 @@ def _apply_kingdee_form_filter(form_id: str, filter_string: str):
 
 class KingdeeKanbanHandler:
     """金蝶云星空订单审批看板 — 按单据类型+状态分组返回看板数据。只读，不走Agent推理链路。"""
+
     def GET(self):
         _require_auth()
         web.header('Content-Type', 'application/json; charset=utf-8')
@@ -9035,14 +10304,79 @@ class AnalysisHistoryHandler:
             return json.dumps({"status": "error", "message": str(e)})
 
 
+class SkillContentHandler:
+    """
+    A skill's definition file, for the console's viewer and editor.
+
+    Addressed by skill name rather than by path, because the loader is what
+    resolves a name to a file: a workspace skill shadows a builtin of the same
+    name, and a builtin sits outside the workspace that the file APIs are
+    confined to.
+
+    Unlike the skill list, the text is served exactly as stored - no
+    simplified-to-traditional conversion. What comes back here is what a save
+    would write, and rewriting someone's file into another script because of
+    the console's display language is not a conversion they asked for.
+    """
+
+    def GET(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            params = web.input(name='', agent_id='')
+            name = (params.name or '').strip()
+            if not name:
+                return json.dumps({"status": "error", "message": "name is required"})
+            result = _skill_service(_request_agent_id(params)).read_content(name)
+            return json.dumps({"status": "success", **result}, ensure_ascii=False)
+        except (ValueError, FileNotFoundError) as e:
+            return json.dumps({"status": "error", "message": str(e)})
+        except Exception as e:
+            logger.error(f"[WebChannel] Skill content error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+    def POST(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            from agent.workspace.service import WorkspaceConflictError
+
+            body = json.loads(web.data() or b'{}')
+            name = (body.get("name") or "").strip()
+            if not name:
+                return json.dumps({"status": "error", "message": "name is required"})
+            content = body.get("content")
+            if not isinstance(content, str):
+                return json.dumps({"status": "error", "message": "content must be a string"})
+
+            try:
+                result = _skill_service(_request_agent_id(body)).write_content(
+                    name, content, expected_mtime=body.get("expected_mtime"),
+                )
+            except WorkspaceConflictError as e:
+                return json.dumps({"status": "error", "code": "conflict", "message": str(e)})
+
+            logger.info(f"[WebChannel] Skill saved: {name} ({result['size']} bytes)")
+            return json.dumps({"status": "success", **result}, ensure_ascii=False)
+        except (ValueError, FileNotFoundError) as e:
+            return json.dumps({"status": "error", "message": str(e)})
+        except PermissionError:
+            return json.dumps({"status": "error", "message": "permission denied"})
+        except Exception as e:
+            logger.error(f"[WebChannel] Skill write error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+
 class MemoryHandler:
     def GET(self):
         _require_auth()
         web.header('Content-Type', 'application/json; charset=utf-8')
         try:
             from agent.memory.service import MemoryService
-            params = web.input(page='1', page_size='20', category='memory')
-            workspace_root = _get_workspace_root()
+            params = web.input(
+                page='1', page_size='20', category='memory', agent_id=''
+            )
+            workspace_root = _get_workspace_root(agent_id=_request_agent_id(params))
             service = MemoryService(workspace_root)
             result = service.list_files(
                 page=int(params.page), page_size=int(params.page_size),
@@ -9060,10 +10394,10 @@ class MemoryContentHandler:
         web.header('Content-Type', 'application/json; charset=utf-8')
         try:
             from agent.memory.service import MemoryService
-            params = web.input(filename='', category='memory')
+            params = web.input(filename='', category='memory', agent_id='')
             if not params.filename:
                 return json.dumps({"status": "error", "message": "filename required"})
-            workspace_root = _get_workspace_root()
+            workspace_root = _get_workspace_root(agent_id=_request_agent_id(params))
             service = MemoryService(workspace_root)
             result = service.get_content(params.filename, category=params.category)
             return json.dumps({"status": "success", **result}, ensure_ascii=False)
@@ -9076,19 +10410,176 @@ class MemoryContentHandler:
             return json.dumps({"status": "error", "message": str(e)})
 
 
+def _global_task_store():
+    """The one global task store the console reads and writes.
+
+    All Agents' tasks live in a single file now (each task carries its own
+    ``agent_id``), so handlers no longer resolve a per-Agent workspace path.
+    """
+    from agent.tools.scheduler.integration import get_task_store
+    return get_task_store()
+
+
 class SchedulerHandler:
     def GET(self):
         _require_auth()
         web.header('Content-Type', 'application/json; charset=utf-8')
         try:
-            from agent.tools.scheduler.task_store import TaskStore
-            workspace_root = _get_workspace_root()
-            store_path = os.path.join(workspace_root, "scheduler", "tasks.json")
-            store = TaskStore(store_path)
-            tasks = store.list_tasks()
+            params = web.input(agent_id='')
+            requested = _request_agent_id(params)
+
+            store = _global_task_store()
+            if store is None:
+                return json.dumps({"status": "success", "tasks": []}, ensure_ascii=False)
+
+            # An explicit agent_id scopes the list to that Agent; without it the
+            # console shows the whole team's schedule.
+            tasks = store.list_tasks(agent_id=requested or None)
+            # Stamp each task with its *effective* owner so the card/owner-chip
+            # always matches what actually runs. For an IM task that is the
+            # delivery instance's current binding (a channel re-bind moves the
+            # owner with zero data migration); for Web / unbound tasks it is the
+            # stored id, defaulting so the client never sees a blank owner it
+            # uses to route mutations.
+            from agent.tools.scheduler.integration import effective_task_agent_id
+            try:
+                from agent.registry import get_agent_registry
+                default_id = get_agent_registry().default_agent_id
+            except Exception:
+                default_id = ""
+            for task in tasks:
+                task["agent_id"] = effective_task_agent_id(task) or default_id
             return json.dumps({"status": "success", "tasks": tasks}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"[WebChannel] Scheduler API error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+
+class SchedulerRunsHandler:
+    """Execution history for scheduled tasks.
+
+    Reads the same global ``runs`` ledger every scheduled execution writes to
+    (``task_source='scheduler'``) rather than a side-car store, so history JOINs
+    cleanly with native turns and needs no extra file. An explicit ``agent_id``
+    scopes the list to one Agent; without it the console shows the whole team's
+    history. An optional ``task_id`` narrows to a single task's runs.
+    """
+
+    def GET(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            params = web.input(agent_id='', task_id='', limit='100', since='', offset='0')
+            requested = _request_agent_id(params)
+            task_id = (getattr(params, 'task_id', '') or '').strip()
+            try:
+                limit = max(1, min(500, int(params.limit)))
+            except (TypeError, ValueError):
+                limit = 100
+            # ``offset`` pages the history list ("load more"). Cross-session poll
+            # callers omit it (default 0).
+            try:
+                offset = max(0, int(getattr(params, 'offset', '0') or 0))
+            except (TypeError, ValueError):
+                offset = 0
+            # ``since`` (epoch seconds) powers the client's cross-session
+            # scheduler poll: return only executions started after the last one
+            # it saw, so a background window/tab can surface a notification for a
+            # task that fired in a session the user isn't currently viewing.
+            since_raw = (getattr(params, 'since', '') or '').strip()
+            try:
+                since = int(since_raw) if since_raw else None
+            except (TypeError, ValueError):
+                since = None
+
+            from agent.memory import get_conversation_store
+            store = get_conversation_store()
+            if store is None:
+                return json.dumps({"status": "success", "runs": []}, ensure_ascii=False)
+
+            runs = store.list_runs(
+                task_source="scheduler",
+                task_id=task_id or None,
+                agent_id=requested,  # None -> whole team; '' -> default Agent
+                since=since,
+                limit=limit,
+                offset=offset,
+            )
+            # Flatten the light extras index onto each row so the client needs no
+            # knowledge of the sidecar shape.
+            for run in runs:
+                extras = run.pop("extras", {}) or {}
+                run["task_name"] = extras.get("task_name", "")
+                run["action_type"] = extras.get("action_type", "")
+                run["channel_type"] = extras.get("channel_type", "")
+                run["instance_id"] = extras.get("instance_id", "")
+                run["trigger"] = extras.get("trigger", "")
+                run["output_preview"] = extras.get("output_preview", "")
+            return json.dumps({"status": "success", "runs": runs}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Scheduler runs API error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+
+class SchedulerRunDetailHandler:
+    """One execution's full detail for the history detail dialog.
+
+    The list view shows the short ``output_preview`` kept on the run row; opening
+    a record fetches the full delivered body by joining back to the receiver's
+    session (best-effort — see ``ConversationStore.get_run_detail``). Falls back
+    to the preview when the session copy was pruned or never injected.
+    """
+
+    def GET(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            params = web.input(run_id='')
+            run_id = (getattr(params, 'run_id', '') or '').strip()
+            if not run_id:
+                return json.dumps({"status": "error", "message": "run_id required"})
+
+            from agent.memory import get_conversation_store
+            store = get_conversation_store()
+            if store is None:
+                return json.dumps({"status": "error", "message": "store unavailable"})
+
+            detail = store.get_run_detail(run_id)
+            if detail is None:
+                return json.dumps({"status": "error", "message": "run not found"})
+            return json.dumps({"status": "success", "run": detail}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Scheduler run detail API error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+
+class SchedulerRunDeleteHandler:
+    """Delete a single execution-history record from the runs ledger.
+
+    Removes only the ledger row (the list item); the delivered message kept in
+    the session history is untouched. Accepts run_id in the JSON body.
+    """
+
+    def POST(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            body = json.loads(web.data()) if web.data() else {}
+            run_id = (body.get("run_id") or "").strip()
+            if not run_id:
+                return json.dumps({"status": "error", "message": "run_id required"})
+
+            from agent.memory import get_conversation_store
+            store = get_conversation_store()
+            if store is None:
+                return json.dumps({"status": "error", "message": "store unavailable"})
+
+            deleted = store.delete_run(run_id)
+            if not deleted:
+                return json.dumps({"status": "error", "message": "run not found"})
+            return json.dumps({"status": "success"}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Scheduler run delete API error: {e}")
             return json.dumps({"status": "error", "message": str(e)})
 
 
@@ -9098,12 +10589,13 @@ class SchedulerRunHandler:
         web.header('Content-Type', 'application/json; charset=utf-8')
         try:
             body = json.loads(web.data())
+            agent_id = _request_agent_id(body)
             task_id = body.get("task_id")
             if not task_id:
                 return json.dumps({"status": "error", "message": "task_id required"})
 
             from agent.tools.scheduler.integration import get_scheduler_service
-            service = get_scheduler_service()
+            service = get_scheduler_service(agent_id=agent_id)
             if service is None:
                 return json.dumps({
                     "status": "error",
@@ -9130,10 +10622,9 @@ class SchedulerToggleHandler:
             enabled = body.get("enabled", True)
             if not task_id:
                 return json.dumps({"status": "error", "message": "task_id required"})
-            from agent.tools.scheduler.task_store import TaskStore
-            workspace_root = _get_workspace_root()
-            store_path = os.path.join(workspace_root, "scheduler", "tasks.json")
-            store = TaskStore(store_path)
+            store = _global_task_store()
+            if store is None:
+                return json.dumps({"status": "error", "message": "Scheduler store unavailable"})
             store.enable_task(task_id, enabled)
             task = store.get_task(task_id)
             return json.dumps({"status": "success", "task": task}, ensure_ascii=False)
@@ -9152,13 +10643,12 @@ class SchedulerUpdateHandler:
             if not task_id:
                 return json.dumps({"status": "error", "message": "task_id required"})
             
-            from agent.tools.scheduler.task_store import TaskStore
             from agent.tools.scheduler.scheduler_service import SchedulerService
             from datetime import datetime
-            workspace_root = _get_workspace_root()
-            store_path = os.path.join(workspace_root, "scheduler", "tasks.json")
-            store = TaskStore(store_path)
-            
+            store = _global_task_store()
+            if store is None:
+                return json.dumps({"status": "error", "message": "Scheduler store unavailable"})
+
             # Get original task (single query to avoid repeated I/O)
             original_task = store.get_task(task_id)
             if not original_task:
@@ -9220,23 +10710,54 @@ class SchedulerUpdateHandler:
                 old_channel = original_action.get("channel_type", "web")
                 channel_type = action.get("channel_type") or old_channel
                 action["channel_type"] = channel_type
-                
-                # If channel type changed or no receiver, reject the update.
-                # Note: the web UI disables the channel selector, so this branch
-                # is only reachable via direct API calls. Changing a task's channel
-                # after creation is not supported because the receiver identity is
-                # channel-bound and cannot be trivially re-populated (e.g. weixin
-                # requires a valid context_token tied to the original user-session).
-                if old_channel and old_channel != channel_type:
-                    return json.dumps({
-                        "status": "error",
-                        "message": f"Cannot change channel type from '{old_channel}' to '{channel_type}'. Please create a new task on the target channel instead."
-                    }, ensure_ascii=False)
+
                 if not action.get("receiver"):
                     return json.dumps({
                         "status": "error",
                         "message": "Receiver is required. Please create a new task through the chat interface."
                     }, ensure_ascii=False)
+
+                # Web tasks target a chat session, which is not a switchable
+                # delivery identity — freeze channel/receiver for them.
+                if old_channel == "web" or channel_type == "web":
+                    if old_channel != channel_type:
+                        return json.dumps({
+                            "status": "error",
+                            "message": f"Cannot change channel type from '{old_channel}' to '{channel_type}'.",
+                        }, ensure_ascii=False)
+                else:
+                    # IM task: the editor lets the user re-point it at another
+                    # channel instance / recipient. Only allow a target that is
+                    # in the trusted recipient directory, and take its identity
+                    # from the store rather than trusting the request body — the
+                    # same rule the create endpoint enforces. This also keeps an
+                    # app-scoped id (a Feishu open_id) bound to the instance that
+                    # actually owns it.
+                    new_instance = (action.get("instance_id") or channel_type).strip()
+                    new_receiver = action.get("receiver")
+                    changed = (
+                        channel_type != old_channel
+                        or new_instance != (original_action.get("instance_id") or old_channel)
+                        or new_receiver != original_action.get("receiver")
+                    )
+                    if changed:
+                        from agent.tools.scheduler.integration import get_recipient_store
+                        target = get_recipient_store().get(new_instance, new_receiver)
+                        if not target:
+                            return json.dumps({
+                                "status": "error",
+                                "message": "recipient is not in the trusted directory",
+                            }, ensure_ascii=False)
+                        action["channel_type"] = target["channel_type"]
+                        action["instance_id"] = target.get("instance_id") or new_instance
+                        action["receiver"] = target["receiver"]
+                        action["receiver_name"] = target.get("name") or target["receiver"]
+                        action["is_group"] = bool(target.get("is_group", False))
+                        action["notify_session_id"] = target.get("session_id") or target["receiver"]
+                        # No need to touch agent_id: the effective owner of an IM
+                        # task is derived from instance_id's live binding, so
+                        # switching the delivery instance here already moves the
+                        # task to the new instance's Agent on the next tick.
                 updates["action"] = action
                 
                 # If schedule was not updated but action was, ensure next_run_at exists
@@ -9266,14 +10787,680 @@ class SchedulerDeleteHandler:
             if not task_id:
                 return json.dumps({"status": "error", "message": "task_id required"})
             
-            from agent.tools.scheduler.task_store import TaskStore
-            workspace_root = _get_workspace_root()
-            store_path = os.path.join(workspace_root, "scheduler", "tasks.json")
-            store = TaskStore(store_path)
+            store = _global_task_store()
+            if store is None:
+                return json.dumps({"status": "error", "message": "Scheduler store unavailable"})
             store.delete_task(task_id)
             return json.dumps({"status": "success"}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"[WebChannel] Scheduler delete error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+
+class SchedulerInstancesHandler:
+    """List channel instances that can be a scheduled-task delivery target.
+
+    The task-create flow picks an instance first, then a recipient within it.
+    This returns every external IM instance (web/unknown excluded, as web is not
+    a stable delivery target), each with a human-friendly name and how many
+    trusted recipients it currently has, so the console can show all instances
+    and note the empty ones rather than hiding them.
+
+    Legacy single-instance installs surface here too: each legacy channel type
+    resolves to one instance whose id equals the type, so an old setup gets one
+    entry per configured channel with no config change.
+    """
+
+    def GET(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            from agent.tools.scheduler.integration import get_recipient_store
+            from channel.channel_instances import (
+                resolve_channel_instances,
+                _CHANNEL_TYPE_LABELS,
+            )
+            from agent import team
+
+            # Count recipients per instance so the picker can flag empty ones.
+            counts = {}
+            for r in get_recipient_store().list():
+                iid = r.get("instance_id") or r.get("channel_type") or ""
+                counts[iid] = counts.get(iid, 0) + 1
+
+            resolved = team.resolve(conf())
+            instances = []
+            seen = set()
+            for inst in resolve_channel_instances(resolved):
+                if inst.channel_type in ("web", "unknown"):
+                    continue
+                if inst.instance_id in seen:
+                    continue
+                seen.add(inst.instance_id)
+                creds = inst.credentials or {}
+                # Prefer the user label; then a credential-carried bot name; then
+                # the type's friendly label (so a legacy install without a name
+                # reads "微信" not "weixin"); finally the raw id.
+                friendly = (
+                    inst.name
+                    or creds.get("feishu_bot_name")
+                    or creds.get("wecom_bot_id")
+                    or _CHANNEL_TYPE_LABELS.get(inst.channel_type)
+                    or inst.instance_id
+                )
+                instances.append({
+                    "instance_id": inst.instance_id,
+                    "channel_type": inst.channel_type,
+                    "name": friendly,
+                    # Friendly channel-type label (e.g. "微信"), shown on the
+                    # right of the picker since the left is the instance name.
+                    "channel_label": _CHANNEL_TYPE_LABELS.get(inst.channel_type, inst.channel_type),
+                    "agent_id": inst.agent_id or "",
+                    "recipient_count": counts.get(inst.instance_id, 0),
+                })
+            return json.dumps({"status": "success", "instances": instances}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Scheduler instances error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+
+class SchedulerRecipientsHandler:
+    """List the trusted cross-channel recipients learned from inbound messages.
+
+    These are people/groups who have already contacted the Agent on an IM
+    channel (feishu / wecom_bot / dingtalk / weixin / ...). The Web console uses
+    this directory to let a user hand-create a scheduled task that delivers to
+    someone on another channel, instead of guessing raw receiver ids.
+
+    Web sessions are intentionally excluded from the directory (they are
+    ephemeral and not stable identities), so this endpoint only ever returns
+    external-channel recipients.
+    """
+
+    def GET(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            from agent.tools.scheduler.integration import get_recipient_store
+
+            # The directory is shared across Agents, so it is one read. Each entry
+            # already carries instance_id (the exact channel login that saw the
+            # person); we enrich it with a human-friendly instance label so the
+            # picker reads as "instance · name". The owning Agent is derived at
+            # create time from the instance, so it is not needed here.
+            recipients = get_recipient_store().list()
+            instance_meta = self._instance_meta()
+            for item in recipients:
+                inst_id = item.get("instance_id") or item.get("channel_type") or ""
+                meta = instance_meta.get(inst_id)
+                item["instance_name"] = (meta or {}).get("name") or inst_id
+            return json.dumps({"status": "success", "recipients": recipients}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Scheduler recipients error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+    @staticmethod
+    def _instance_meta():
+        """Map instance_id -> {name} for every configured channel instance, so a
+        recipient can be shown by a readable channel label rather than a raw id.
+        Best-effort: a missing map just falls back to the id."""
+        meta = {}
+        try:
+            from channel.channel_instances import resolve_channel_instances
+            from agent import team
+            resolved = team.resolve(conf())
+            for inst in resolve_channel_instances(resolved):
+                # Prefer the user-set label; then a bot name the channel carries;
+                # else the instance id, which at least names the type.
+                creds = inst.credentials or {}
+                friendly = (
+                    inst.name
+                    or creds.get("feishu_bot_name")
+                    or creds.get("wecom_bot_id")
+                    or inst.instance_id
+                )
+                meta[inst.instance_id] = {"name": friendly}
+        except Exception as e:
+            logger.debug(f"[WebChannel] Instance meta unavailable: {e}")
+        return meta
+
+
+class SchedulerCreateHandler:
+    """Hand-create a scheduled task from the Web console.
+
+    The chat-driven path (SchedulerTool) remains the way to create a task that
+    delivers back to the current conversation. This endpoint exists for the
+    "actively reach someone else" case: the user picks a trusted recipient and
+    the task is stored to deliver on that recipient's channel.
+
+    The recipient is identified by ``instance_id`` (the specific channel instance
+    that saw them), not just a channel type: two instances of one channel type
+    have separate logins and receiver id spaces, and delivery must go back out
+    through the exact instance. The owning Agent is *derived* from that instance's
+    binding rather than chosen separately, since a channel instance already binds
+    to one Agent. A legacy single-instance channel has ``instance_id ==
+    channel_type``, so an old client that only sends a channel type still works.
+
+    Cross-channel delivery is only allowed to a recipient already present in the
+    trusted directory; an arbitrary receiver id is rejected. The recipient's
+    stable identity (receiver_name / is_group / session_id) is filled from the
+    directory rather than trusted from the request body.
+    """
+
+    def POST(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            import uuid
+            from datetime import datetime
+            from agent.tools.scheduler.scheduler_service import SchedulerService
+            from agent.tools.scheduler.integration import get_recipient_store
+
+            body = json.loads(web.data() or b"{}")
+
+            name = (body.get("name") or "").strip()
+            if not name:
+                return json.dumps({"status": "error", "message": "name is required"})
+
+            schedule = body.get("schedule")
+            if not isinstance(schedule, dict) or not schedule.get("type"):
+                return json.dumps({"status": "error", "message": "schedule is required"})
+
+            action_in = body.get("action")
+            if not isinstance(action_in, dict):
+                return json.dumps({"status": "error", "message": "action is required"})
+
+            action_type = action_in.get("type")
+            if action_type not in ("send_message", "agent_task"):
+                return json.dumps({"status": "error", "message": "unsupported action type"})
+
+            channel_type = (action_in.get("channel_type") or "").strip()
+            receiver = (action_in.get("receiver") or "").strip()
+            # instance_id identifies the exact channel login; fall back to the
+            # channel type for a legacy single-instance channel / older client.
+            instance_id = (action_in.get("instance_id") or "").strip() or channel_type
+            if not channel_type or not receiver:
+                return json.dumps({"status": "error", "message": "channel_type and receiver are required"})
+            if channel_type in ("web", "unknown"):
+                # Web sessions are ephemeral and not a stable delivery target;
+                # the console only creates tasks for external-channel recipients.
+                return json.dumps({"status": "error", "message": "web is not a valid cross-channel recipient"})
+
+            content = (action_in.get("content") or action_in.get("task_description") or "").strip()
+            if not content:
+                return json.dumps({"status": "error", "message": "content is required"})
+
+            # The receiver must be in the shared trusted directory; identity
+            # fields are taken from the store, never trusted from the client.
+            target = get_recipient_store().get(instance_id, receiver)
+            if not target:
+                return json.dumps({
+                    "status": "error",
+                    "message": "recipient is not in the trusted directory",
+                })
+
+            # Record the current owner as a hint only. For an IM task the true
+            # owner is derived at run time from the delivery instance's binding
+            # (see effective_task_agent_id), so re-binding the channel moves the
+            # task with no rewrite; this stored value is just a fallback for when
+            # the instance later has no explicit binding.
+            agent_id = _resolve_instance_agent_id(target.get("instance_id") or instance_id)
+
+            action = {
+                "type": action_type,
+                "receiver": target["receiver"],
+                "receiver_name": target.get("name") or target["receiver"],
+                "is_group": bool(target.get("is_group", False)),
+                "channel_type": target["channel_type"],
+                "instance_id": target.get("instance_id") or instance_id,
+                "notify_session_id": target.get("session_id") or target["receiver"],
+            }
+            if action_type == "send_message":
+                action["content"] = content
+            else:
+                action["task_description"] = content
+                if action_in.get("silent"):
+                    action["silent"] = True
+
+            task_data = {
+                "id": str(uuid.uuid4())[:8],
+                "name": name,
+                "agent_id": agent_id,
+                "enabled": bool(body.get("enabled", True)),
+                "created_at": datetime.now().isoformat(),
+                "updated_at": datetime.now().isoformat(),
+                "schedule": schedule,
+                "action": action,
+            }
+
+            store = _global_task_store()
+            if store is None:
+                return json.dumps({"status": "error", "message": "Scheduler store unavailable"})
+            temp_service = SchedulerService(store, lambda t: None)
+            next_run = temp_service._calculate_next_run(task_data, datetime.now())
+            if not next_run:
+                return json.dumps({
+                    "status": "error",
+                    "message": "Cannot calculate next run time. Please check the schedule (cron format, or a one-time time already in the past).",
+                }, ensure_ascii=False)
+            task_data["next_run_at"] = next_run.isoformat()
+
+            store.add_task(task_data)
+            return json.dumps({"status": "success", "task": task_data}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Scheduler create error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+
+def _agent_admin_service():
+    from agent.admin import AgentAdminService
+    return AgentAdminService(os.path.join(get_data_root(), "config.json"))
+
+
+def _bind_channel_instance(channel_type: str, instance_id: str = "", agent_id: str = "", members=None):
+    """Point one channel instance at an Agent (and team), hot-swapping without a restart.
+
+    The binding lives on the channel instance itself (channel_instances[].agent_id
+    in team.json), the single source of truth for routing. For a single-instance
+    channel the instance id is just the channel type. An empty agent_id unbinds it
+    (falls back to the default Agent).
+
+    Rebinding only changes *which* Agent inbound messages route to — the
+    credentials, connection, and scheduled tasks are untouched. Tasks live in
+    the global store and carry their own ``agent_id``; flipping this picker
+    must never migrate or rewrite them. We persist the new binding and then set
+    ``bound_agent_id`` live on the running channel; the next inbound message
+    reads the updated value. This avoids the reconnect storm a restart caused
+    when the user flipped the picker a few times.
+    """
+    from channel.channel_instances import upsert_instance
+
+    ctype = (channel_type or "").strip().lower()
+    if not ctype:
+        raise ValueError("channel_type is required")
+    target_id = (instance_id or "").strip() or ctype
+    agent_id = (agent_id or "").strip()
+
+    inst = upsert_instance(
+        conf(),
+        channel_type=ctype,
+        instance_id=target_id,
+        agent_id=agent_id,
+        members=members,
+    )
+
+    try:
+        mgr = _live_channel_manager()
+        channel = mgr.get_channel(target_id) if mgr else None
+        if channel is not None:
+            # Live-update owner + team on the running instance. Empty owner means
+            # "follow the default Agent". No restart: this only changes routing.
+            channel.bound_agent_id = agent_id
+            channel.members = list(inst.members or [])
+            logger.info(
+                f"[WebChannel] Channel '{target_id}' rebound to "
+                f"'{agent_id or 'default'}' with team {inst.members or []} (no restart)"
+            )
+    except Exception as e:
+        logger.error(
+            f"[WebChannel] Failed to hot-rebind channel '{target_id}': {e}",
+            exc_info=True,
+        )
+
+    return {
+        "instance_id": inst.instance_id,
+        "agent_id": inst.agent_id,
+        "members": list(inst.members or []),
+    }
+
+
+def _reload_agent_runtime(service, changed_agent_ids=None) -> None:
+    """Re-point the live runtime at a freshly loaded roster.
+
+    This runs inside the roster-edit request, so it must stay cheap. The old
+    implementation tore everything down - stop every scheduler, drop every
+    cached session, then rebuild all of them - which grew linearly with the
+    number of Agents (each rebuild reloads dozens of skills). Editing one
+    Agent's name should not cost a full-fleet reload.
+
+    Instead we reconcile incrementally:
+      * swap the registry/router (always cheap),
+      * start a scheduler only for Agents that gained one, stop those that
+        disappeared, and leave already-running ones untouched,
+      * evict only the sessions of the Agents that actually changed, so their
+        next turn picks up the new name / model / persona. Everyone else keeps
+        their warm cache.
+
+    ``changed_agent_ids`` narrows the session eviction to just the edited
+    Agents. When omitted we fall back to evicting nothing extra beyond the
+    add/remove diff, since pure metadata edits without an id (e.g. binding
+    changes) touch no cached runtime.
+    """
+    from agent.registry import set_agent_registry
+    from agent.routing import AgentRouter, set_agent_router
+
+    settings = service._load()
+    registry = service._registry(settings)
+    router = AgentRouter.from_config(settings, registry)
+    set_agent_registry(registry)
+    set_agent_router(router)
+
+    from bridge.bridge import Bridge
+    bridge = Bridge()
+    agent_bridge = getattr(bridge, "_agent_bridge", None)
+    if agent_bridge is None:
+        return
+
+    agent_bridge.agent_registry = registry
+    agent_bridge.agent_router = router
+
+    # Reconcile schedulers against what is already running, rather than
+    # stopping and recreating the whole set.
+    from agent.tools.scheduler.integration import init_scheduler, stop_scheduler
+    live_ids = {p.id for p in registry.list(include_disabled=False)}
+    previously = set(agent_bridge.scheduler_agent_ids)
+
+    for agent_id in previously - live_ids:
+        try:
+            stop_scheduler(agent_id)
+        except Exception as e:
+            logger.warning(f"[WebChannel] stop_scheduler({agent_id}) failed: {e}")
+        agent_bridge.scheduler_agent_ids.discard(agent_id)
+
+    for profile in registry.list(include_disabled=False):
+        if profile.id in previously:
+            continue  # already has a running scheduler; init_scheduler is a no-op
+        if init_scheduler(agent_bridge, profile.workspace, profile.id):
+            agent_bridge.scheduler_agent_ids.add(profile.id)
+    agent_bridge.scheduler_initialized = bool(agent_bridge.scheduler_agent_ids)
+
+    # Drop cached runtimes only for the Agents whose definition changed, so the
+    # edit takes effect on their next turn without wiping everyone's session.
+    for agent_id in (changed_agent_ids or []):
+        try:
+            agent_bridge.clear_agent(agent_id)
+        except Exception as e:
+            logger.warning(f"[WebChannel] clear_agent({agent_id}) failed: {e}")
+
+
+class AgentsHandler:
+    def GET(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            return json.dumps(
+                {"status": "success", **_annotate_avatar_revs(_agent_admin_service().snapshot())},
+                ensure_ascii=False,
+            )
+        except Exception as e:
+            logger.error(f"[WebChannel] Agents API error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+    def POST(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            body = json.loads(web.data())
+            action = body.get("action")
+            service = _agent_admin_service()
+            revision = body.get("revision") or None
+            if action == "create":
+                result = service.create_agent(
+                    agent_id=body.get("id", ""),
+                    name=body.get("name", ""),
+                    # Blank means "put it where a new one goes", which is what
+                    # the console sends: it asks for a name, not a path.
+                    workspace=body.get("workspace") or None,
+                    clone_from=body.get("clone_from") or None,
+                    avatar=body.get("avatar") or None,
+                    description=body.get("description") or None,
+                    skills=body.get("skills"),
+                    knowledge=body.get("knowledge"),
+                    knowledge_mode=body.get("knowledge_mode") or None,
+                    revision=revision,
+                )
+            elif action == "update":
+                updates = {
+                    "name": body.get("name"),
+                    "enabled": body.get("enabled"),
+                    "make_default": bool(body.get("make_default", False)),
+                    "avatar": body.get("avatar"),
+                    "description": body.get("description"),
+                    "model": body.get("model"),
+                    "bot_type": body.get("bot_type"),
+                    "revision": revision,
+                }
+                if "skills" in body:
+                    updates["skills"] = body.get("skills")
+                if "knowledge" in body:
+                    updates["knowledge"] = body.get("knowledge")
+                result = service.update_agent(body.get("id", ""), **updates)
+            elif action == "archive":
+                result = service.archive_agent(body.get("id", ""), revision=revision)
+            elif action == "delete":
+                result = service.delete_agent(body.get("id", ""), revision=revision)
+            elif action == "set_knowledge_mode":
+                # A filesystem toggle (symlink vs own dir), not a roster edit, so
+                # it doesn't participate in the roster revision guard.
+                result = service.set_knowledge_mode(
+                    body.get("id", ""), body.get("mode", "")
+                )
+            elif action == "bind_channel_instance":
+                # members: list => set team; omitted/None => leave team untouched
+                raw_members = body.get("members", None)
+                members = raw_members if isinstance(raw_members, list) else None
+                result = _bind_channel_instance(
+                    channel_type=body.get("channel_type", ""),
+                    instance_id=body.get("instance_id", ""),
+                    agent_id=body.get("agent_id", ""),
+                    members=members,
+                )
+            else:
+                return json.dumps({
+                    "status": "error", "message": f"unknown action: {action}"
+                })
+            # Only the edited Agent needs its cached runtime dropped; a create
+            # has no live sessions yet. bind_channel_instance hot-updates the
+            # running channel's binding in place (see _bind_channel_instance),
+            # so it neither restarts a channel nor touches the roster runtime.
+            if action == "bind_channel_instance":
+                return json.dumps(
+                    {"status": "success", "result": result},
+                    ensure_ascii=False,
+                )
+            changed = None
+            if action in ("update", "archive", "delete", "set_knowledge_mode"):
+                changed = [body.get("id", "")] if body.get("id") else None
+            _reload_agent_runtime(service, changed_agent_ids=changed)
+            # Hand back the fresh revision so a client making rapid successive
+            # edits (e.g. ticking skill checkboxes) can chain them without a
+            # full reload and without tripping the stale-roster guard.
+            try:
+                revision_after = service.snapshot().get("revision")
+            except Exception:
+                revision_after = None
+            return json.dumps(
+                {"status": "success", "result": result, "revision": revision_after},
+                ensure_ascii=False,
+            )
+        except Exception as e:
+            from agent.admin import StaleRosterError
+            code = None
+            if isinstance(e, StaleRosterError):
+                web.ctx.status = "409 Conflict"
+                code = "stale_roster"
+            logger.error(f"[WebChannel] Agents POST error: {e}")
+            return json.dumps({"status": "error", "message": str(e), "code": code})
+
+
+class AgentCoreFileHandler:
+    def GET(self, agent_id: str, filename: str):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            result = _agent_admin_service().read_core_file(agent_id, filename)
+            return json.dumps({"status": "success", **result}, ensure_ascii=False)
+        except Exception as e:
+            return json.dumps({"status": "error", "message": str(e)})
+
+    def PUT(self, agent_id: str, filename: str):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            body = json.loads(web.data())
+            result = _agent_admin_service().write_core_file(
+                agent_id,
+                filename,
+                body.get("content"),
+                body.get("revision", ""),
+            )
+            try:
+                from bridge.bridge import Bridge
+                agent_bridge = getattr(Bridge(), "_agent_bridge", None)
+                if agent_bridge is not None:
+                    agent_bridge.clear_agent(agent_id)
+            except Exception as e:
+                logger.warning(
+                    f"[WebChannel] Failed to evict edited agent={agent_id}: {e}"
+                )
+            return json.dumps({"status": "success", **result}, ensure_ascii=False)
+        except Exception as e:
+            from agent.admin import StaleAgentFileError
+            if isinstance(e, StaleAgentFileError):
+                web.ctx.status = "409 Conflict"
+            return json.dumps({"status": "error", "message": str(e)})
+
+
+# An emoji costs nothing to store or serve, so it is the default way to tell
+# Agents apart; an uploaded picture sets the field to this token instead and the
+# bytes live beside the other shared assets.
+AVATAR_IMAGE_TOKEN = "image"
+AVATAR_TYPES = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
+MAX_AVATAR_BYTES = 2 * 1024 * 1024
+
+
+def _avatar_path(agent_id: str) -> Optional[str]:
+    from common.state_dir import shared_root
+
+    base = shared_root() / "avatars"
+    for suffix in AVATAR_TYPES:
+        candidate = base / f"{agent_id}{suffix}"
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _avatar_rev(agent_id: str) -> Optional[str]:
+    """A cache-busting token derived from the avatar file's mtime.
+
+    The roster revision only hashes team.json, but replacing an avatar rewrites
+    an image file without touching any field there, so the revision stays put
+    and the browser keeps serving the cached picture. Keying the URL on the
+    file's mtime instead means every upload changes the token and the <img>
+    refetches, even after a hard reload where in-memory hints are gone.
+    """
+    path = _avatar_path(agent_id)
+    if not path:
+        return None
+    try:
+        return str(int(os.path.getmtime(path)))
+    except OSError:
+        return None
+
+
+def _annotate_avatar_revs(snapshot: dict) -> dict:
+    """Attach ``avatar_rev`` to every Agent that carries an uploaded image."""
+    for agent in snapshot.get("agents") or []:
+        if agent.get("avatar") == AVATAR_IMAGE_TOKEN:
+            rev = _avatar_rev(agent.get("id", ""))
+            if rev:
+                agent["avatar_rev"] = rev
+    return snapshot
+
+
+class AgentAvatarHandler:
+    def GET(self, agent_id: str):
+        _require_auth()
+        path = _avatar_path(agent_id)
+        if not path:
+            web.ctx.status = "404 Not Found"
+            web.header('Content-Type', 'application/json; charset=utf-8')
+            return json.dumps({"status": "error", "message": "no avatar"})
+        with open(path, "rb") as handle:
+            data = handle.read()
+        web.header('Content-Type', AVATAR_TYPES[os.path.splitext(path)[1].lower()])
+        # Content-addressed by the caller via ?v=, so it can be cached hard.
+        web.header('Cache-Control', 'private, max-age=86400')
+        return data
+
+    def POST(self, agent_id: str):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            from common.state_dir import shared_root
+            from agent.registry import get_agent_registry
+
+            get_agent_registry().get(agent_id, require_enabled=False)
+            # Read the multipart body raw. web.input() decodes it as UTF-8, which
+            # dies on the first non-text byte of an image (a PNG starts with the
+            # byte 0x89) with "utf-8 codec can't decode byte 0x89". rawinput hands
+            # back the bytes untouched, the same path the knowledge upload uses.
+            params = _raw_web_input()
+            upload = params.get("avatar")
+            if upload is None:
+                return json.dumps({"status": "error", "message": "avatar file required"})
+            filename = getattr(upload, "filename", "") or ""
+            raw = _read_uploaded_file_bytes(upload)
+            if not raw:
+                return json.dumps({"status": "error", "message": "avatar file required"})
+            if len(raw) > MAX_AVATAR_BYTES:
+                return json.dumps({"status": "error", "message": "avatar exceeds 2 MiB"})
+            suffix = os.path.splitext(filename)[1].lower()
+            if suffix not in AVATAR_TYPES:
+                return json.dumps({
+                    "status": "error",
+                    "message": f"unsupported image type: {suffix or 'unknown'}",
+                })
+
+            base = shared_root() / "avatars"
+            base.mkdir(parents=True, exist_ok=True)
+            # Drop any other extension first, so one Agent never ends up with
+            # two avatar files and a resolution order deciding which one wins.
+            for other in AVATAR_TYPES:
+                stale = base / f"{agent_id}{other}"
+                if other != suffix and stale.is_file():
+                    try:
+                        stale.unlink()
+                    except OSError:
+                        pass
+            target = base / f"{agent_id}{suffix}"
+            tmp = base / f".{agent_id}{suffix}.tmp"
+            with open(tmp, "wb") as handle:
+                handle.write(raw)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, target)
+
+            service = _agent_admin_service()
+            result = service.update_agent(agent_id, avatar=AVATAR_IMAGE_TOKEN)
+            # An avatar is a file plus a metadata flag; it changes nothing about
+            # routing, sessions or schedulers. Skipping the full runtime reload
+            # keeps the upload instant instead of tearing everything down.
+            # Hand back the fresh revision so the console can patch its roster in
+            # place without a full reload and without going stale on the next edit.
+            revision = service.snapshot().get("revision")
+            return json.dumps(
+                {"status": "success", "result": result, "revision": revision},
+                ensure_ascii=False,
+            )
+        except Exception as e:
+            logger.error(f"[WebChannel] Agent avatar upload error: {e}")
             return json.dumps({"status": "error", "message": str(e)})
 
 
@@ -9322,21 +11509,236 @@ def _annotate_sessions_with_projects(store, result: dict, agent_id: Optional[str
     result["project_order"] = project_store.get_order()
 
 
+def _agent_badge(profile) -> dict:
+    return {"id": profile.id, "name": profile.name, "avatar": profile.avatar or ""}
+
+
+def _roster_from_members(host_agent_id: str, members) -> List[dict]:
+    """Badge every reachable member of a conversation, host first."""
+    from agent.registry import get_agent_registry
+
+    if not members:
+        return []
+    registry = get_agent_registry()
+    roster: List[dict] = []
+    for agent_id in [host_agent_id, *members]:
+        if any(item["id"] == agent_id for item in roster):
+            continue
+        try:
+            roster.append(_agent_badge(registry.get(agent_id)))
+        except Exception:
+            continue
+    return roster
+
+
+def _session_roster(session_id: str, host_agent_id: str) -> List[dict]:
+    """Everyone who can be addressed in this conversation, host included.
+
+    Empty for a conversation nobody was invited into, which is every
+    conversation until the user says otherwise.
+    """
+    from agent.workspace import session_prefs
+
+    try:
+        members = session_prefs.get_prefs(session_id, host_agent_id).get("members")
+    except Exception as e:
+        logger.debug(f"[WebChannel] roster lookup failed for {session_id}: {e}")
+        return []
+    return _roster_from_members(host_agent_id, members)
+
+
+def _addressed_agent_id(text: str, roster: List[dict]) -> str:
+    """The teammate this message names, or "" when it names nobody.
+
+    Matching accepts the display name as well as the id, because the composer
+    writes the name — nobody types ``@agent-17n3e8`` on purpose. Longer labels
+    are tried first so that a name containing another name still resolves to
+    the one actually written.
+
+    Only a leading mention counts. Naming somebody mid-sentence is usually
+    talking *about* them ("ask Ops to..."), not handing them the turn.
+    """
+    stripped = (text or "").lstrip()
+    if not stripped.startswith("@"):
+        return ""
+    candidates = []
+    for item in roster:
+        for label in (item.get("name") or "", item.get("id") or ""):
+            if label:
+                candidates.append((label, item["id"]))
+    for label, agent_id in sorted(candidates, key=lambda pair: -len(pair[0])):
+        pattern = r"^@" + re.escape(label) + r"(?=[\s，,：:、]|$)"
+        if re.match(pattern, stripped, re.IGNORECASE):
+            return agent_id
+    return ""
+
+
+def _as_epoch(value) -> int:
+    """Best-effort convert a session timestamp into a sortable epoch int.
+
+    New databases store ``last_active``/``created_at`` as integer Unix
+    timestamps, but a workspace carried over from an older build may still hold
+    them as ``'YYYY-MM-DD HH:MM:SS'`` strings. Parsing those defensively keeps
+    the merged session list from crashing the whole API (which would leave the
+    web sidebar empty) just because one legacy row can't be ``int()``-ed.
+    """
+    if value is None or value == "":
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        pass
+    from datetime import datetime
+
+    text = str(value).strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            return int(datetime.strptime(text, fmt).timestamp())
+        except ValueError:
+            continue
+    return 0
+
+
+def _list_sessions_across_agents(page: int, page_size: int) -> dict:
+    """One page of every Agent's conversations, merged.
+
+    Sessions are stored one database per Agent, so "all conversations" is a
+    merge across files rather than a query. Each Agent is asked for as many rows
+    as the requested page could possibly draw from it, because any of them can
+    supply the row that sorts into that page.
+
+    Presenting them in one list is what keeps a second Agent from feeling like a
+    second account: the alternative, switching the whole console to look at
+    another Agent's conversations, makes the roster a tenant selector.
+    """
+    from agent.memory import get_conversation_store
+    from agent.registry import get_agent_registry
+    from agent.workspace import project_store, session_prefs
+    from common.state_dir import state_root_str
+
+    take = max(1, page) * page_size
+    merged: List[dict] = []
+    total = 0
+    space_paths = set()
+    uses_default = False
+    try:
+        members_index = session_prefs.members_index()
+    except Exception as e:
+        # Faces are decoration; losing them must not cost the user the list.
+        logger.warning(f"[WebChannel] Could not read session rosters: {e}")
+        members_index = {}
+
+    for profile in get_agent_registry().list(include_disabled=False):
+        try:
+            store = get_conversation_store(profile.workspace)
+            chunk = store.list_sessions(channel_type="web", page=1, page_size=take)
+            project_map = project_store.get_project_map(profile.id)
+            session_ids = store.list_session_ids(channel_type="web")
+        except Exception as e:
+            # One unreadable workspace must not blank out the whole list; the
+            # other Agents' conversations are still perfectly readable.
+            logger.warning(
+                f"[WebChannel] Skipping sessions for agent={profile.id}: {e}"
+            )
+            continue
+
+        total += chunk.get("total", 0)
+        badge = _agent_badge(profile)
+        for session in chunk.get("sessions") or []:
+            path = project_map.get(session["session_id"])
+            session["agent"] = badge
+            # Only a conversation with more than one Agent in it needs faces in
+            # the list; a solo one reads better as a plain row, exactly as it
+            # did before there was a roster.
+            roster = _roster_from_members(
+                profile.id, members_index.get((profile.id, session["session_id"]))
+            )
+            if len(roster) > 1:
+                session["participants"] = roster
+            session["project"] = (
+                {"path": path, "name": project_store.display_name_for(path)}
+                if path else None
+            )
+            merged.append(session)
+
+        for sid in session_ids:
+            path = project_map.get(sid)
+            if path:
+                space_paths.add(path)
+            else:
+                uses_default = True
+
+    # One row per conversation. A session id can exist in more than one Agent's
+    # store (an older client once let a conversation change hands mid-way, and
+    # each side kept the turns it saw); showing it twice makes both rows light
+    # up as "selected". Keep the copy holding the bulk of the conversation —
+    # that's the one the user recognises — and let the newest break a tie.
+    by_id: Dict[str, dict] = {}
+    for session in merged:
+        sid = session.get("session_id")
+        kept = by_id.get(sid)
+        if kept is None or (
+            (int(session.get("msg_count") or 0), _as_epoch(session.get("last_active")))
+            > (int(kept.get("msg_count") or 0), _as_epoch(kept.get("last_active")))
+        ):
+            by_id[sid] = session
+    total -= len(merged) - len(by_id)
+    merged = list(by_id.values())
+
+    # Same ordering the per-Agent query applies, so a merged page looks exactly
+    # like a single Agent's page does.
+    merged.sort(
+        key=lambda s: (
+            0 if s.get("pinned") else 1,
+            -_as_epoch(s.get("last_active")),
+        )
+    )
+    offset = (max(1, page) - 1) * page_size
+    result = {
+        "sessions": merged[offset:offset + page_size],
+        "total": total,
+        "page": max(1, page),
+        "page_size": page_size,
+        "has_more": total > offset + page_size,
+        "space_count": len(space_paths) + (1 if uses_default else 0),
+        "default_workspace": state_root_str(),
+        "project_order": project_store.get_order(),
+    }
+    result["group_mode"] = "project" if result["space_count"] > 1 else "time"
+    return result
+
+
 class SessionsHandler:
     def GET(self):
         _require_auth()
         web.header('Content-Type', 'application/json; charset=utf-8')
         try:
-            params = web.input(page='1', page_size='50', agent='')
-            agent_id = params.agent or None
+            params = web.input(
+                page='1', page_size='50', agent_id='', agent='', scope=''
+            )
+            page = int(params.page)
+            page_size = int(params.page_size)
+            if (params.scope or '').strip() == 'all':
+                result = _list_sessions_across_agents(page, page_size)
+                return json.dumps({"status": "success", **result}, ensure_ascii=False)
+
+            agent_id = _request_agent_id(params)
             from agent.memory import get_conversation_store
-            store = get_conversation_store()
+            from agent.registry import get_agent_registry
+            store = get_conversation_store(
+                _get_workspace_root(agent_id=agent_id)
+            )
             result = store.list_sessions(
                 channel_type="web",
-                page=int(params.page),
-                page_size=int(params.page_size),
+                page=page,
+                page_size=page_size,
             )
             _annotate_sessions_with_projects(store, result, agent_id)
+            badge = _agent_badge(
+                get_agent_registry().get(agent_id or None, require_enabled=False)
+            )
+            for session in result.get("sessions") or []:
+                session["agent"] = badge
             return json.dumps({"status": "success", **result}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"[WebChannel] Sessions API error: {e}")
@@ -9351,6 +11753,8 @@ class SessionDetailHandler:
         try:
             if not session_id:
                 return json.dumps({"status": "error", "message": "session_id required"})
+            params = web.input(agent_id='')
+            agent_id = _request_agent_id(params)
 
             # Stop any in-flight run first: a reply that lands after the delete
             # would otherwise keep burning tokens for a session nobody can see.
@@ -9368,7 +11772,7 @@ class SessionDetailHandler:
                 logger.warning(f"[WebChannel] Cancel on delete failed: {e}")
 
             from agent.memory import get_conversation_store
-            store = get_conversation_store()
+            store = get_conversation_store(_get_workspace_root(agent_id=agent_id))
             store.clear_session(session_id)
 
             # Drop the session's side stores too. Left behind, a stale project
@@ -9385,7 +11789,7 @@ class SessionDetailHandler:
             try:
                 from bridge.bridge import Bridge
                 ab = Bridge().get_agent_bridge()
-                ab.clear_session(session_id)
+                ab.clear_session(session_id, agent_id=agent_id)
             except Exception:
                 pass
 
@@ -9396,7 +11800,9 @@ class SessionDetailHandler:
                 channel.cancel_session(session_id)
             except Exception as e:
                 logger.warning(f"[WebChannel] Failed to drain queue on delete: {e}")
-            channel.session_queues.pop(session_id, None)
+            channel.session_queues.pop(
+                channel._session_queue_key(session_id, agent_id), None
+            )
 
             logger.info(f"[WebChannel] Session deleted: {session_id}")
             return json.dumps({"status": "success"})
@@ -9412,13 +11818,14 @@ class SessionDetailHandler:
             if not session_id:
                 return json.dumps({"status": "error", "message": "session_id required"})
             body = json.loads(web.data())
+            agent_id = _request_agent_id(body)
             title = (body.get("title") or "").strip()
             pinned = body.get("pinned")
             if not title and pinned is None:
                 return json.dumps({"status": "error", "message": "title or pinned required"})
 
             from agent.memory import get_conversation_store
-            store = get_conversation_store()
+            store = get_conversation_store(_get_workspace_root(agent_id=agent_id))
 
             found = True
             if title:
@@ -9449,6 +11856,8 @@ def _session_model_catalog() -> List[dict]:
     if local_config.get("use_linkai") and local_config.get("linkai_api_key"):
         active_provider = "linkai"
     active_model = str(local_config.get("model") or "").strip()
+    catalog_map = model_catalog.get_catalog_map()
+    hidden_map = model_catalog.get_hidden_map()
 
     catalog: List[dict] = []
     for pid, pinfo in ConfigHandler.PROVIDER_MODELS.items():
@@ -9458,7 +11867,17 @@ def _session_model_catalog() -> List[dict]:
         has_key = bool(key_field and str(local_config.get(key_field) or "").strip())
         if not has_key and pid != active_provider:
             continue
-        models = list(pinfo["models"])
+        # Overlay onto the presets, then keep only text-tagged entries — only
+        # those belong in the conversation switcher. Without an overlay this is
+        # just the preset model list.
+        if catalog_map.get(pid) or hidden_map.get(pid):
+            effective = ModelsHandler._merged_catalog(
+                pid, ModelsHandler._preset_seed(pid), catalog_map, hidden_map)
+            models = [e["name"] for e in effective if "text" in (e.get("capabilities") or [])]
+        else:
+            models = list(pinfo["models"])
+        if not models:
+            continue
         # The user can pin a custom model name to a built-in provider (via the
         # global config / capability "custom model" field). That model won't be
         # in the preset list, so surface it here for the active provider so the
@@ -9484,13 +11903,21 @@ def _session_model_catalog() -> List[dict]:
                 continue
             pid = f"custom:{cid}"
             is_active = pid == active_provider
-            has_key = bool(str(cp.get("api_key") or "").strip())
-            if not has_key and not is_active:
+            # Mirror the config page's "configured" test (_custom_provider_cards):
+            # a keyless-but-based endpoint (self-hosted / gateway) is valid, so
+            # having an api_base counts just like having a key.
+            configured = bool(str(cp.get("api_base") or "").strip()) \
+                or bool(str(cp.get("api_key") or "").strip())
+            if not configured and not is_active:
                 continue
-            models = []
-            cp_model = str(cp.get("model") or "").strip()
-            if cp_model:
-                models.append(cp_model)
+            entries = catalog_map.get(pid)
+            if entries:
+                models = [e["name"] for e in entries if "text" in (e.get("capabilities") or [])]
+            else:
+                models = []
+                cp_model = str(cp.get("model") or "").strip()
+                if cp_model:
+                    models.append(cp_model)
             if is_active and active_model and active_model not in models:
                 models.insert(0, active_model)
             if not models:
@@ -9515,6 +11942,12 @@ def _session_settings_state(session_id: str, agent_id: Optional[str]) -> dict:
     ``source`` tells the UI whether a value is this conversation's own choice or
     inherited, so it can show "follow global" as a real, selectable state instead
     of silently duplicating the global value onto every session.
+
+    The model resolves the same way the runtime does (see AgentLLMModel.model):
+    the conversation's pin, else the owning Agent's own default model, else the
+    global config. ``source`` is ``session`` / ``agent`` / ``global`` accordingly,
+    and ``agent`` carries the Agent's default when it has one, so a fresh chat
+    with a specialist Agent shows the model it will really answer with.
     """
     from agent.workspace import session_prefs
 
@@ -9528,12 +11961,34 @@ def _session_settings_state(session_id: str, agent_id: Optional[str]) -> dict:
     global_model = local_config.get("model") or ""
     global_permission = permission_global_mode()
 
+    # The default Agent never has a model of its own: it *is* the global choice.
+    agent_default = None
+    try:
+        from agent.registry import get_agent_registry
+        registry = get_agent_registry()
+        profile = registry.get(agent_id or None, require_enabled=False)
+        if profile.id != registry.default_agent_id and profile.model:
+            agent_default = {
+                "model": profile.model,
+                "provider": profile.bot_type or global_provider,
+            }
+    except Exception as e:
+        logger.debug(f"[WebChannel] agent default model unavailable: {e}")
+
+    if prefs.get("model"):
+        effective_model, effective_provider, source = prefs["model"], prefs.get("provider"), "session"
+    elif agent_default:
+        effective_model, effective_provider, source = agent_default["model"], agent_default["provider"], "agent"
+    else:
+        effective_model, effective_provider, source = global_model, global_provider, "global"
+
     return {
         "model": {
-            "model": prefs.get("model") or global_model,
-            "provider": prefs.get("provider") or global_provider,
-            "source": "session" if prefs.get("model") else "global",
+            "model": effective_model,
+            "provider": effective_provider or global_provider,
+            "source": source,
             "global": {"model": global_model, "provider": global_provider},
+            "agent": agent_default,
             "providers": _session_model_catalog(),
         },
         "permission": {
@@ -9545,6 +12000,39 @@ def _session_settings_state(session_id: str, agent_id: Optional[str]) -> dict:
             "global": global_permission,
             "modes": list(PERMISSION_MODES),
         },
+        "team": _session_team_state(prefs, agent_id),
+    }
+
+
+def _session_team_state(prefs: dict, agent_id: Optional[str]) -> dict:
+    """Who else is on this conversation, and who could be added.
+
+    An archived member is reported but marked unavailable rather than dropped,
+    so the roster the user set is what the roster page shows.
+    """
+    from agent.registry import get_agent_registry
+
+    registry = get_agent_registry()
+    owner_id = registry.get(agent_id or None, require_enabled=False).id
+    members = []
+    for member_id in prefs.get("members") or []:
+        try:
+            profile = registry.get(member_id, require_enabled=False)
+        except Exception:
+            members.append({"id": member_id, "name": member_id, "available": False})
+            continue
+        members.append({
+            **_agent_badge(profile),
+            "available": profile.enabled and profile.id != owner_id,
+        })
+    return {
+        "owner": _agent_badge(registry.get(owner_id, require_enabled=False)),
+        "members": members,
+        "candidates": [
+            _agent_badge(profile)
+            for profile in registry.list(include_disabled=False)
+            if profile.id != owner_id
+        ],
     }
 
 
@@ -9562,8 +12050,10 @@ class SessionSettingsHandler:
         try:
             if not session_id:
                 return json.dumps({"status": "error", "message": "session_id required"})
-            params = web.input(agent='')
-            state = _session_settings_state(session_id, params.agent or None)
+            params = web.input(agent='', agent_id='')
+            state = _session_settings_state(
+                session_id, params.agent or params.agent_id or None
+            )
             return json.dumps({"status": "success", **state}, ensure_ascii=False)
         except Exception as e:
             logger.error(f"[WebChannel] Session settings read error: {e}")
@@ -9599,11 +12089,24 @@ class SessionSettingsHandler:
                 # with no model would route the global model to the wrong vendor.
                 updates["model"] = model
                 updates["provider"] = provider if model else None
+            if "members" in body:
+                raw = body.get("members")
+                if raw is None:
+                    updates["members"] = None
+                elif isinstance(raw, list):
+                    updates["members"] = [
+                        str(item).strip() for item in raw if str(item).strip()
+                    ]
+                else:
+                    return json.dumps({
+                        "status": "error",
+                        "message": "members must be a list of agent ids",
+                    })
 
             if not updates:
                 return json.dumps({
                     "status": "error",
-                    "message": "permission, model or provider required",
+                    "message": "permission, model, provider or members required",
                 })
 
             session_prefs.set_prefs(session_id, agent_id, **updates)
@@ -9638,6 +12141,7 @@ class SessionTitleHandler:
                 return json.dumps({"status": "error", "message": "session_id required"})
 
             body = json.loads(web.data())
+            agent_id = _request_agent_id(body)
             user_message = body.get("user_message", "")
             assistant_reply = body.get("assistant_reply", "")
             if not user_message:
@@ -9646,7 +12150,7 @@ class SessionTitleHandler:
             title = _generate_session_title(user_message, assistant_reply, session_id)
 
             from agent.memory import get_conversation_store
-            store = get_conversation_store()
+            store = get_conversation_store(_get_workspace_root(agent_id=agent_id))
             updated = store.rename_session(session_id, title)
             logger.info(f"[WebChannel] Session title set: sid={session_id}, title='{title}', db_updated={updated}")
 
@@ -9689,9 +12193,13 @@ class SessionClearContextHandler:
         try:
             if not session_id:
                 return json.dumps({"status": "error", "message": "session_id required"})
+            params = web.input(agent_id='')
+            raw_body = web.data()
+            body = json.loads(raw_body) if raw_body else {}
+            agent_id = _request_agent_id(body) or _request_agent_id(params)
 
             from agent.memory import get_conversation_store
-            store = get_conversation_store()
+            store = get_conversation_store(_get_workspace_root(agent_id=agent_id))
             new_seq = store.clear_context(session_id)
 
             # Delete the agent instance so a fresh one is created on the next message
@@ -9699,7 +12207,7 @@ class SessionClearContextHandler:
                 from bridge.bridge import Bridge
                 bridge = Bridge()
                 ab = bridge.get_agent_bridge()
-                ab.clear_session(session_id)
+                ab.clear_session(session_id, agent_id=agent_id)
             except Exception:
                 pass
 
@@ -9709,28 +12217,134 @@ class SessionClearContextHandler:
             return json.dumps({"status": "error", "message": str(e)})
 
 
+class SessionContextUsageHandler:
+    def GET(self, session_id: str):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            if not session_id:
+                return json.dumps({"status": "error", "message": "session_id required"})
+
+            # Live agent instances are keyed by (agent_id, session_id), so a
+            # non-default agent's context is only found when its id is supplied.
+            # Without this the lookup falls back to the default agent and always
+            # reports available=false for e.g. content-writer sessions.
+            from urllib.parse import parse_qs
+            agent_id = _request_agent_id(parse_qs(web.ctx.env.get("QUERY_STRING") or ""))
+
+            from bridge.bridge import Bridge
+            bridge = Bridge()
+            ab = bridge.get_agent_bridge()
+            # peek_agent, not get_agent: the latter builds the agent on miss
+            # (MCP + skills), and this endpoint is called on hover.
+            agent = ab.peek_agent(session_id, agent_id=agent_id)
+            if agent is None:
+                # No live context yet — a fresh session, or one just cleared
+                # (clear_context drops the instance).
+                return json.dumps({"status": "success", "available": False})
+
+            usage = agent.get_context_usage()
+            usage["status"] = "success"
+            return json.dumps(usage)
+        except Exception as e:
+            logger.error(f"[WebChannel] Context usage error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+
+class SessionCompactContextHandler:
+    """Synchronous manual compaction (same logic as the /compact command).
+
+    Runs compact_context() on the live agent and returns the refreshed usage so
+    the frontend can redraw the pie without a separate fetch. peek_agent (not
+    get_agent) so an empty session is a no-op instead of building an agent.
+    """
+
+    def POST(self, session_id: str):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            if not session_id:
+                return json.dumps({"status": "error", "message": "session_id required"})
+
+            # Match the agent that owns this session (instances are keyed by
+            # (agent_id, session_id)); otherwise compaction targets the wrong
+            # agent and no-ops for non-default agents.
+            params = web.input(agent_id='')
+            raw_body = web.data()
+            body = json.loads(raw_body) if raw_body else {}
+            agent_id = _request_agent_id(body) or _request_agent_id(params)
+
+            from bridge.bridge import Bridge
+            bridge = Bridge()
+            ab = bridge.get_agent_bridge()
+            agent = ab.peek_agent(session_id, agent_id=agent_id)
+            if agent is None:
+                # No live context — nothing to compact.
+                return json.dumps({
+                    "status": "success", "ok": False, "available": False,
+                    "compacted_turns": 0, "before": 0, "after": 0, "usage": None,
+                })
+
+            result = agent.compact_context()
+            usage = None
+            try:
+                usage = agent.get_context_usage()
+            except Exception:
+                pass
+
+            return json.dumps({
+                "status": "success",
+                "ok": bool(result.get("ok")),
+                "compacted_turns": result.get("compacted_turns", 0),
+                "before": result.get("before", 0),
+                "after": result.get("after", 0),
+                "usage": usage,
+            }, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[WebChannel] Compact context error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+
 class HistoryHandler:
     def GET(self):
         _require_auth()
         web.header('Content-Type', 'application/json; charset=utf-8')
         web.header('Access-Control-Allow-Origin', '*')
         try:
-            params = web.input(session_id='', page='1', page_size='20')
+            params = web.input(session_id='', page='1', page_size='20', agent_id='')
             session_id = params.session_id.strip()
             if not session_id:
                 return json.dumps({"status": "error", "message": "session_id required"})
 
+            agent_id = _request_agent_id(params)
             from agent.memory import get_conversation_store
-            store = get_conversation_store()
+            store = get_conversation_store(
+                _get_workspace_root(agent_id=agent_id)
+            )
             result = store.load_history_page(
                 session_id=session_id,
                 page=int(params.page),
                 page_size=int(params.page_size),
             )
+            # Same workspace-relative media rewrite the live SSE path applies,
+            # so images/videos survive a page reload for non-default agents.
+            history_root = None
+            try:
+                history_root = _get_workspace_root(session_id, agent_id)
+            except Exception as e:
+                logger.debug(f"[WebChannel] history workspace root skipped: {e}")
             for msg in result.get("messages") or []:
                 if msg.get("role") != "assistant":
                     continue
+                if history_root and isinstance(msg.get("content"), str):
+                    try:
+                        msg["content"] = _rewrite_relative_media(
+                            msg["content"], history_root
+                        )
+                    except Exception as e:
+                        logger.debug(f"[WebChannel] history media rewrite skipped: {e}")
                 _add_subagent_displays(msg.get("steps"))
+                _add_delegate_displays(msg.get("steps"))
                 artifacts = _artifacts_from_steps(msg.get("steps"), session_id)
                 if artifacts:
                     msg["artifacts"] = artifacts
@@ -9747,6 +12361,7 @@ class MessageDeleteHandler:
         web.header('Access-Control-Allow-Origin', '*')
         try:
             data = json.loads(web.data())
+            agent_id = _request_agent_id(data)
             session_id = data.get('session_id', '').strip()
             user_seq = data.get('user_seq')
             delete_user = data.get('delete_user', True)
@@ -9757,14 +12372,16 @@ class MessageDeleteHandler:
             
             # 1. Delete from database
             from agent.memory import get_conversation_store
-            store = get_conversation_store()
+            store = get_conversation_store(_get_workspace_root(agent_id=agent_id))
             deleted = store.delete_message_pair(session_id, int(user_seq), delete_user=delete_user, cascade=cascade)
 
             # 2. Sync agent's in-memory context so its next turn sees the
             # same history as the DB. Handled by the agent_bridge helper.
             try:
                 from bridge.bridge import Bridge
-                Bridge().get_agent_bridge().sync_session_messages_from_store(session_id)
+                Bridge().get_agent_bridge().sync_session_messages_from_store(
+                    session_id, agent_id=agent_id
+                )
             except Exception as sync_err:
                 logger.warning(f"[WebChannel] Failed to sync agent memory: {sync_err}")
 
@@ -10044,18 +12661,148 @@ class WorkspaceMetaHandler:
             return json.dumps({"status": "error", "message": str(e)})
 
 
+def _editable_target(raw_path: str, session_id: str = None, agent_id: str = None):
+    """
+    Locate a file for the preview panel's text editor: (service, rel_path).
+
+    Narrower than `/api/workspace/resolve`, which only has to serve bytes and so
+    accepts anything under the configured serve roots. Reading and writing text
+    stay inside the session's workspace (its project dir or the default state
+    root), with a fallback to the state root for the memory / knowledge / persona
+    assets that live there even while a project is open.
+    """
+    svc = _workspace_service(session_id, agent_id)
+    system = _system_workspace_service()
+    try:
+        rel = svc.to_workspace_rel(raw_path)
+    except ValueError:
+        # Absolute path outside the session workspace: the state root is the
+        # only other place the console is allowed to edit.
+        return system, system.to_workspace_rel(raw_path)
+    if svc.root != system.root and _is_system_asset_rel(rel) \
+            and not os.path.isfile(svc.resolve(rel)):
+        return system, rel
+    return svc, rel
+
+
+def _is_memory_rel(rel_path: str) -> bool:
+    """True if a workspace-relative path points at a memory file backed by the
+    vector index (so an edit has to be re-embedded, not just written)."""
+    p = (rel_path or "").lstrip("./")
+    return p == "MEMORY.md" or p.startswith(("memory/", "memory\\"))
+
+
+def _mark_memory_dirty(agent_id: str = None) -> None:
+    """Flag the agent's memory index stale after a console edit to a memory file.
+
+    The index is built from the file contents, so a human edit here must be
+    re-embedded the same way an agent's write/edit tool triggers it — otherwise
+    semantic search keeps returning the pre-edit text until something else marks
+    the store dirty. Best-effort: a failure here must not fail the save.
+    """
+    try:
+        from bridge.bridge import Bridge
+        agent = Bridge().get_agent_bridge().get_agent(agent_id=agent_id or None)
+        mm = getattr(agent, "memory_manager", None)
+        if mm:
+            mm.mark_dirty()
+    except Exception as e:
+        logger.warning(f"[WebChannel] Failed to mark memory index dirty: {e}")
+
+
+class WorkspaceReadHandler:
+    """
+    Text content of one workspace file, for the preview panel's editor.
+
+    Returns the `mtime` the client passes back on save and an `editable` flag,
+    so the editor never opens a file it would be unable to write back.
+    """
+
+    def GET(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            params = web.input(path='', session='', agent='')
+            raw_path = (params.path or '').strip()
+            if not raw_path:
+                return json.dumps({"status": "error", "message": "path is required"})
+            svc, rel = _editable_target(raw_path, params.session or None, params.agent or None)
+            return json.dumps({"status": "success", **svc.read_text(rel)}, ensure_ascii=False)
+        except (ValueError, FileNotFoundError) as e:
+            return json.dumps({"status": "error", "message": str(e)})
+        except Exception as e:
+            logger.error(f"[WebChannel] Workspace read error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+
+class WorkspaceWriteHandler:
+    """
+    Save edited text back to a workspace file.
+
+    A human editing a file in the console is not an agent tool call, so the
+    session's agent permission mode does not apply here; the guard is the
+    workspace boundary enforced by `_editable_target`.
+
+    `expected_mtime` carries the timestamp the editor loaded. When it no longer
+    matches, the response is `code: "conflict"` so the client can offer to
+    reload or overwrite rather than silently discarding the newer content -
+    which the agent may well have written mid-edit.
+    """
+
+    def POST(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            from agent.workspace.service import WorkspaceConflictError
+
+            body = json.loads(web.data() or b'{}')
+            raw_path = (body.get("path") or "").strip()
+            if not raw_path:
+                return json.dumps({"status": "error", "message": "path is required"})
+            content = body.get("content")
+            if not isinstance(content, str):
+                return json.dumps({"status": "error", "message": "content must be a string"})
+
+            agent_id = body.get("agent") or None
+            svc, rel = _editable_target(raw_path, body.get("session") or None, agent_id)
+            try:
+                result = svc.write_text(rel, content, expected_mtime=body.get("expected_mtime"))
+            except WorkspaceConflictError as e:
+                return json.dumps({"status": "error", "code": "conflict", "message": str(e)})
+
+            # A memory file feeds the vector index; re-embed it on edit so search
+            # doesn't keep returning the stale pre-edit text.
+            if _is_memory_rel(rel):
+                _mark_memory_dirty(agent_id)
+
+            logger.info(f"[WebChannel] Workspace file saved: {result['path']} ({result['size']} bytes)")
+            return json.dumps({"status": "success", **result}, ensure_ascii=False)
+        except (ValueError, FileNotFoundError) as e:
+            return json.dumps({"status": "error", "message": str(e)})
+        except PermissionError:
+            return json.dumps({"status": "error", "message": "permission denied"})
+        except Exception as e:
+            logger.error(f"[WebChannel] Workspace write error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+
 def _project_state(session_id: str, agent_id: str = None) -> dict:
     """Assemble the project picker state: current selection + recents + root."""
     from agent.workspace import project_store
     from common.state_dir import state_root_str
 
     current = project_store.get_project_dir(session_id, agent_id) if session_id else None
+    # Resolve the default workspace against the Agent this session belongs to,
+    # so the selector hint matches the file panel's real root in multi-Agent
+    # setups instead of always pointing at the default Agent's workspace.
+    from common.runtime_identity import RuntimeIdentity
+    default_workspace = state_root_str(RuntimeIdentity(agent_id=agent_id))
     return {
         "current": (
             {"path": current, "name": os.path.basename(current) or current}
             if current else None
         ),
-        "default_workspace": state_root_str(),
+        "default_workspace": default_workspace,
         "projects_root": project_store.projects_root(),
         "recents": project_store.list_recents(),
     }
@@ -10294,7 +13041,10 @@ class KnowledgeListHandler:
         web.header('Content-Type', 'application/json; charset=utf-8')
         try:
             from agent.knowledge.service import KnowledgeService
-            svc = KnowledgeService(_get_workspace_root())
+            params = web.input(agent_id='')
+            svc = KnowledgeService(
+                _get_workspace_root(agent_id=_request_agent_id(params))
+            )
             result = svc.list_tree()
             return json.dumps({"status": "success", **result}, ensure_ascii=False)
         except Exception as e:
@@ -10309,8 +13059,10 @@ class KnowledgeReadHandler:
         try:
             from pathlib import Path
             from agent.knowledge.service import KnowledgeService
-            params = web.input(path='')
-            svc = KnowledgeService(_get_workspace_root())
+            params = web.input(path='', agent_id='')
+            svc = KnowledgeService(
+                _get_workspace_root(agent_id=_request_agent_id(params))
+            )
             result = svc.read_file(params.path)
             # Absolute directory of the doc (posix separators), so clients can
             # resolve image srcs that are relative to the doc into /api/file
@@ -10331,7 +13083,10 @@ class KnowledgeGraphHandler:
         web.header('Content-Type', 'application/json; charset=utf-8')
         try:
             from agent.knowledge.service import KnowledgeService
-            svc = KnowledgeService(_get_workspace_root())
+            params = web.input(agent_id='')
+            svc = KnowledgeService(
+                _get_workspace_root(agent_id=_request_agent_id(params))
+            )
             return json.dumps(svc.build_graph(), ensure_ascii=False)
         except Exception as e:
             logger.error(f"[WebChannel] Knowledge graph error: {e}")
@@ -10347,7 +13102,9 @@ class KnowledgeActionHandler:
             action = body.get("action", "")
             payload = body.get("payload") or {}
             from agent.knowledge.service import KnowledgeService
-            result = KnowledgeService(_get_workspace_root()).dispatch(action, payload)
+            result = KnowledgeService(
+                _get_workspace_root(agent_id=_request_agent_id(body))
+            ).dispatch(action, payload)
             return json.dumps({
                 "status": "success" if result["code"] < 300 else "error",
                 **result,
@@ -10372,6 +13129,7 @@ class KnowledgeImportHandler:
                     "payload": None,
                 })
             params = _raw_web_input()
+            agent_id = _request_agent_id(params)
             target_category = params.get("target_category", "")
             conflict_strategy = params.get("conflict_strategy", "skip")
             uploaded = _ensure_list(params.get("files"))
@@ -10408,7 +13166,9 @@ class KnowledgeImportHandler:
                     "content": content,
                 })
 
-            result = KnowledgeService(_get_workspace_root()).dispatch("import_documents", {
+            result = KnowledgeService(
+                _get_workspace_root(agent_id=agent_id)
+            ).dispatch("import_documents", {
                 "target_category": target_category,
                 "conflict_strategy": conflict_strategy,
                 "files": files,

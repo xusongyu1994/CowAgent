@@ -288,10 +288,10 @@ class DashscopeBot(Bot):
             
             # Add thinking parameters for DashScope thinking-capable models.
             model_lower = model_name.lower()
-            # qwen3.8-max (and its -preview snapshot) always think and are
-            # controlled via reasoning_effort (default xhigh), not enable_thinking
-            # on/off. Treat the whole qwen3.8-max family the same way.
-            is_qwen38_effort_model = model_lower.startswith("qwen3.8-max")
+            # qwen3.8-max / qwen3.8-flash (and their -preview snapshots) always
+            # think and are controlled via reasoning_effort (default xhigh), not
+            # enable_thinking on/off. Treat the whole qwen3.8 family the same way.
+            is_qwen38_effort_model = model_lower.startswith("qwen3.8-")
             supports_thinking = (
                 "qwen3" in model_lower
                 or "qwq" in model_lower
@@ -501,6 +501,17 @@ class DashscopeBot(Bot):
                 tool_calls = message.get("tool_calls")
                 if tool_calls:
                     openai_chunk["choices"][0]["delta"]["tool_calls"] = self._convert_tool_calls_to_openai_format(tool_calls)
+
+                # Attach token usage (DashScope reports it, cumulative, per
+                # chunk) mapped to the OpenAI shape so the agent can show a real
+                # prompt_tokens count for the context indicator.
+                usage = resp_dict.get("usage")
+                if isinstance(usage, dict):
+                    openai_chunk["usage"] = {
+                        "prompt_tokens": usage.get("input_tokens", 0),
+                        "completion_tokens": usage.get("output_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                    }
 
                 yield openai_chunk
 
