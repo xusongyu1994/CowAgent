@@ -103,7 +103,7 @@ metadata:
 | `FNumber`（库存表中） | `FMaterialId.FNumber` | STK_Inventory |
 | `FStockQty` | `FBaseQty` | STK_Inventory |
 | `FAvailableQty` | `FAVBQty` | STK_Inventory |
-| `FCustId.FName`（出库单中） | **不存在**，需从关联订单获取 | SAL_OUTSTOCK |
+| `FCustId.FName`（出库单中） | **不存在**，客户请用 `FCustomerID.FName` | SAL_OUTSTOCK |
 | `FAllQty`（出库单中） | **不存在** | SAL_OUTSTOCK |
 | `FAuxPropId`（弹性父键） | `FAuxPropId.FF100001.FName` | STK_Inventory |
 | `FStockLocId`（弹性父键） | `FStockLocId.FF100004.FName` | STK_Inventory |
@@ -166,13 +166,13 @@ data = query_bill_all(
 ## 查询参数最佳实践
 
 ```python
-# ✅ 推荐：加 field_order 排序，用 FDocumentStatus 过滤草稿
+# ✅ 推荐：加 order_string 排序，用 FDocumentStatus 过滤草稿
 query_bill_json(
     form_id="SAL_SaleOrder",
     field_keys="FBillNo,FDate,FCustId.FName,FAllAmount,FDocumentStatus",
     filter_string="FDate >= '2026-01-01' AND FDate < '2026-02-01' AND FDocumentStatus = 'C'",
     top_count=200,
-    field_order="FDate"     # ← 按日期排序
+    order_string="FDate ASC"     # ← 按日期排序
 )
 
 # ❌ 不推荐：不加排序、不过滤草稿
@@ -186,7 +186,7 @@ query_bill_json(
 
 **推荐参数：**
 - `FDocumentStatus = 'C'`：过滤掉暂存/草稿/创建中的单据（只查已审核）
-- `field_order="FDate"`：按日期排序，减少后续处理
+- `order_string="FDate ASC"`：按日期排序，减少后续处理
 - `FCloseStatus`：判断订单是否已关闭
 
 ---

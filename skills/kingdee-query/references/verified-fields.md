@@ -104,17 +104,29 @@
 |--------|------|------|
 | `FBillNo` | 出库单编号 | 格式取决于部署配置 |
 | `FDate` | 出库单据日期 | 手填日期 |
-| `FCreateDate` | 系统创建时间 | 精确到毫秒，反映真实开单时间 |
+| `FCreateDate` | 系统创建时间 | 精确到毫秒，反映真实开单时间；出库单过滤**推荐**用此字段 |
 | `FDocumentStatus` | 状态 | A/B/C |
 | `FCreatorId.FName` | 开单人姓名 | 关联字段 |
 | `FStockId.FName` | 仓库名称 | 关联字段 |
+| `FSalesManID.FName` | 销售员/业务员 | 关联字段（2026-09-02 实测）。数据范围/业务员过滤按此字段 |
+| `FSaleDeptID.FName` | 销售部门 | 关联字段（2026-09-02 实测） |
+| `FCustomerID.FName` | 客户名称 | 关联字段（2026-09-02 实测）——**出库单的客户字段是 `FCustomerID`** |
+| `FCustomerID.FNumber` | 客户编号 | 关联字段 |
+| `FMaterialId.FName` / `FSpecification` | 物料名称/型号 | 行级；可顶层直接查询（**无需 FEntity 前缀**） |
+| `FQty` | 数量 | 行级 |
+| `FRealQty` | 实发数量 | 行级 |
+| `FAllAmount` | 含税金额 | 行级，同单多行会重复，按 FBillNo 汇总 |
 
 ### ❌ 禁用字段
 
 | 错误字段名 | 说明 |
 |-----------|------|
 | `FAllQty` | 不存在，出库总数量不在表头层 |
-| `FCustId.FName` | 在 SAL_OUTSTOCK 中**不存在**，客户信息需从关联销售订单获取 |
+| `FCustId.FName` | 在 SAL_OUTSTOCK 中**不存在**（会报 500）。**正确客户字段是 `FCustomerID.FName`** |
+| `FSalerId.FName` | 不存在（销售订单专属字段）。出库单销售员是 `FSalesManID.FName` |
+| `FEntity.FMaterialId.FName` | `FEntity` 实体键不存在；出库单明细行字段（`FMaterialId.FName`/`FQty`/`FRealQty` 等）可直接顶层查询 |
+
+> ⚠️ **口径（重要）**：出库/发货数据**必须查 `SAL_OUTSTOCK`**，不要用销售订单 `SAL_SaleOrder` 代替（销售订单≠已出库发货，金额/客户口径不同）。查退货用 `SAL_RETURNSTOCK`。
 
 ### ⚠️ FDate 与 FCreateDate 差异
 
@@ -476,7 +488,7 @@ query_metadata(form_id="BD_Customer")
 
 | 场景 | 在 SAL_SaleOrder 中 | 在 SAL_OUTSTOCK 中 | 在 STK_Inventory 中 |
 |------|-------------------|-------------------|-------------------|
-| 客户 | ✅ `FCustId.FName` | ❌ **不存在**（需从关联订单获取） | ❌ **不存在** |
+| 客户 | ✅ `FCustId.FName` | ✅ `FCustomerID.FName` | ❌ **不存在** |
 | 物料 | ✅ `FMaterialId.FName`（表体） | ✅ `FMaterialId.FName`（表体） | ✅ `FMaterialId.FName` |
 | 数量 | ✅ `FQty`（表体） | ✅ `FQty`（表体） | ✅ `FQty` |
 | 含税金额 | ✅ `FAllAmount`（行级） | ✅ `FAllAmount`（行级） | ❌ **不存在** |
@@ -487,7 +499,7 @@ query_metadata(form_id="BD_Customer")
 
 | ❌ 错误做法 | 原因 | 正确做法 |
 |-----------|------|---------|
-| 在 SAL_OUTSTOCK 中用 `FCustId.FName` | 销售出库单表头没有客户字段 | 通过销售订单号关联查询客户 |
+| 在 SAL_OUTSTOCK 中用 `FCustId.FName` | 字段名错误（客户字段是 `FCustomerID.FName`），会报 500 | 用 `FCustomerID.FName` 直接查客户，无需绕道销售订单 |
 | 在 STK_Inventory 中用 `FBillNo` | 库存视图没有单据关联 | 库存视图只能用物料/仓库等维度 |
 | 在 BD_Customer 中用 `FBillNo` | 客户档案没有单据字段 | 客户查询用 `FName`、`FNumber` |
 

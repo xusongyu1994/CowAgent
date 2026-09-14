@@ -52,7 +52,7 @@ query_bill_json(
 )
 ```
 
-> 出库单推荐用 `FCreateDate` 过滤。注意：SAL_OUTSTOCK 中**无** `FCustId.FName` 字段。
+> 出库单推荐用 `FCreateDate` 过滤。注意：SAL_OUTSTOCK 中**无** `FCustId` 字段，客户字段是 `FCustomerID.FName`（2026-09-02 实测）。
 
 ### Step 4 — 查应收单
 
@@ -192,7 +192,7 @@ filter_string="FDocumentStatus = 'B'"
 |------|----------------|----------|
 | SAL_SaleOrder | `FCustId.FName` | `FAllAmount`（行级） |
 | SAL_DELIVERYNOTICE | `FCustomerID.FName` | — |
-| SAL_OUTSTOCK | ❌ 无客户字段 | — |
+| SAL_OUTSTOCK | `FCustomerID.FName` | — |
 | AR_receivable | `FCUSTOMERID.FName` | `FALLAMOUNTFOR` |
 | PUR_PurchaseOrder | `FSupplierId.FName` | `FAllAmount`（行级） |
 | STK_InStock | — | — |
@@ -201,5 +201,5 @@ filter_string="FDocumentStatus = 'B'"
 ### ⚠️ 高频易错点
 
 1. **发货通知**用 `FCustomerID.FName`，**不是** `FCustId.FName`
-2. **销售出库**中**没有**客户字段，客户信息需从关联销售订单获取
+2. **销售出库**客户字段是 `FCustomerID.FName`（不是 `FCustId`）——**可直接查出库单客户，无需绕道销售订单**
 3. **收款/付款**的金额字段是 `FRECTOTALAMOUNTFOR` / `FPAYTOTALAMOUNTFOR`，不是 `FAmount` 或 `FAllAmount`

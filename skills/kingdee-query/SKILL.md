@@ -30,9 +30,46 @@ metadata:
 2. **日期过滤**：半开区间 `FDate >= 'YYYY-MM-DD' AND FDate < 'YYYY-MM-DD+1'`
 3. **FDate vs FCreateDate**：`FDate` 是业务日期（手填），`FCreateDate` 是系统创建时间。按"今天开的单"统计用 `FCreateDate`
 4. **单据状态码**：`Z` = 暂存草稿，`A` = 创建，`B` = 审核中，`C` = 已审核，`D` = 重新审核
-5. **控制数据量**：`top_count` 限制行数，只查必要字段，超过20行数据考虑创建 Excel
-6. **字段不确定时**：先调用 `query_metadata(form_id)` 验证字段是否存在，避免试错
-7. **优先使用高阶查询工具**（v1.2.0+）：`count_bill` 预判数据量 → `query_bill_all` 自动翻页全量查询 → `query_bill_to_file` 万行以上导出到文件
+5. **单据状态口径（默认只看已审核）**：金蝶默认返回多种状态（含未审核的B/草稿）。**特定业务统计场景（业绩统计、经营日报、销售分析、金额汇总）必须默认只取已审核数据**，过滤加 `FDocumentStatus = 'C'`。除非用户明确要求包含未审核/草稿单，否则不得混入。查询列表时按需展示状态字段
+6. **金额口径（默认含税）**：凡是涉及金额的字段，默认取含税金额。销售订单金额字段用 `FAllAmount`（含税合计，行级，统计需按 FBillNo 去重）
+7. **控制数据量**：`top_count` 限制行数，只查必要字段，超过20行数据考虑创建 Excel
+8. **字段不确定时**：先调用 `query_metadata(form_id)` 验证字段是否存在，避免试错
+9. **优先使用高阶查询工具**（v1.2.0+）：`count_bill` 预判数据量 → `query_bill_all` 自动翻页全量查询 → `query_bill_to_file` 万行以上导出到文件
+
+### 🎯 查询准确性纪律（mandatory，2026-09-03 总纲）
+
+> 适用所有数据量。准确性由「机制」而非「仔细」保证。
+
+1. **真实性由接口+截断防护保证**：金蝶 TCP 返回什么就是什么，无"记错/心算错"。唯一出错源是 MCP 截断（>1MB 静默截断）与漏页，已被「落盘 + 行数比对 + exhausted=true + 边界抽查」拦截。数据多少皆如此。
+2. **禁止"人工目检/肉眼核对"措辞与实践**：准确表述为「程序化校验 + 金蝶 view_bill 反查交叉验证」。人工心算/肉眼归总是出错根源，一律脚本聚合。
+3. **数据量小的校验**：≤2000行通常单页 exhausted=true，MCP 截断天然规避；仍须行数比对 count_bill，并对关键单/客户做 view_bill 反查，可全量程序化校验。
+4. **数据量大的校验**：>2000行禁裸查，≥万行强制 query_bill_to_file 落盘，跨月跨年 query_bill_range 分片，交付前三重校验。
+
+### 📊 产品线/金额分析强制纪律（mandatory，2026-08-28 固化）
+
+> **背景**：曾因"凭印象编造产品线分布表"导致金额误差数百万。以下为强制规则，违反即错。
+
+1. **必落盘再聚合**：涉及产品线/客户/业务员 × 金额的分析，**必须先 `query_bill_to_file` 将明细落盘到本地**，再用脚本逐行聚合。**禁止**凭印象、凭知识库分类直接输出分布表。
+2. **三重校验（交付前必做）**：① 落盘行数 == count_bill 预估；② 全部 `FDocumentStatus='C'`；③ 金额口径用 `FAllAmount`（含税）。
+3. **归类用金蝶真实字段**：产品线 = 物料 `FMaterialId.FDescription`（每笔直接挂好），**不得自行脑补归类**；不确定就查实际字段。
+4. **大线抽查**：任一产品线占比 >20% 时，必须展开明细抽查，确认是否由单一大单撑起、是否归对线。
+5. **对角检查**：各产品线金额之和必须等于销售总额，对不上 = 有漏，需重查。
+
+### 📌 必展示字段口径（mandatory，查询与分析都要遵循）
+
+> 以下字段**只要数据里有，必须展示**，不可省略；做**统计/数据分析**时，必须围绕这四个核心字段展开维度。
+
+| 分析维度 | 金蝶字段 | 说明 |
+|---------|---------|------|
+| **产品线/品牌** | `FMaterialId.FDescription`（描述） | 产品线归属，如 兆正工控、揽盛电气·冷源、盛位电子 |
+| **规格型号** | `FMaterialId.FSpecification` | 精确型号，如 ZZC5-350/3P、LSY1-45FD64J |
+| **物料名称** | `FMaterialId.FName` | 品类，如 交流接触器、终端冷源、读卡器 |
+| **客户** | `FCustomerId.FName` / `FCustomerId.FNumber` | 客户名称 + 客户编码 |
+
+- **查询涉及物料时**：必带 物料名称 `FName` + 规格型号 `FSpecification` + 描述/产品线 `FDescription`（三要素不可省）
+- **查询涉及客户时**：必带 客户名称 `FName` + 客户编码 `FNumber`
+- **统计/数据分析**（业绩、销售分析、报表）维度：客户、描述（产品线）、规格型号、物料名称四者必须纳入分析
+- **产品线/品牌 = 描述字段** `FMaterialId.FDescription`
 
 ---
 
@@ -63,6 +100,68 @@ metadata:
 | 当月（>2000行） | 自动翻页全量查询 | `query_bill_all` |
 | 跨季度/跨年 | 日期分片+自动翻页 | `query_bill_range` |
 | 万行以上 | 流式导出到文件 | `query_bill_to_file` |
+
+---
+
+## ⚠️ 大数据量防错防漏规范（mandatory）
+
+> **目标**：承诺「零出错、零遗漏」。无论查询多大的数据量，都必须全程执行本规范。
+> **根因**：金蝶单次 API 上限约 2000 行；MCP tool-result 上限 1MB。超过任一上限时会**静默截断**（不报错但数据不全）——这是数据遗漏的最大隐患。
+
+### 核心决策门槛
+
+- **预计行数 > 2000 或可能超 1MB** → 禁止使用 `query_bill_json` 裸查（必被截断）
+- **预计行数 ≥ 10000（万行级）** → **强制**使用 `query_bill_to_file` 流式落盘，不以内存返回
+- **跨月/跨季度/跨年** → **强制**使用 `query_bill_range` 按 `month` 分片 + 自动翻页
+
+### 四段式执行流程
+
+```
+① count_bill 预估 → ② 分片/落盘采集 → ③ 三重校验 → ④ 交付留痕
+```
+
+### ✅ 三重校验（交付前必做，防漏核心）
+
+**校验① 行数比对（硬指标）**
+```
+最终 row_count（或各分片之和） == count_bill 预估数
+```
+- 相等 → 通过；不等 → 定位差异分片，补查或排查
+
+**校验② exhausted 标志（硬指标）**
+- 所有查询必须返回 `exhausted:true`（已全部拉完）
+- 出现 `false` → 继续翻页，直到拉满，不得提前交付
+
+**校验③ 边界抽查（软校验）**
+- 抽查**首尾日期**、**关键单据编号**、**极大/极小金额**记录是否存在
+- 核对**汇总金额/客户数/产品线数**是否数量级合理
+
+### 七步执行清单（每次大数据查询必走）
+
+```
+□ Step1  count_bill 预估数据量并记录预估值
+□ Step2  按规模选择工具（万级→ query_bill_to_file；跨年→ query_bill_range）
+□ Step3  采集：分片(month) + 翻页 + 落盘，字段精简只取必要项
+□ Step4  校验① 行数 == 预估
+□ Step5  校验② exhausted == true（全部分片）
+□ Step6  校验③ 边界抽查 + 汇总金额合理性
+□ Step7  通过→交付；不通过→定位补查，禁止带漏交付
+```
+
+### 防漏差异化注意点
+
+- **同一订单多行金额（如 `FAllAmount`）** → 统计金额需按 `FBillNo` 去重，避免重复计数
+- **单据状态** → 业务统计默认 `FDocumentStatus='C'`（已审核），除非用户另有要求
+- **产品线归属** → 用 `FMaterialId.FDescription`
+- **日期口径** → 明确用 `FDate`（业务日期）还是 `FCreateDate`（创建时间）
+
+### 校验后验证示例
+
+```json
+// 期望输出形态
+{"row_count": 10035, "exhausted": true, "chunks": 8}
+// 校验：10035 == count_bill 预估值；exhausted=true；首尾日期齐全 → 通过
+```
 
 ---
 
@@ -149,12 +248,20 @@ metadata:
 
 ### 销售出库单 SAL_OUTSTOCK
 
-**✅ 已验证可用字段**：
-- `FBillNo`、`FDate`、`FCreateDate`、`FDocumentStatus`
-- `FCreatorId.FName`（开单人姓名）、`FStockId.FName`（仓库名称）
+**✅ 已验证可用字段**（2026-09-02 实测）：
+- `FBillNo`、`FDate`、`FCreateDate`（出库单过滤推荐字段）、`FDocumentStatus`
+- `FCustomerID.FName`（**客户**：出库单的客户字段是这个，不是 FCustId）
+- `FSalesManID.FName`（销售员/业务员）、`FSaleDeptID.FName`（销售部门）
+- `FCreatorId.FName`（开单人）、`FStockId.FName`（仓库）
+- 行级：`FMaterialId.FName/FSpecification`、`FQty`、`FRealQty`、`FAllAmount`（可直接顶层查询）
 
 **❌ 禁用字段**：
-- `FCustId.FName` → 在 SAL_OUTSTOCK 中**不存在**
+- `FCustId.FName`、`FSalerId.FName` → 在 SAL_OUTSTOCK 中**不存在**（会报 500）
+- 客户请用 `FCustomerID.FName`；销售员请用 `FSalesManID.FName`
+
+**⚠️ 口径硬规则**：
+- 用户要"出库/发货数据"→ 必须查 `SAL_OUTSTOCK`；"退货数据"→ 查 `SAL_RETURNSTOCK`
+- **禁止**用销售订单 `SAL_SaleOrder` 充当出库/发货口径（订单≠已发货，金额/客户口径不同）
 
 ### 库存查询 STK_Inventory
 
@@ -245,8 +352,9 @@ fields_customer = "FName,FNumber,FCreateDate,FKHLB,FFWZY"
 ### 场景4 — 销售出库单
 
 ```python
-fields_outstock = "FBillNo,FDate,FStockId.FName,FCreatorId.FName,FDocumentStatus"
-# 注意：SAL_OUTSTOCK 中不存在 FCustId.FName！
+fields_outstock = "FBillNo,FDate,FCustomerID.FName,FSalesManID.FName,FStockId.FName,FMaterialId.FName,FRealQty,FAllAmount,FDocumentStatus"
+# 出库单客户字段是 FCustomerID.FName（不是 FCustId）；销售员是 FSalesManID.FName
+# 出库/发货数据必须查 SAL_OUTSTOCK，不要用销售订单代替
 ```
 
 ### 场景5 — 采购入库单
@@ -289,7 +397,7 @@ query_bill_json(
     field_keys="FBillNo,FDate,FCustId.FName,FDocumentStatus",
     filter_string="FDate >= '2026-03-01' AND FDate < '2026-03-02'",
     top_count=50,
-    field_order="FDate"
+    order_string="FDate ASC"
 )
 ```
 
@@ -302,9 +410,9 @@ query_bill_all(
     form_id="SAL_SaleOrder",
     field_keys="FBillNo,FDate,FCustId.FName,FAllAmount",
     filter_string="FDate >= '2026-01-01' AND FDate < '2026-07-01'",
-    top_count=2000,
-    field_order="FDate",
-    pages=10              # 最多翻页数（可选，默认20）
+    order_string="FDate ASC",
+    page_size=2000,           # 每页行数（默认2000，建议不超过2000）
+    max_rows=10000            # 最多返回行数（安全上限，默认20000）
 )
 ```
 
@@ -316,9 +424,12 @@ query_bill_all(
 query_bill_range(
     form_id="SAL_SaleOrder",
     field_keys="FBillNo,FDate,FAllAmount",
-    filter_string="FDate >= '2025-01-01' AND FDate < '2026-01-01'",
-    top_count=2000,
-    slice_days=90            # 每片天数（可选，默认90）
+    date_field="FDate",
+    date_from="2025-01-01",
+    date_to="2026-01-01",
+    extra_filter="FDocumentStatus = 'C'",   # 附加过滤（可选）
+    chunk="month",                          # 按片切分：month/quarter/year（默认month）
+    output_path=""                          # 空则内联返回；非空（如 "/tmp/sales.ndjson"）则流式落盘
 )
 ```
 
@@ -329,10 +440,11 @@ query_bill_to_file(
     form_id="SAL_SaleOrder",
     field_keys="FBillNo,FDate,FCustId.FName,FAllAmount,FDocumentStatus",
     filter_string="FDate >= '2025-01-01' AND FDate < '2026-01-01'",
-    top_count=2000
+    output_path="/tmp/sales_2025.ndjson",   # 输出文件绝对路径（必填）
+    page_size=2000
 )
 ```
-> 返回文件路径，数据已写入本地文件，避免 tool-result 超限。
+> 返回文件路径，数据已流式写入本地文件，避免 tool-result 超限。
 
 ### 数据量预判（v1.1.0+）
 
@@ -359,14 +471,14 @@ view_bill(form_id="SAL_SaleOrder", number="XSDD2602000001")
 # ✅ 推荐做法
 query_bill_json(
     ...
-    field_order="FDate",                      # 按日期排序
+    order_string="FDate ASC",                 # 按日期排序
     filter_string="... AND FDocumentStatus = 'C'",  # 只查已审核
 )
 
 # 推荐过滤条件：
 # FDocumentStatus = 'C'  → 过滤暂存/草稿
 # FCloseStatus           → 判断是否已关闭
-# field_order="FDate"    → 结果按日期排序
+# order_string="FDate ASC"  → 结果按日期排序
 ```
 
 ---
@@ -386,5 +498,7 @@ query_bill_json(
 | 库存总览、预警、呆滞分析 | `references/inventory-analysis-workflow.md` |
 | 订单全流程追踪、逾期预警 | `references/order-tracking-workflow.md` |
 | 生成周报/月报、期间对比 | `references/periodic-report-workflow.md` |
+| 查询总账凭证、借贷分录 | `references/gl-voucher-guide.md` |
+| 适配本系统字段/ID映射/单号规律 | `references/customization-guide.md` |
 
 > **重要**：`field-rules.md` 中的「第 0 条 — 禁止猜测字段名」是所有查询的最高优先级规则，请严格遵守。

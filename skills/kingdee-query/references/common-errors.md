@@ -50,7 +50,7 @@
 | `FNumber`（库存表中） | `FMaterialId.FNumber` | STK_Inventory |
 | `FStockQty` | `FBaseQty` | STK_Inventory |
 | `FMinStockQty` / `FLowStockQty` | 不存在，需手动设阈值 | STK_Inventory |
-| `FCustId.FName`（出库单中） | 不存在，从关联订单获取 | SAL_OUTSTOCK |
+| `FCustId.FName`（出库单中） | 不存在，客户请用 `FCustomerID.FName` | SAL_OUTSTOCK |
 | `FAllQty`（出库单中） | 不存在 | SAL_OUTSTOCK |
 | `FContact` / `FPhone` | 不存在，联系人/电话在自定义字段中（用 query_metadata 确认） | BD_Customer |
 | `FIsArchive` / `FSaleOrgId` / `FID` | 不存在 | BD_Customer |
@@ -146,7 +146,8 @@ query_bill_all(
     form_id="SAL_SaleOrder",
     field_keys="FBillNo,FDate,FCustId.FName,FAmount",
     filter_string="FDate >= '2025-01-01' AND FDate < '2025-06-01'",
-    top_count=2000
+    page_size=2000,   # 每页行数（默认2000）
+    max_rows=10000    # 最多返回行数（安全上限，默认20000）
 )
 ```
 
@@ -157,9 +158,12 @@ query_bill_all(
 query_bill_range(
     form_id="SAL_SaleOrder",
     field_keys="FBillNo,FDate,FCustId.FName,FAmount",
-    filter_string="FDate >= '2025-01-01' AND FDate < '2025-12-31'",
-    top_count=2000,
-    slice_days=90  # 每片90天
+    date_field="FDate",
+    date_from="2025-01-01",
+    date_to="2026-01-01",
+    extra_filter="FDocumentStatus = 'C'",   # 附加过滤（可选）
+    chunk="month",                          # month/quarter/year（默认month）
+    output_path=""                          # 空则内联返回；非空则流式落盘
 )
 ```
 
@@ -171,7 +175,8 @@ query_bill_to_file(
     form_id="SAL_SaleOrder",
     field_keys="FBillNo,FDate,FCustId.FName,FAmount",
     filter_string="FDate >= '2025-01-01' AND FDate < '2025-12-31'",
-    top_count=2000
+    output_path="/tmp/orders.ndjson",  # 输出文件绝对路径（必填）
+    page_size=2000
 )
 # 返回文件路径，数据已写入本地文件
 ```
@@ -230,6 +235,28 @@ view_bill(form_id=..., number=...)
 
 ---
 
+## 错误7: 权限不足 / 结果异常为空
+
+MCP Server 不实现数据权限，所有查询都以配置的集成用户（`KD_USERNAME`）身份执行，能看到什么数据完全由该用户在金蝶云星空中的权限决定。权限问题有两种表现，**必须分开判断**：
+
+### 表现1：显式报错（功能权限不足）
+
+```json
+{"ErrorCode": 500, "Message": "您没有该功能的操作权限"}
+```
+
+容易识别，按信息提示用户联系管理员为集成用户补齐对应表单/操作权限即可。
+
+### 表现2：静默过滤（数据权限限制），不报错
+
+- `count_bill` / `query_bill*` 正常返回，但行数比预期少，甚至为 0
+- 这是金蝶数据规则（按组织/部门/业务员等过滤）在生效，**服务端不会返回任何错误提示**
+
+> ⚠️ **对 LLM 的重要提示：查询结果为空或行数明显偏少时，不要直接向用户断言"该时间段无单据"或"无相关数据"。**
+> 应先说明这也可能是集成用户的数据权限限制导致，并建议用户用同一账号登录金蝶云星空 Web 端执行相同条件查询，对比行数以确认是否为权限过滤（而非真实无数据）。
+>
+> 本项目另有**用户级金蝶权限拦截**（`build_kingdee_form_filter`）：在 Web handler 与 Agent 拦截点统一按当前用户身份注入过滤条件，无表单权限时直接拒绝。即使有权限拦截，集成用户的星空侧数据权限仍可能进一步静默过滤，两套机制都需要考虑。
+
 ---
 
 ## "查询出错" vs "查不到数据" — 不要混淆！
@@ -270,3 +297,4 @@ view_bill(form_id=..., number=...)
 5. ✅ **会话是否过期？** → v1.3.2+ 支持自动恢复，重试即可
 6. ✅ **单据状态是否正确？** → 检查 FDocumentStatus，按流程操作
 7. ✅ **必填字段是否完整？** → 参考已有单据的数据结构
+8. ✅ **结果为空是否因数据权限？** → 用同一集成用户账号登录金蝶云星空 Web 端比对行数，不要直接断言无数据
