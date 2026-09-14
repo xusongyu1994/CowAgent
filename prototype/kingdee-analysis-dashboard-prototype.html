@@ -1,0 +1,860 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>金蝶数据分析智能体 · 可交互原型 v2</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        primary: { DEFAULT:'#35A85B', dark:'#228547', deeper:'#1C6B3B' },
+        bg: { DEFAULT:'#111111', card:'#1A1A1A', deep:'#0A0A0A' },
+      },
+      fontFamily: { sans: ['Inter','system-ui','sans-serif'] },
+    }
+  }
+}
+</script>
+<style>
+  body { font-family: 'Inter','system-ui',sans-serif; }
+  .fade-in { animation: fadeIn .3s ease; }
+  @keyframes fadeIn { from{opacity:0; transform:translateY(6px);} to{opacity:1; transform:none;} }
+  .scrollbar::-webkit-scrollbar { width:6px; height:6px; }
+  .scrollbar::-webkit-scrollbar-thumb { background:#374151; border-radius:3px; }
+  .scrollbar::-webkit-scrollbar-track { background:transparent; }
+  .msg { transition: opacity .3s; }
+  .typing-dot { animation: blink 1.2s infinite; }
+  @keyframes blink { 0%,80%,100%{opacity:.2} 40%{opacity:1} }
+  .sug-card { transition: all .15s; cursor:pointer; }
+  .sug-card:hover { transform: translateY(-1px); border-color:#35A85B; background:#16281b; }
+  .toolbar-btn { transition: all .15s; cursor:pointer; }
+  .toolbar-btn:hover { border-color:#64748b; background:#1e293b; }
+  .toolbar-btn.active { border-color:#35A85B; background:rgba(53,168,91,.12); color:#4ade80; }
+  .chart-card { transition: border-color .15s; }
+  .chart-card:hover { border-color: rgba(53,168,91,.4); }
+  .view-menu { box-shadow: 0 10px 30px rgba(0,0,0,.5); }
+  .view-menu input[type=checkbox] { accent-color:#35A85B; }
+  .view-menu select { background:#0f172a; color:#cbd5e1; border:1px solid #334155; border-radius:6px; padding:2px 6px; font-size:11px; outline:none; }
+  .type-chip { transition:all .12s; cursor:pointer; }
+  .type-chip.active { background:rgba(53,168,91,.2); color:#4ade80; border-color:#35A85B; }
+  .mini-scroll::-webkit-scrollbar { width:4px; height:4px; }
+  .mini-scroll::-webkit-scrollbar-thumb { background:#334155; border-radius:2px; }
+</style>
+</head>
+<body class="bg-bg text-slate-200 min-h-screen">
+
+<!-- ===================== 顶部说明栏 ===================== -->
+<div class="bg-primary-deeper/30 border-b border-primary-dark/30 px-6 py-3 flex items-center justify-between">
+  <div class="flex items-center gap-3">
+    <span class="text-primary font-semibold text-sm tracking-wide">金蝶数据分析智能体 · 可交互原型 v2</span>
+    <span class="text-[11px] text-slate-400">多字段数据 · ⚙视图设置 · 定点下钻 · 多系列双轴 · 布局升级</span>
+  </div>
+  <div class="flex items-center gap-2 text-[11px] text-slate-400">
+    <span class="px-2 py-0.5 bg-primary/10 text-primary rounded">🔒 权限: 本人+下属</span>
+    <span class="px-2 py-0.5 bg-blue-500/10 text-blue-300 rounded">👤 当前用户: 张三</span>
+  </div>
+</div>
+
+<!-- 交互提示 -->
+<div class="bg-blue-500/10 border-b border-blue-500/30 px-6 py-2 text-[12px] text-blue-300 flex flex-wrap gap-x-4 gap-y-1">
+  <span>👉 选模板后，图表卡右上角 <b class="text-white">⚙ 视图设置</b>：显示数量(前5/10/20/全部) + 图类型(柱/线/饼/面积/表格)</span>
+  <span>👉 <b class="text-white">悬浮数据点</b> → tooltip 展示该点全部伴随字段(金额/订单数/数量/占比/环比)</span>
+  <span>👉 <b class="text-white">勾选 2+ 数值字段</b> → 多系列对比，量纲差异大自动<b class="text-emerald-300">双 Y 轴</b></span>
+  <span>👉 <b class="text-amber-300">点击某根柱子/扇区/折线点</b> → 定点下钻该对象；<b class="text-amber-300">点击图表空白</b> → 整图下钻</span>
+  <span>👉 <b class="text-teal-300">切到「表格」视图</b> → 点击某行定点下钻该行</span>
+  <span>👉 顶部 <b class="text-white">1列/2列</b> 切换看板密度（默认 1 列大图）；KPI 卡独立 auto-fit 排布</span>
+  <span>👉 左侧对话栏 <b class="text-white">「收起 ◀」</b> 看板占满全屏，右下 <b class="text-white">「▶ 展开」</b> 恢复</span>
+  <span class="text-fuchsia-300">🎯 每张图的数量/类型/系列选择会记忆，切换标签页再回来不丢</span>
+</div>
+
+<div class="h-screen flex flex-col">
+
+  <!-- ===================== 页面标题区 ===================== -->
+  <div class="px-6 py-4 flex items-center justify-between border-b border-slate-800/60 shrink-0">
+    <div class="flex items-center gap-3">
+      <button class="text-slate-400 hover:text-white text-sm">← 返回</button>
+      <div class="w-px h-5 bg-slate-700"></div>
+      <h1 class="text-lg font-semibold text-white">数据分析</h1>
+      <span class="text-xs text-slate-500">/</span>
+      <span class="text-sm text-primary">金蝶经营分析</span>
+    </div>
+    <div class="flex items-center gap-2 text-xs">
+      <span class="flex items-center gap-1.5 text-emerald-400"><span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span> 智能体在线</span>
+      <span class="text-slate-500">数据范围: 本人 + 下属</span>
+    </div>
+  </div>
+
+  <div class="flex-1 flex overflow-hidden relative">
+
+    <!-- ===================== 左侧 对话区 (可收起) ===================== -->
+    <div id="chatPanel" class="w-[38%] min-w-[340px] max-w-[520px] border-r border-slate-800/60 flex flex-col bg-deep transition-all duration-300">
+
+      <!-- 智能体头部 + 收起按钮 -->
+      <div class="px-4 py-3 border-b border-slate-800/60 flex items-center gap-3 shrink-0">
+        <div class="w-9 h-9 rounded-full bg-gradient-to-br from-primary to-emerald-600 flex items-center justify-center text-white font-bold text-sm glow shrink-0">AI</div>
+        <div class="flex-1 min-w-0">
+          <div class="text-sm font-medium text-white flex items-center gap-2">金蝶分析智能体
+            <span class="text-[10px] text-slate-500 font-normal">资深分析师 · 引导层层下钻</span>
+          </div>
+        </div>
+        <button onclick="collapseChat()" title="收起对话栏（看板占满全屏）" class="toolbar-btn flex items-center gap-1 px-2 py-1 text-[11px] bg-card border border-slate-700/60 rounded-lg text-slate-400">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M15 18l-6-6 6-6"/></svg>收起
+        </button>
+      </div>
+
+      <!-- 对话消息流 -->
+      <div id="chatStream" class="flex-1 overflow-y-auto scrollbar p-4 space-y-4">
+        <!-- 初始问候 -->
+        <div class="flex gap-2.5 msg fade-in">
+          <div class="w-7 h-7 rounded-full bg-primary/20 text-primary flex items-center justify-center text-xs font-bold shrink-0 mt-0.5">AI</div>
+          <div class="flex-1">
+            <div class="bg-card border border-slate-800 rounded-2xl rounded-tl-sm px-4 py-3 text-[13px] leading-relaxed text-slate-300">
+              你好，我是你的<span class="text-primary font-medium">金蝶数据分析智能体</span>。👋<br>
+              我可以帮你分析销售、订单、应收、库存等经营数据，并<span class="text-slate-200">主动给你下一步的分析建议</span>。
+              <div class="mt-3 text-[12px] text-slate-500">👇 先在右侧选择一个分析模板，或直接告诉我你想看什么。</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 输入框 -->
+      <div class="p-4 border-t border-slate-800/60 shrink-0">
+        <div class="flex items-end gap-2 bg-card border border-slate-700/60 rounded-xl px-3 py-2 focus-within:border-primary/50">
+          <textarea rows="2" id="userInput" class="flex-1 bg-transparent resize-none outline-none text-[13px] placeholder-slate-500" placeholder="告诉智能体你想分析什么，例如：按产品线下钻分析销售"></textarea>
+          <button onclick="sendChat()" class="bg-primary hover:bg-primary-dark text-white rounded-lg w-8 h-8 flex items-center justify-center shrink-0 cursor-pointer transition-colors">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2 11 13M22 2l-7 20-4-9-9-4z"/></svg>
+          </button>
+        </div>
+        <div class="text-[11px] text-slate-600 mt-1.5 px-1">数据权限: 本人+下属 · 点击图表数据点可定点下钻</div>
+      </div>
+    </div>
+
+    <!-- 对话栏已收起时的悬浮展开按钮 -->
+    <button id="expandChatBtn" onclick="expandChat()" class="hidden absolute left-2 top-1/2 -translate-y-1/2 z-30 flex items-center gap-1 px-2 py-2 bg-primary/90 hover:bg-primary text-white text-[11px] rounded-r-lg shadow-xl cursor-pointer">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 18l6-6-6-6"/></svg>
+    </button>
+
+    <!-- ===================== 右侧 看板工作区 ===================== -->
+    <div class="flex-1 flex flex-col bg-bg min-w-0">
+
+      <!-- 看板工具栏 -->
+      <div class="px-5 py-3 border-b border-slate-800/60 flex items-center gap-3 flex-wrap shrink-0">
+        <button onclick="toggleTemplatePicker()" class="toolbar-btn flex items-center gap-2 px-3 py-1.5 text-[13px] bg-card border border-slate-700/60 rounded-lg">
+          <span class="text-primary">▦</span> <span id="currentTemplateLabel">选择模板</span> <span class="text-slate-500">▼</span>
+        </button>
+
+        <div class="flex items-center gap-1.5 px-3 py-1.5 bg-card border border-slate-700/60 rounded-lg text-[12px]">
+          <span class="text-slate-500">时间</span>
+          <select class="bg-transparent outline-none text-slate-300 cursor-pointer">
+            <option>上月</option><option>本月</option><option>本季</option><option>本年度</option>
+          </select>
+        </div>
+
+        <!-- 列数切换：只影响图表网格，KPI 独立排不受影响 -->
+        <div class="flex items-center gap-1 bg-card border border-slate-700/60 rounded-lg px-1 py-1 text-[11px]">
+          <span class="text-slate-500 px-1">列数</span>
+          <button onclick="setCols(1)" id="colBtn1" class="toolbar-btn active px-2 py-0.5 rounded-md border border-slate-700/60">1列</button>
+          <button onclick="setCols(2)" id="colBtn2" class="toolbar-btn px-2 py-0.5 rounded-md border border-slate-700/60">2列</button>
+        </div>
+
+        <div class="flex-1"></div>
+
+        <button onclick="demoToast('已导出当前看板 Excel（演示）')" class="px-3 py-1.5 text-[12px] bg-card border border-slate-700/60 rounded-lg hover:bg-slate-800 cursor-pointer">导出</button>
+        <button onclick="resetBoard()" class="px-3 py-1.5 text-[12px] bg-red-500/10 text-red-400 border border-red-500/30 rounded-lg hover:bg-red-500/20 cursor-pointer">↺ 清空会话</button>
+      </div>
+
+      <!-- 看板主体 -->
+      <div class="flex-1 overflow-y-auto scrollbar p-5">
+        <!-- 模板选择面板 -->
+        <div id="templatePicker" class="fade-in">
+          <div class="text-sm text-slate-400 mb-3">选择一个分析模板，智能体会为你生成初始看板并主动给出分析建议</div>
+
+          <!-- 权限状态栏 (与金蝶权限统一) -->
+          <div class="bg-card border border-slate-700/60 rounded-xl px-4 py-2.5 mb-4 flex flex-wrap items-center gap-x-5 gap-y-1 text-[12px]">
+            <span class="text-slate-400">🔑 当前权限</span>
+            <span class="text-slate-300">👤 张三</span>
+            <span class="px-2 py-0.5 bg-primary/10 text-primary rounded">数据范围: 本人+下属</span>
+            <span class="px-2 py-0.5 bg-blue-500/10 text-blue-300 rounded">已授权表单: 销售订单 / 物料档案 / 销售出库 / 应收 / 报价单</span>
+            <span class="px-2 py-0.5 bg-amber-500/10 text-amber-300 rounded">无权限: 采购单 / 客户档案</span>
+          </div>
+
+          <div class="grid grid-cols-2 lg:grid-cols-3 gap-4">
+            <div onclick="selectTemplate('销售经营日报')" class="group bg-card border border-slate-700/60 rounded-xl p-5 hover:border-primary/60 hover:bg-[#16281b] transition-all cursor-pointer fade-in relative">
+              <span class="absolute top-3 right-3 text-[10px] text-primary bg-primary/10 px-1.5 py-0.5 rounded">✓ 已授权</span>
+              <div class="text-3xl mb-3">📈</div>
+              <div class="font-medium text-white text-sm mb-1">销售经营日报</div>
+              <div class="text-[12px] text-slate-500 leading-relaxed">销售额 KPI、销售趋势、客户排行、部门占比</div>
+              <div class="mt-3 text-[11px] text-primary opacity-0 group-hover:opacity-100 transition-opacity">使用此模板 →</div>
+            </div>
+            <div onclick="selectTemplate('产品线销售分析')" class="group bg-card border border-slate-700/60 rounded-xl p-5 hover:border-primary/60 hover:bg-[#16281b] transition-all cursor-pointer fade-in relative">
+              <span class="absolute top-3 right-3 text-[10px] text-primary bg-primary/10 px-1.5 py-0.5 rounded">✓ 已授权</span>
+              <div class="text-3xl mb-3">🏭</div>
+              <div class="font-medium text-white text-sm mb-1">产品线销售分析</div>
+              <div class="text-[12px] text-slate-500 leading-relaxed">各产品线销售额 KPI、销售趋势、产品线占比、产品排行</div>
+              <div class="mt-3 text-[11px] text-primary opacity-0 group-hover:opacity-100 transition-opacity">使用此模板 →</div>
+            </div>
+            <div onclick="deniedTemplate()" class="bg-card border border-slate-700/60 rounded-xl p-5 opacity-50 grayscale cursor-not-allowed fade-in relative" title="您没有客户销售分析所需的表单权限">
+              <span class="absolute top-3 right-3 text-[10px] text-red-400 bg-red-500/10 px-1.5 py-0.5 rounded">🔒 无权限</span>
+              <div class="text-3xl mb-3">🏆</div>
+              <div class="font-medium text-white text-sm mb-1">客户销售分析</div>
+              <div class="text-[12px] text-slate-500 leading-relaxed">Top客户、客户分布、转化率、复购率、流失预警</div>
+              <div class="mt-3 text-[11px] text-slate-600">未授权表单 · 无法使用</div>
+            </div>
+            <div onclick="selectTemplate('应收账款分析')" class="group bg-card border border-slate-700/60 rounded-xl p-5 hover:border-primary/60 hover:bg-[#16281b] transition-all cursor-pointer fade-in relative">
+              <span class="absolute top-3 right-3 text-[10px] text-primary bg-primary/10 px-1.5 py-0.5 rounded">✓ 已授权</span>
+              <div class="text-3xl mb-3">💰</div>
+              <div class="font-medium text-white text-sm mb-1">应收账款分析</div>
+              <div class="text-[12px] text-slate-500 leading-relaxed">逾期金额 KPI、账龄分布、逾期客户排行、到期预警</div>
+              <div class="mt-3 text-[11px] text-primary opacity-0 group-hover:opacity-100 transition-opacity">使用此模板 →</div>
+            </div>
+            <div onclick="selectTemplate('出库数据分析')" class="group bg-card border border-slate-700/60 rounded-xl p-5 hover:border-primary/60 hover:bg-[#16281b] transition-all cursor-pointer fade-in relative">
+              <span class="absolute top-3 right-3 text-[10px] text-primary bg-primary/10 px-1.5 py-0.5 rounded">✓ 已授权</span>
+              <div class="text-3xl mb-3">📦</div>
+              <div class="font-medium text-white text-sm mb-1">出库数据分析</div>
+              <div class="text-[12px] text-slate-500 leading-relaxed">出库量 KPI、出库趋势、出库品类分布、出库区域排行</div>
+              <div class="mt-3 text-[11px] text-primary opacity-0 group-hover:opacity-100 transition-opacity">使用此模板 →</div>
+            </div>
+            <div onclick="selectTemplate('样品单/报价单分析')" class="group bg-card border border-slate-700/60 rounded-xl p-5 hover:border-primary/60 hover:bg-[#16281b] transition-all cursor-pointer fade-in relative">
+              <span class="absolute top-3 right-3 text-[10px] text-primary bg-primary/10 px-1.5 py-0.5 rounded">✓ 已授权</span>
+              <div class="text-3xl mb-3">🔁</div>
+              <div class="font-medium text-white text-sm mb-1">样品单/报价单分析</div>
+              <div class="text-[12px] text-slate-500 leading-relaxed">样品单/报价单→销售订单转化统计、按客户转化率、转化金额</div>
+              <div class="mt-3 text-[11px] text-primary opacity-0 group-hover:opacity-100 transition-opacity">使用此模板 →</div>
+            </div>
+            <div class="bg-primary-deeper/10 border border-dashed border-primary/30 rounded-xl p-5 flex flex-col items-center justify-center text-center cursor-pointer hover:bg-primary-deeper/20 transition-colors fade-in" onclick="selectTemplate('销售经营日报')">
+              <div class="text-3xl mb-3">✨</div>
+              <div class="font-medium text-white text-sm mb-1">跟智能体自由对话</div>
+              <div class="text-[12px] text-slate-500 leading-relaxed">不选模板，直接在左侧描述你想分析的内容</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 看板区 -->
+        <div id="dashboard" class="hidden fade-in">
+          <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <div class="flex items-center gap-2">
+              <span id="boardTitle" class="text-white font-medium text-sm">销售经营日报</span>
+              <span class="px-2 py-0.5 text-[10px] text-primary bg-primary/10 rounded">数据范围: 本人+下属</span>
+              <span class="text-[10px] text-slate-600">口径: 已审核订单含税合计</span>
+            </div>
+            <div class="text-[11px] text-slate-500">点击数据点=定点下钻 · 空白=整图下钻 · ⚙可调数量/类型/系列</div>
+          </div>
+
+          <!-- 看板标签栏 -->
+          <div id="dashboardTabs" class="flex items-center gap-1.5 mb-4 overflow-x-auto pb-1"></div>
+
+          <!-- KPI 区：独立 auto-fit 排布（不受列数切换影响） -->
+          <div id="kpiGrid" class="grid grid-cols-2 xl:grid-cols-4 gap-4 mb-5"></div>
+
+          <!-- 图表网格：受 1/2 列数切换控制 -->
+          <div id="chartGrid" class="grid grid-cols-1 gap-5"></div>
+        </div>
+      </div>
+
+      <!-- 建议面板 (底部横条) -->
+      <div id="suggestionPanel" class="border-t border-slate-800/60 shrink-0 bg-deep">
+        <div class="px-5 py-2 flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <span class="text-primary text-sm">💡</span>
+            <span class="text-[12px] text-white font-medium">智能体建议面板</span>
+            <span class="text-[11px] text-slate-500">点击卡片，让智能体继续深入分析</span>
+          </div>
+          <button id="sugToggleBtn" onclick="toggleSuggestionPanel()" class="text-slate-500 hover:text-white text-xs cursor-pointer">收起 ▾</button>
+        </div>
+        <div id="suggestionCards" class="px-5 pb-3 flex gap-3 overflow-x-auto scrollbar"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- toast -->
+<div id="toast" class="hidden fixed bottom-6 right-6 z-50 px-4 py-2 rounded-lg text-[13px] text-white bg-slate-700/90 shadow-xl"></div>
+
+<script>
+/* =====================================================================
+ * 演示数据（多字段数据点：数值量化字段 + 带%字符串展示字段 + 隐藏 _ 字段）
+ * ===================================================================== */
+const KPIS = [
+  { title:'本月销售额', value:'¥1,286万', delta:'▲ 12.4% 环比', good:true },
+  { title:'目标达成率', value:'86%', delta:'▲ 优于均值 4%', good:true },
+  { title:'有效订单', value:'1,024笔', delta:'环比持平', good:null },
+  { title:'回款金额', value:'¥980万', delta:'⏱ 待回款 ¥306万', good:false },
+];
+
+// 客户销售排行：xKey=name, 数值字段(销售额/订单数/数量 可多系列), 字符串字段(占比/环比 仅展示), _custId 隐藏
+const RANK_DATA = [
+  { name:'华东客户A', 销售额:1286, 订单数:86, 数量:15200, 占比:'22.6%', 环比:'+12.4%', _custId:'C001' },
+  { name:'华南客户B', 销售额:1124, 订单数:71, 数量:13100, 占比:'19.8%', 环比:'+3.2%', _custId:'C002' },
+  { name:'华北客户C', 销售额:986, 订单数:64, 数量:10800, 占比:'17.3%', 环比:'-2.1%', _custId:'C003' },
+  { name:'西南客户D', 销售额:812, 订单数:52, 数量:9400, 占比:'14.3%', 环比:'+8.9%', _custId:'C004' },
+  { name:'华东客户E', 销售额:675, 订单数:44, 数量:7700, 占比:'11.9%', 环比:'+15.6%', _custId:'C005' },
+  { name:'西北客户F', 销售额:512, 订单数:33, 数量:6100, 占比:'9.0%', 环比:'-5.3%', _custId:'C006' },
+  { name:'华中客户G', 销售额:334, 订单数:21, 数量:3900, 占比:'5.9%', 环比:'+0.8%', _custId:'C007' },
+];
+
+// 月度销售趋势：销售额(万,左轴) 与 订单数(笔,右轴) 量纲差异 → 双Y轴演示
+const TREND_DATA = [
+  { month:'1月', 销售额:1240, 订单数:64 }, { month:'2月', 销售额:980, 订单数:51 },
+  { month:'3月', 销售额:1420, 订单数:73 }, { month:'4月', 销售额:1105, 订单数:58 },
+  { month:'5月', 销售额:1380, 订单数:72 }, { month:'6月', 销售额:1286, 订单数:86 },
+];
+
+// 部门业绩占比
+const PIE_DATA = [
+  { name:'华东', 销售额:1286, 订单数:86, 占比:'38.2%' },
+  { name:'华南', 销售额:786, 订单数:52, 占比:'23.3%' },
+  { name:'华北', 销售额:642, 订单数:41, 占比:'19.0%' },
+  { name:'西南', 销售额:656, 订单数:39, 占比:'19.5%' },
+];
+
+/* =====================================================================
+ * 状态
+ * ===================================================================== */
+let boardCols = 1;          // 图表网格列数 1/2
+let tabSeq = 0;
+let tabs = [];              // {id,title,specs,active}
+let activeTabId = null;
+let activeSpecs = [];       // 当前激活标签页的图表卡 spec 数组
+let chartRegistry = {};     // uid -> {chart: Chart实例|null, spec}
+const NUM_FMT = new Intl.NumberFormat('zh-CN');
+
+function uid(){ return 'c' + (Math.random().toString(36).slice(2,9)); }
+function qs(s){ return document.querySelector(s); }
+function scrollBottom(){ const s = qs('#chatStream'); s.scrollTop = s.scrollHeight; }
+function demoToast(msg){ const t=qs('#toast'); t.textContent=msg; t.classList.remove('hidden'); clearTimeout(demoToast._t); demoToast._t=setTimeout(()=>t.classList.add('hidden'),2500); }
+function fmtVal(v){ return typeof v === 'number' ? (Math.abs(v)>=10000 ? (v/10000).toFixed(1)+'万' : NUM_FMT.format(v)) : v; }
+function showMsg(m){ addBubble(m, 'user'); }
+function showAi(html){ addBubble(html, 'ai'); }
+function addBubble(html, who){
+  const c = qs('#chatStream');
+  const div = document.createElement('div');
+  if(who==='user'){
+    div.className='flex justify-end msg fade-in';
+    div.innerHTML=`<div class="bg-primary/90 text-white rounded-2xl rounded-tr-sm px-4 py-2.5 text-[13px] max-w-[85%]">${html}</div>`;
+  }else{
+    div.className='flex gap-2.5 msg fade-in';
+    div.innerHTML=`<div class="w-7 h-7 rounded-full bg-primary/20 text-primary flex items-center justify-center text-xs font-bold shrink-0 mt-0.5">AI</div>
+      <div class="flex-1"><div class="bg-card border border-slate-800 rounded-2xl rounded-tl-sm px-4 py-3 text-[13px] leading-relaxed text-slate-300">${html}</div></div>`;
+  }
+  c.appendChild(div); scrollBottom();
+}
+function typingHtml(){ return `<div class="flex items-center gap-1"><span class="typing-dot text-slate-400 text-xl">·</span><span class="typing-dot text-slate-400 text-xl" style="animation-delay:.3s">·</span><span class="typing-dot text-slate-400 text-xl" style="animation-delay:.6s">·</span><span class="text-[12px] text-slate-500 ml-1">正在查询金蝶数据并生成看板...</span></div>`; }
+
+/* =====================================================================
+ * 对话栏收起 / 展开
+ * ===================================================================== */
+function collapseChat(){
+  const p = qs('#chatPanel');
+  p.classList.add('hidden');
+  qs('#expandChatBtn').classList.remove('hidden');
+}
+function expandChat(){
+  const p = qs('#chatPanel');
+  p.classList.remove('hidden');
+  qs('#expandChatBtn').classList.add('hidden');
+  // Chart resize 重排
+  Object.values(chartRegistry).forEach(r => r.chart && r.chart.resize());
+}
+
+/* =====================================================================
+ * 列数切换（只作用于图表网格）
+ * ===================================================================== */
+function setCols(n){
+  boardCols = n;
+  [1,2].forEach(i => { const b = qs('#colBtn'+i); if(b) b.classList.toggle('active', i===n); });
+  const g = qs('#chartGrid');
+  g.className = 'grid gap-5 ' + (n===1 ? 'grid-cols-1' : 'grid-cols-2');
+  Object.values(chartRegistry).forEach(r => r.chart && r.chart.resize());
+}
+
+/* =====================================================================
+ * 模板选择 / 清空
+ * ===================================================================== */
+function selectTemplate(name){
+  showMsg('我选择用「'+name+'」模板开始分析');
+  const tl = qs('#currentTemplateLabel'); if(tl) tl.textContent = name;
+  const tp = qs('#templatePicker'); tp.classList.add('hidden');
+  qs('#dashboard').classList.remove('hidden');
+  qs('#suggestionPanel').classList.remove('hidden');
+
+  // 每次操作新建标签页（演示）
+  const id = 'tab_' + (++tabSeq);
+  const specs = buildSalesDailySpecs();
+  tabs.push({ id, title:'📊 '+name, specs });
+  activeTabId = id;
+  activeSpecs = specs;
+  renderTabs();
+  renderBoard();
+
+  addBubble(`<div class="bg-card border border-slate-800 rounded-2xl rounded-tl-sm px-4 py-3 text-[13px] leading-relaxed text-slate-300">
+    已为你生成<b class="text-primary">${name}</b>看板（已按"本人+下属"范围过滤）。📊<br><br>
+    <span class="text-slate-200">初步洞察：</span><br>
+    ① 本月销售额 <span class="text-emerald-400">▲ 12.4%</span>，目标达成率 <span class="text-emerald-400">86%</span><br>
+    ② <span class="text-red-400">客户A本月下滑 20%</span>，值得重点下钻<br><br>
+    <span class="text-slate-400 text-[12px]">你可以<b class="text-slate-200">悬浮数据点</b>看多字段明细，点<b class="text-slate-200">柱子</b>定点下钻该客户，或用<b class="text-slate-200">⚙</b>切换数量/类型/系列。</span>
+  </div>`);
+  scrollBottom();
+  renderSuggestions();
+}
+function deniedTemplate(){
+  showAi('很抱歉，<span class="text-red-400">您没有「客户销售分析」所需的表单权限</span>（需 BD_Customer / SAL_SaleOrder）。<br><span class="text-[12px] text-slate-500">该模板已锁定。如需使用，请联系管理员在「权限管理 → 金蝶权限」中为您开通对应表单。</span>');
+}
+function resetBoard(){
+  if(!confirm('确定要清空当前会话和看板吗？将同时清空对话历史，且不可恢复。')) return;
+  tabs=[]; activeTabId=null; activeSpecs=[];
+  Object.values(chartRegistry).forEach(r=>{ try{ r.chart && r.chart.destroy(); }catch(_){ } });
+  chartRegistry = {};
+  qs('#kpiGrid').innerHTML='';
+  qs('#chartGrid').innerHTML='';
+  const te=qs('#dashboardTabs'); if(te) te.innerHTML='';
+  qs('#dashboard').classList.add('hidden');
+  qs('#templatePicker').classList.remove('hidden');
+  qs('#suggestionPanel').classList.add('hidden');
+  showAi('已清空当前会话与看板，可重新选择模板或直接对话开始新的分析。');
+}
+
+/* =====================================================================
+ * 标签页
+ * ===================================================================== */
+function renderTabs(){
+  const el = qs('#dashboardTabs'); el.innerHTML='';
+  if(!tabs.length){ return; }
+  tabs.forEach(tab=>{
+    const isActive = tab.id===activeTabId;
+    const div=document.createElement('div');
+    div.className='flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] cursor-pointer shrink-0 fade-in ' +
+      (isActive ? 'bg-primary/15 border border-primary/40 text-primary' : 'bg-card border border-slate-700/60 text-slate-400 hover:border-slate-500');
+    div.innerHTML=`<span class="max-w-[160px] truncate">${tab.title}</span>
+      <span class="text-slate-500 hover:text-red-400" onclick="event.stopPropagation();closeTab('${tab.id}')">×</span>`;
+    div.onclick=()=>switchTab(tab.id);
+    el.appendChild(div);
+  });
+}
+function switchTab(id){
+  activeTabId=id;
+  const tab=tabs.find(t=>t.id===id); if(!tab) return;
+  activeSpecs=tab.specs;
+  renderTabs(); renderBoard();
+}
+function closeTab(id){
+  const idx=tabs.findIndex(t=>t.id===id); if(idx<0) return;
+  tabs.splice(idx,1);
+  if(activeTabId===id){ activeTabId = tabs.length ? tabs[tabs.length-1].id : null; }
+  if(activeTabId){ const tab=tabs.find(t=>t.id===activeTabId); activeSpecs = tab ? tab.specs : []; }
+  else activeSpecs=[];
+  renderTabs(); renderBoard();
+}
+
+/* =====================================================================
+ * 看板渲染：KPI 独立排 + 图表网格
+ * ===================================================================== */
+function buildSalesDailySpecs(){
+  return [
+    { uid: uid(), kind:'kpi-card' },
+    { uid: uid(), title:'客户销售排行', dimensionLabel:'客户', badge:'排行', specType:'bar', defaultLimit:10,
+      xKey:'name', numericFields:['销售额','订单数','数量'], percentFields:['占比','环比'],
+      data:RANK_DATA, hint:'点击柱子=定点下钻该客户 · 悬浮看多字段',
+      analysis_meta:{ metric:'销售额=已审核订单含税合计', dimension:'客户', time_range:'上月(2026-02)', drill_candidates:['订单构成','产品分布','业务员明细','月度趋势'] } },
+    { uid: uid(), title:'月度销售趋势（双Y轴演示）', dimensionLabel:'月份', badge:'趋势', specType:'line', defaultLimit:0,
+      xKey:'month', numericFields:['销售额','订单数'], percentFields:[],
+      data:TREND_DATA, hint:'量纲不同→勾选两个字段自动双Y轴',
+      analysis_meta:{ metric:'销售额=已审核订单含税合计', dimension:'月份', time_range:'上月(2026-02)', drill_candidates:['按产品线下钻','按客户下钻','异常月份归因'] } },
+    { uid: uid(), title:'部门业绩占比', dimensionLabel:'部门', badge:'占比', specType:'pie', defaultLimit:0,
+      xKey:'name', numericFields:['销售额','订单数'], percentFields:['占比'],
+      data:PIE_DATA, hint:'点击扇区=定点下钻该部门',
+      analysis_meta:{ metric:'销售额=已审核订单含税合计', dimension:'部门', time_range:'上月(2026-02)', drill_candidates:['部门内客户构成','部门趋势','业绩异动归因'] } },
+  ];
+}
+
+function renderBoard(){
+  Object.values(chartRegistry).forEach(r=>{ try{ r.chart && r.chart.destroy(); }catch(_){ } });
+  chartRegistry = {};
+  const kg = qs('#kpiGrid'), cg = qs('#chartGrid');
+  kg.innerHTML=''; cg.innerHTML='';
+  const specs = activeSpecs || [];
+  specs.forEach(sp => {
+    if(sp.kind==='kpi-card'){ renderKpiRow(kg); }
+    else { renderChartCard(cg, sp); }
+  });
+}
+
+// KPI 卡：独立 auto-fit 排布，整卡点击=围绕该指标下钻
+function renderKpiRow(container){
+  KPIS.forEach(kpi=>{
+    const card=document.createElement('div');
+    card.className='bg-card border border-slate-800 rounded-xl p-4 cursor-pointer hover:border-primary/40 transition-colors fade-in';
+    card.onclick=()=>drillWhole('指标「'+kpi.title+'」', '围绕该指标深入分析构成与趋势');
+    card.innerHTML=`
+      <div class="text-[12px] text-slate-500 flex items-center justify-between"><span>${kpi.title}</span><span class="text-[10px] text-slate-600">KPI</span></div>
+      <div class="text-2xl font-semibold text-white mt-1.5">${kpi.value}</div>
+      <div class="text-[11px] mt-1 ${kpi.good===false?'text-red-400':kpi.good===true?'text-emerald-400':'text-slate-400'}">${kpi.delta}</div>`;
+    container.appendChild(card);
+  });
+}
+
+/* =====================================================================
+ * 图表卡（核心）：header + ⚙视图设置 + Chart.js 渲染 + 定点下钻
+ * ===================================================================== */
+function buildChartSpec(sp){
+  // 视图状态（记忆在 spec._view，切换标签页不丢）
+  if(!sp._view) sp._view = { type: sp.specType, limit: sp.defaultLimit, series: [sp.numericFields[0]] };
+  return sp;
+}
+
+function renderChartCard(container, spIn){
+  const sp = buildChartSpec(spIn);
+  const card = document.createElement('div');
+  card.className='chart-card relative bg-card border border-slate-700/60 rounded-xl p-4 fade-in';
+  const TYPE_LABEL = { bar:'柱状', line:'折线', pie:'饼图', area:'面积', table:'表格' };
+  card.innerHTML=`
+    <div class="flex items-center justify-between mb-3 gap-2">
+      <div class="text-[13px] text-white font-medium truncate" title="${sp.title}">${sp.title}
+        <span class="text-[10px] text-slate-600 font-normal ml-1">(${sp.dimensionLabel||'维度'})</span></div>
+      <div class="flex items-center gap-1.5 shrink-0">
+        <span class="view-badge text-[10px] px-1.5 py-0.5 rounded bg-primary/10 text-primary">${TYPE_LABEL[sp._view.type]||sp._view.type}</span>
+        <button onclick="event.stopPropagation();demoToast('已导出该图表全量数据为 Excel（演示）')" class="text-[10px] text-slate-500 hover:text-emerald-400 bg-card border border-slate-700/60 rounded px-1.5 py-0.5 cursor-pointer" title="导出全量数据">⤓</button>
+        <button onclick="event.stopPropagation();toggleViewMenu('${sp.uid}')" class="text-[10px] text-slate-400 hover:text-primary bg-card border border-slate-700/60 rounded px-1.5 py-0.5 cursor-pointer" title="视图设置：数量/图类型/数值系列">⚙</button>
+      </div>
+    </div>
+    <div class="view-slot h-[260px] relative"></div>
+    <div class="absolute bottom-1.5 right-3 text-[9px] text-primary/70">🔍 点击数据点定点下钻 · 空白整图下钻</div>
+    <div id="vmenu_${sp.uid}" class="view-menu hidden absolute right-2 top-11 z-30 w-60 bg-[#0f172a] border border-slate-600 rounded-xl p-3 text-[12px]"></div>
+  `;
+  container.appendChild(card);
+  const slot = card.querySelector('.view-slot');
+  // 空白/背景点击 → 整图下钻（数据点点击由 Chart onClick 处理并阻止冒泡）
+  slot.addEventListener('click', e => {
+    if(e.target === slot || e.target.classList.contains('empty-slot')){ drillWhole(sp.title, '整图继续下钻', sp); }
+  });
+  buildViewMenu(sp, card);
+  renderView(sp, card);
+}
+
+// ⚙ 视图设置菜单：显示数量 / 图类型 / 数值系列勾选
+function buildViewMenu(sp, card){
+  const menu = card.querySelector('#vmenu_'+sp.uid);
+  const opts = sp.data.length <= 5 ? ['全部'] : ['前5','前10','前20','全部'];
+  const cur = sp._view.limit === 0 ? '全部' : ('前'+sp._view.limit);
+  const limitOptions = opts.map(o=>`<option value="${o}" ${o===cur?'selected':''}>${o}</option>`).join('');
+  const types = [['bar','柱状'],['line','折线'],['pie','饼图'],['area','面积'],['table','表格']];
+  const typeChips = types.map(t=>`<span data-type="${t[0]}" class="type-chip ${sp._view.type===t[0]?'active':''} inline-block px-1.5 py-0.5 rounded border text-[11px] ${sp._view.type===t[0]?'border-primary text-emerald-300':'border-slate-700 text-slate-400'}">${t[1]}</span>`).join(' ');
+  const seriesBoxes = sp.numericFields.map(f=>{
+    const on = sp._view.series.includes(f);
+    return `<label class="flex items-center gap-1.5 cursor-pointer"><input type="checkbox" data-field="${f}" ${on?'checked':''}> ${f}</label>`;
+  }).join('');
+  menu.innerHTML=`
+    <div class="font-medium text-slate-300 mb-2 flex items-center gap-1"><span class="text-primary">⚙</span> 视图设置</div>
+    <div class="mb-2"><div class="text-[10px] text-slate-500 mb-1">显示数量</div>
+      <select onchange="onLimitChange('${sp.uid}',this.value)">${limitOptions}</select></div>
+    <div class="mb-2"><div class="text-[10px] text-slate-500 mb-1">图类型</div>
+      <div class="flex flex-wrap gap-1" onclick="event.stopPropagation()">${typeChips}</div></div>
+    <div><div class="text-[10px] text-slate-500 mb-1">数值系列（多选=多系列/双Y轴）</div>
+      <div class="grid grid-cols-2 gap-1" onclick="event.stopPropagation()">${seriesBoxes}</div></div>
+    <div class="text-[9px] text-slate-600 mt-2">占比/环比为展示字段，不参与系列；选择会记忆</div>`;
+  menu.querySelectorAll('.type-chip').forEach(el=>{
+    el.onclick=()=>{ const t=el.dataset.type; sp._view.type=t;
+      if(t==='pie' && sp._view.series.length>1){ sp._view.series=[sp._view.series[0]]; demoToast('饼图仅支持单系列，已收敛为主指标'); }
+      refreshCard(sp); };
+  });
+  menu.querySelectorAll('input[data-field]').forEach(el=>{
+    el.onchange=()=>{
+      const f=el.dataset.field;
+      if(el.checked){
+        if(sp._view.type==='pie' && sp._view.series.length>=1 && !sp._view.series.includes(f)){ el.checked=false; demoToast('饼图仅支持单系列'); return; }
+        if(!sp._view.series.includes(f)) sp._view.series.push(f);
+      }
+      else sp._view.series = sp._view.series.filter(x=>x!==f);
+      if(!sp._view.series.length){ sp._view.series=[sp.numericFields[0]]; el.checked=true; demoToast('至少保留一个数值系列'); }
+      refreshCard(sp);
+    };
+  });
+}
+
+function onLimitChange(spUid, val){
+  const sp = findSpec(spUid); if(!sp) return;
+  sp._view.limit = val==='全部' ? 0 : parseInt(val.replace('前',''),10);
+  refreshCard(sp);
+}
+
+function findSpec(spUid){
+  for(const tab of tabs){ const f = tab.specs.find(s=>s.uid===spUid); if(f) return f; }
+  return null;
+}
+
+function toggleViewMenu(spUid){
+  const el = qs('#vmenu_'+spUid); if(!el) return;
+  const all = document.querySelectorAll('.view-menu');
+  all.forEach(m=>{ if(m.id!=='vmenu_'+spUid) m.classList.add('hidden'); });
+  el.classList.toggle('hidden');
+}
+document.addEventListener('click', e=>{ if(!e.target.closest('.view-menu') && !e.target.closest('.chart-card')) document.querySelectorAll('.view-menu').forEach(m=>m.classList.add('hidden')); });
+
+// 根据视图状态截断数据
+function slicedData(sp){
+  const rows = sp.data || [];
+  if(!sp._view.limit || sp._view.limit>=rows.length) return rows;
+  return rows.slice(0, sp._view.limit);
+}
+
+/* ---------- 渲染视图：Chart.js 或 表格 ---------- */
+function renderView(sp, card){
+  const slot = card.querySelector('.view-slot');
+  slot.innerHTML='';
+  if(sp._view.type==='table'){ renderTable(slot, sp); return; }
+  const canvas=document.createElement('canvas'); slot.appendChild(canvas);
+  const rows = slicedData(sp);
+  if(!rows.length){ slot.innerHTML='<div class="text-center py-16 text-[12px] text-slate-500">暂无数据</div>'; return; }
+  const labels = rows.map(r=>r[sp.xKey]);
+  const isDark = document.body.classList.contains('bg-bg');
+  const tickColor = '#9ca3af', gridColor='rgba(255,255,255,.07)';
+  const palette = ['#35A85B','#3b82f6','#f59e0b','#a855f7','#ef4444','#06b6d4'];
+  const series = sp._view.series || [sp.numericFields[0]];
+  // 自动聚类分轴：主系列值域为基准，其余系列值域跨度比 ≥20 倍 → 右轴(y1)，否则共用左轴(y)
+  const base = rows.map(r=>r[series[0]]);
+  const baseMin = Math.min.apply(null, base), baseMax = Math.max.apply(null, base);
+  const baseSpan = Math.max(Math.abs(baseMax), Math.abs(baseMin), 1e-9);
+  const axisOf = series.map((f,i)=>{
+    if(i===0) return 'y';
+    const vals = rows.map(r=>r[f]).filter(v=>typeof v==='number' && isFinite(v));
+    const sMin = Math.min.apply(null, vals), sMax = Math.max.apply(null, vals);
+    const span = Math.max(Math.abs(sMax), Math.abs(sMin), 1e-9);
+    return (span / baseSpan) >= 20 ? 'y1' : 'y';
+  });
+  const datasets = series.map((f,i)=>{
+    const onRight = axisOf[i]==='y1';
+    const hasRight = axisOf.some(a=>a==='y1');
+    return {
+      label:f,
+      data: rows.map(r=>r[f]),
+      backgroundColor: sp._view.type==='line'||sp._view.type==='area' ? (onRight?'rgba(59,130,246,.2)':'rgba(53,168,91,.2)') : (onRight?'rgba(59,130,246,.5)':palette[i%6]+'cc'),
+      borderColor: onRight ? '#3b82f6' : palette[i%6],
+      borderWidth: 1.5,
+      fill: sp._view.type==='area',
+      tension:.3,
+      yAxisID: onRight ? 'y1' : 'y',   // 聚类分轴：量级悬殊挂右轴，同量纲共用左轴
+      order: hasRight && onRight ? -i : 0,
+    };
+  });
+  // 若实际没有字段挂右轴（全同量纲），隐藏右轴
+  const anyRight = axisOf.some(a=>a==='y1');
+  // 负值检测：任一数值系列含负值 → 该轴取消 0 基线（beginAtZero:false），负值完整可读
+  const seriesHasNeg = f => rows.some(r => typeof r[f]==='number' && isFinite(r[f]) && r[f] < 0);
+  const yNeg = series.some((f,i)=> axisOf[i]==='y'  && seriesHasNeg(f));
+  const y1Neg = series.some((f,i)=> axisOf[i]==='y1' && seriesHasNeg(f));
+  const chartConfig = {
+    type: sp._view.type==='area' ? 'line' : sp._view.type,
+    data: { labels, datasets },
+    options: {
+      responsive:true, maintainAspectRatio:false,
+      interaction:{ mode: datasets.length>1 ? 'nearest':'index', intersect:false },
+      plugins:{
+        legend: { display: datasets.length>1 || sp._view.type==='pie', position:'bottom', onClick:null, labels:{ color:'#9ca3af', font:{size:10}, boxWidth:10 } },
+        tooltip: {
+          backgroundColor:'rgba(15,23,42,.95)', titleColor:'#f1f5f9', bodyColor:'#cbd5e1', padding:8,
+          callbacks: {
+            title: items=>String(rows[items[0].dataIndex][sp.xKey]),
+            label: ctx => { const v=ctx.raw; return ` ${ctx.dataset.label}: ${fmtVal(v)}`; },
+            afterBody: items => {
+              const r = rows[items[0].dataIndex] || {};
+              const lines=[];
+              Object.keys(r).forEach(k=>{
+                if(k===sp.xKey) return;
+                if(k.startsWith('_')) return;
+                if(series.includes(k)) return; // 系列值已在 label 展示
+                lines.push(` ${k}: ${typeof r[k]==='number'?fmtVal(r[k]):r[k]}`);
+              });
+              return lines;
+            }
+          }
+        }
+      },
+      scales: sp._view.type==='pie' ? {} : {
+        x:{ ticks:{color:tickColor,font:{size:10}}, grid:{display:false}, maxRotation:30, autoSkip:true },
+        y:{ beginAtZero:!yNeg, position:'left', title:{display:series.length>1, text:series.filter((f,i)=>axisOf[i]==='y').join(' / ')||series[0], color:'#35A85B', font:{size:9}}, ticks:{color:tickColor,font:{size:9}}, grid:{color:gridColor} },
+        y1:{ beginAtZero:!y1Neg, position:'right', display: anyRight, title:{display:anyRight, text:series.filter((f,i)=>axisOf[i]==='y1').join(' / '), color:'#3b82f6', font:{size:9}}, ticks:{color:tickColor,font:{size:9}}, grid:{drawOnChartArea:false} }
+      },
+      onClick: (evt, elements)=>{
+        if(evt.native) evt.native.stopPropagation();
+        if(elements && elements.length){
+          const idx=elements[0].index;
+          const row=rows[idx]; if(!row) return;
+          drillPoint(sp, row);
+        } else {
+          drillWhole(sp.title, '对整图继续下钻', sp);
+        }
+      },
+      onHover:(evt,elements)=>{ const t=evt.native&&evt.native.target; if(t) t.style.cursor = (elements&&elements.length)?'pointer':'default'; },
+    }
+  };
+  try {
+    const chart = new Chart(canvas.getContext('2d'), chartConfig);
+    chartRegistry[sp.uid] = { chart, spec:sp };
+  } catch(e){ console.warn('chart err', e); }
+}
+
+/* ---------- 表格视图：全字段全行，行点击定点下钻 ---------- */
+function renderTable(slot, sp){
+  const rows = slicedData(sp);
+  if(!rows.length){ slot.innerHTML='<div class="text-center py-16 text-[12px] text-slate-500">暂无数据</div>'; return; }
+  // 列：xKey 置前，其余可见字段按出现顺序
+  const allCols=[]; rows.forEach(r=>Object.keys(r).forEach(k=>{ if(!k.startsWith('_')&&!allCols.includes(k)) allCols.push(k); }));
+  const cols = [sp.xKey, ...allCols.filter(c=>c!==sp.xKey)];
+  let html=`<div class="max-h-[260px] overflow-y-auto mini-scroll rounded-lg border border-slate-800">
+    <table class="w-full text-[11px]"><thead class="sticky top-0"><tr class="bg-slate-800/80 text-slate-400">`;
+  cols.forEach(c=>{ html+=`<th class="px-2 py-1.5 text-left font-medium whitespace-nowrap">${c}</th>`; });
+  html+='</tr></thead><tbody>';
+  rows.forEach((r,i)=>{
+    html+=`<tr class="border-t border-slate-800/50 hover:bg-primary/5 cursor-pointer" title="点击行定点下钻该${sp.dimensionLabel||'数据'}">
+      ${cols.map(c=>`<td class="px-2 py-1.5 text-slate-300 whitespace-nowrap">${typeof r[c]==='number'?fmtVal(r[c]):(r[c]==null?'-':r[c])}</td>`).join('')}
+    </tr>`;
+  });
+  html+='</tbody></table></div>';
+  slot.innerHTML=html;
+  slot.querySelectorAll('tbody tr').forEach((tr,i)=>{
+    tr.onclick=()=>{ drillPoint(sp, rows[i]); };
+  });
+}
+
+function refreshCard(sp){
+  // 找到 spec 所在的卡片并重渲染视图 + 徽标
+  const card = document.querySelector(`#vmenu_${sp.uid}`) && document.querySelector(`#vmenu_${sp.uid}`).closest('.chart-card');
+  if(!card) return;
+  const TYPE_LABEL = { bar:'柱状', line:'折线', pie:'饼图', area:'面积', table:'表格' };
+  const badge = card.querySelector('.view-badge');
+  if(badge) badge.textContent = TYPE_LABEL[sp._view.type]||sp._view.type;
+  // 销毁该图实例
+  if(chartRegistry[sp.uid] && chartRegistry[sp.uid].chart){ try{ chartRegistry[sp.uid].chart.destroy(); }catch(_){ } }
+  delete chartRegistry[sp.uid];
+  renderView(sp, card);
+  const menu = qs('#vmenu_'+sp.uid);
+  if(menu) menu.classList.add('hidden');
+  // 重建菜单（保持勾选态）
+  buildViewMenu(sp, card);
+}
+
+/* =====================================================================
+ * 下钻：定点下钻 / 整图下钻
+ * ===================================================================== */
+function drillPoint(sp, row){
+  const dim = sp.dimensionLabel || '该维度';
+  const val = row[sp.xKey];
+  showMsg(`🔍 点击「${dim}: ${val}」，定点下钻分析该对象`);
+  showTyping();
+  setTimeout(()=>{
+    hideTyping();
+    const meta = sp.analysis_meta;
+    const metaHtml = meta ? `<div class="mt-2 px-2 py-1.5 rounded bg-slate-800/50 border border-slate-700/60 text-[11px] text-slate-400 leading-relaxed">
+      已携带图表口径（analysis_meta）：<br>📌 口径: ${meta.metric} · 维度: ${meta.dimension} · 时间: ${meta.time_range}<br>🎯 可下钻方向: ${meta.drill_candidates.join(' / ')}
+    </div>` : '';
+    addBubble(`收到！我正针对<b class="text-slate-200">${dim}「${val}」</b>做定点下钻：<br>
+      ① 其订单构成 / 产品分布 / 负责人明细<br>
+      ② 异常点检测与原因归因<br>
+      ③ 已追加「${val} · 下钻分析」新标签页 👇${metaHtml}`, 'ai');
+    const specs = buildSalesDailySpecs();
+    const id='tab_'+(++tabSeq);
+    tabs.push({ id, title:'🔍 '+val+' · 下钻', specs });
+    activeTabId=id; activeSpecs=specs;
+    renderTabs(); renderBoard();
+  }, 700);
+}
+function drillWhole(title, hint, sp){
+  showMsg(`🔍 点击图表「${title}」空白区，继续整图下钻`);
+  showTyping();
+  setTimeout(()=>{
+    hideTyping();
+    const meta = sp && sp.analysis_meta;
+    const metaHtml = meta ? `<div class="mt-2 px-2 py-1.5 rounded bg-slate-800/50 border border-slate-700/60 text-[11px] text-slate-400 leading-relaxed">
+      已携带图表口径 + 当前时间范围：<br>📌 口径: ${meta.metric} · 维度: ${meta.dimension} · 时间: ${meta.time_range}<br>🎯 可下钻方向: ${meta.drill_candidates.join(' / ')}
+    </div>` : '';
+    addBubble(`收到！基于「${title}」做<b class="text-slate-200">整图下钻</b>（${hint}），正在调用金蝶数据深入分析并追加看板...${metaHtml}`, 'ai');
+    const specs = buildSalesDailySpecs();
+    const id='tab_'+(++tabSeq);
+    tabs.push({ id, title:'🔍 '+title+' 下钻', specs });
+    activeTabId=id; activeSpecs=specs;
+    renderTabs(); renderBoard();
+  }, 700);
+}
+
+let _tyEl=null;
+function showTyping(){ if(_tyEl) return; _tyEl=document.createElement('div'); _tyEl.className='flex gap-2.5 msg fade-in';
+  _tyEl.innerHTML=`<div class="w-7 h-7 rounded-full bg-primary/20 text-primary flex items-center justify-center text-xs font-bold shrink-0 mt-0.5">AI</div><div class="bg-card border border-slate-800 rounded-2xl px-4 py-3">${typingHtml()}</div>`;
+  qs('#chatStream').appendChild(_tyEl); scrollBottom(); }
+function hideTyping(){ if(_tyEl){ _tyEl.remove(); _tyEl=null; } }
+
+/* =====================================================================
+ * 建议面板
+ * ===================================================================== */
+function renderSuggestions(){
+  const cont=qs('#suggestionCards'); cont.innerHTML='';
+  const sugs=[
+    { c:'🔎 异常下钻', t:'客户A 本月下滑 20%，建议定点下钻订单明细', label:'客户A下钻' },
+    { c:'📊 维度对比', t:'对比各业务员业绩排名，找出绩优与落后', label:'业务员排名' },
+    { c:'⏰ 风险预警', t:'分析应收账款逾期风险，生成到期催收清单', label:'应收逾期' },
+  ];
+  sugs.forEach(s=>{
+    const d=document.createElement('div');
+    d.className='sug-card bg-card border border-slate-700/60 rounded-xl px-4 py-3 min-w-[240px] shrink-0 fade-in';
+    d.innerHTML=`<div class="text-[12px] text-emerald-400 mb-1">${s.c}</div>
+      <div class="text-[12px] text-slate-200 leading-snug">${s.t}</div>
+      <div class="flex items-center gap-2 mt-2">
+        <button class="text-[10px] text-primary border border-primary/40 rounded px-1.5 py-0.5 cursor-pointer">分析</button>
+        <button class="text-[10px] text-slate-500 hover:text-emerald-400 cursor-pointer">👍</button>
+        <button class="text-[10px] text-slate-500 hover:text-red-400 cursor-pointer">忽略</button></div>`;
+    d.querySelector('button:first-child').onclick=()=>runSuggestion(s.label);
+    cont.appendChild(d);
+  });
+}
+function runSuggestion(label){
+  showMsg('💡 按建议：'+label);
+  showTyping();
+  setTimeout(()=>{ hideTyping(); addBubble(`已按建议「${label}」完成分析，追加了新标签页。📊<br><span class="text-[12px] text-slate-500">同样可对该图点柱子定点下钻 / ⚙切换视图。</span>`,'ai');
+    const specs=buildSalesDailySpecs(); const id='tab_'+(++tabSeq);
+    tabs.push({id,title:'💡 '+label,specs}); activeTabId=id; activeSpecs=specs; renderTabs(); renderBoard(); },800);
+}
+function toggleSuggestionPanel(){
+  const cards=qs('#suggestionCards'); const btn=qs('#sugToggleBtn');
+  if(cards.classList.contains('hidden')){ cards.classList.remove('hidden'); btn.textContent='收起 ▾'; }
+  else { cards.classList.add('hidden'); btn.textContent='展开 ▸'; }
+}
+function toggleTemplatePicker(){
+  const tp=qs('#templatePicker');
+  if(tp.classList.contains('hidden')){ tp.classList.remove('hidden'); }
+  else tp.classList.add('hidden');
+}
+
+/* =====================================================================
+ * 自由对话
+ * ===================================================================== */
+function sendChat(){
+  const input=qs('#userInput'); const v=input.value.trim(); if(!v) return;
+  showMsg(v); input.value='';
+  showTyping();
+  setTimeout(()=>{
+    hideTyping();
+    if(/天气|你好|吃饭|股票|新闻|你是谁/.test(v)){
+      addBubble('这个问题与<b class="text-primary">金蝶经营数据分析</b>无关。我专注于帮你分析销售/订单/应收/出库等经营数据。<br><span class="text-[12px] text-slate-500">例如：「按产品线下钻分析销售」</span>', 'ai');
+      return;
+    }
+    if(/采购|付款|无数据|权限/.test(v)){
+      addBubble('我查询了金蝶数据，但未能获取结果。<br><span class="text-[12px] text-slate-500">原因：① 你没有「采购单/付款单」表单权限；② 该维度暂无数据。不展示空白图表。</span>', 'ai');
+      return;
+    }
+    addBubble('收到！正在调用金蝶数据为你分析「'+v+'」并生成看板...', 'ai');
+    const specs=buildSalesDailySpecs(); const id='tab_'+(++tabSeq);
+    tabs.push({id,title:'📊 '+v.slice(0,8),specs}); activeTabId=id; activeSpecs=specs; renderTabs(); renderBoard();
+  },900);
+}
+
+/* =====================================================================
+ * 初始化
+ * ===================================================================== */
+// 首屏展示模板墙（与生产 analysis.html 一致）；点击模板卡后进入看板演示。
+// 评审快速路径：点击「📈 销售经营日报」模板卡即可体验全部新交互。
+
+</script>
+</body>
+</html>

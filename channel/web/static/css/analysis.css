@@ -1,0 +1,128 @@
+/* 金蝶数据分析页面 · 独立样式 */
+body { font-family: 'Inter', system-ui, -apple-system, sans-serif; }
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: rgba(120,120,120,0.4); border-radius: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* 淡入动画 */
+.fade-in { animation: fadeIn .3s ease; }
+@keyframes fadeIn { from{opacity:0; transform:translateY(6px);} to{opacity:1; transform:none;} }
+
+/* 输入点动画 */
+.typing-dot { animation: blink 1.2s infinite; }
+@keyframes blink { 0%,80%,100%{opacity:.2} 40%{opacity:1} }
+
+/* 模板卡片 */
+.template-card { transition: all .15s; cursor: pointer; }
+.template-card:hover { border-color: rgba(53,168,91,.6); background: rgba(53,168,91,.06); }
+.template-card.locked { opacity: .5; cursor: not-allowed; filter: grayscale(1); }
+.template-card.locked:hover { border-color: rgba(239,68,68,.5); background: transparent; }
+
+/* 建议卡片 */
+.sug-card { transition: all .15s; cursor: pointer; }
+.sug-card:hover { border-color: rgba(53,168,91,.5); transform: translateY(-1px); }
+
+/* 图表卡片（整卡不统一可点击下钻——下钻语义由数据点/空白区分） */
+.chart-card { transition: border-color .15s; }
+.chart-card:hover { border-color: rgba(53,168,91,.4); }
+
+/* 表格视图行 hover（可点击定点下钻） */
+.table-detail tbody tr { transition: background .12s; cursor: pointer; }
+.table-detail tbody tr:hover { background: rgba(53,168,91,.06); }
+
+/* KPI 卡（可点击下钻） */
+.kpi-card { transition: all .15s; cursor: pointer; }
+.kpi-card:hover { border-color: rgba(53,168,91,.5); background: rgba(53,168,91,.05); }
+
+/* 看板标签页 */
+#dashboardTabs { scrollbar-width: thin; }
+#dashboardTabs::-webkit-scrollbar { height: 4px; }
+#dashboardTabs::-webkit-scrollbar-thumb { background: rgba(120,120,120,.4); border-radius: 2px; }
+#dashboardTabs .tab-close { padding: 0 2px; cursor: pointer; font-size: 14px; line-height: 1; }
+#dashboardTabs .tab-close:hover { color: #ef4444; }
+
+/* 工具栏按钮 */
+.toolbar-btn { transition: all .15s; cursor: pointer; }
+
+/* 列数切换按钮 active */
+.analysis-cols.active {
+    border-color: rgba(53,168,91,.7);
+    background: rgba(53,168,91,.12);
+    color: #228547;
+}
+.dark .analysis-cols.active {
+    color: #4ade80;
+    border-color: #35A85B;
+}
+
+/* ⚙ 视图设置菜单 */
+.view-menu { z-index: 40; box-shadow: 0 12px 32px rgba(0,0,0,.22); }
+.view-menu select {
+    width: 100%; background: transparent; color: inherit;
+    border: 1px solid rgba(0,0,0,.12); border-radius: 6px;
+    padding: 2px 6px; font-size: 12px; outline: none; cursor: pointer;
+}
+.dark .view-menu select { border-color: rgba(255,255,255,.15); }
+
+/* 类型切换 chip */
+.type-chip { transition: all .12s; cursor: pointer; user-select: none; }
+.type-chip:hover { border-color: rgba(53,168,91,.6); color: #228547; }
+.dark .type-chip:hover { color: #4ade80; }
+.type-chip.active { border-color: #35A85B; background: rgba(53,168,91,.14); color: #228547; }
+.dark .type-chip.active { color: #4ade80; }
+
+/* ⚙ 菜单复选 */
+.view-menu input[type=checkbox] { accent-color: #35A85B; }
+
+/* 图表卡导出/设置小按钮 */
+.card-icon-btn {
+    transition: all .12s; cursor: pointer;
+    background: transparent;
+    border: 1px solid rgba(0,0,0,.12); border-radius: 5px;
+    padding: 1px 5px; font-size: 10px; color: #6b7280;
+}
+.dark .card-icon-btn { border-color: rgba(255,255,255,.15); }
+.card-icon-btn:hover { border-color: rgba(53,168,91,.6); color: #228547; }
+.dark .card-icon-btn:hover { color: #4ade80; }
+
+/* 消息气泡 */
+.msg-user { background: rgba(53,168,91,.92); color: #fff; border-radius: 1rem 1rem 1rem .25rem; }
+.msg-ai { background: rgba(0,0,0,.05); border: 1px solid rgba(0,0,0,.08); border-radius: 1rem 1rem .25rem 1rem; }
+.dark .msg-ai { background: rgba(255,255,255,.05); border-color: rgba(255,255,255,.08); }
+
+/* 消息文字自动换行/保留换行 */
+.msg-user, .msg-ai {
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-wrap: break-word;
+    line-height: 1.7;
+}
+
+/* 无数据/无权限对话提示高亮（复用 AI 气泡样式，用 amber 强调） */
+.msg-nodata {
+    background: rgba(245,158,11,.08);
+    border: 1px solid rgba(245,158,11,.4);
+    border-radius: 1rem 1rem .25rem 1rem;
+    padding: 10px 14px;
+    font-size: 13px;
+    color: inherit;
+}
+
+/* =====================================================================
+ * 分析中锁定（v1.4）：只锁图表内容区（hover/点击/下钻/导出/⚙），
+ * 不锁标签栏与外层滚动 —— 分析中旧图可查看、可切换标签页。
+ * DOM 由 renderTabs 重建后这些规则依旧生效（类状态化）。
+ * ===================================================================== */
+
+/* 分析中：KPI/图表内容区禁止指针交互（内容可滚动由外层 #mainArea 承担） */
+#dashboardArea.loading #kpiGrid,
+#dashboardArea.loading #chartGrid { pointer-events: none; }
+
+/* 分析中：标签页可切换查看（标签主体不受上方影响），但 × 关闭按钮禁用 */
+#dashboardArea.loading .tab-close {
+    pointer-events: none;
+    opacity: .4;
+    cursor: not-allowed;
+}

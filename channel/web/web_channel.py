@@ -255,6 +255,35 @@ def _require_auth():
                             json.dumps({"status": "error", "message": "Unauthorized"}))
 
 
+def _require_admin():
+    """权限管理类 API 专用守卫：仅密码管理员可访问，企微普通用户拒绝。
+
+    权限管理接口暴露全量用户的知识库/金蝶权限配置与审计日志，若企微用户可直调
+    API，即使前端已隐藏菜单/路由守卫，仍可绕过 UI 读取甚至篡改权限，构成越权。
+    因此这类接口必须在后端做"仅管理后台"隔离。
+    （密码登录未启用时 _check_auth 恒通过，等同内网信任环境，符合既有约定。）
+    """
+    if _check_auth():
+        return
+    raise web.HTTPError("403 Forbidden",
+                        {"Content-Type": "application/json; charset=utf-8"},
+                        json.dumps({"status": "error", "message": "无权限：该操作仅限管理后台"}))
+
+
+def _atomic_write_json(file_path: str, data) -> None:
+    """原子写 JSON 文件：先写临时文件再 os.replace，避免并发读到半截内容。
+
+    权限配置若被非原子写破坏，permission_checker 的 fail-closed 会拒绝所有
+    金蝶/知识库查询（宁可不可用也不越权）；原子写从源头消除该风险。
+    """
+    tmp_path = f"{file_path}.tmp"
+    with open(tmp_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, file_path)
+
+
 # ==================== WeCom OAuth Helpers ====================
 
 _WECOM_OAUTH_STATES = {}   # state -> {target, created}
@@ -1171,18 +1200,25 @@ class WebChannel(ChatChannel):
                 pass  # 不暴露中间进度
 
             elif event_type == "tool_execution_end":
-                pass  # 不暴露执行结果
+                # 金蝶数据分析：把 render_dashboard 工具结果（ChartSpec）推送给前端，
+                # 前端据此渲染看板图表。其余工具结果仍不暴露。
+                if data.get("tool_name") == "render_dashboard":
+                    publish({
+                        "type": "tool_execution_end",
+                        "tool_name": "render_dashboard",
+                        "result": data.get("result"),
+                    })
 
             elif event_type == "message_end":
                 tool_calls = data.get("tool_calls", [])
                 if tool_calls:
-                    # 有工具调用 → 之前的文本是模型思考，丢弃
+                    # 有工具调用 → 之前的文本是模型思考，丢弃（SSE 模式用 publish）
                     message_buffer.clear()
-                    q.put({"type": "message_end", "has_tool_calls": True})
+                    publish({"type": "message_end", "has_tool_calls": True})
                 else:
                     # 无工具调用 → 这是最终回复，flush 缓存的 delta
                     for chunk in message_buffer:
-                        q.put({"type": "delta", "content": chunk})
+                        publish({"type": "delta", "content": chunk})
                     message_buffer.clear()
 
             elif event_type == "error":
@@ -1563,22 +1599,40 @@ class WebChannel(ChatChannel):
             logger.error(f"[WebChannel] File upload error: {e}", exc_info=True)
             return json.dumps({"status": "error", "message": str(e)})
 
-    def post_message(self):
+    def post_message(self, override_user_id: Optional[str] = None,
+                     override_agent_id: Optional[str] = None):
         """
         Handle incoming messages from users via POST request.
         Returns a request_id for tracking this specific request.
         Supports optional attachments (file paths from /upload).
+
+        Args:
+            override_user_id: 数据分析等专用端点在调用时传入真实的企微 userid，
+                用于替换默认的 `session_id` 作为消息 from_user_id，从而让金蝶
+                权限按企微用户生效（避免 session_id 冒充 web 管理员全权）。
+            override_agent_id: 覆盖请求体中的 agent_id（数据分析页专用：
+                若 kingdee-analysis 未注册则回退默认 agent，避免报错）。
         """
         try:
             data = web.data()
             json_data = json.loads(data)
             session_id = json_data.get('session_id', f'session_{int(time.time())}')
+            # 数据分析专用端点（override_user_id 传入真实企微 userid / web_admin 全权）：
+            # 强制会话归属校验，阻断「用自己的身份携带他人 session_id」触发 agent
+            # 恢复并复述他人会话历史/看板数据的旁路。普通 /message 调用不受影响。
+            if override_user_id is not None and not _analysis_session_owner(session_id, override_user_id):
+                logger.warning(
+                    f"[Analysis] 会话归属校验拒绝: session={session_id!r} "
+                    f"user={override_user_id!r}（他人会话越权访问被拦截）"
+                )
+                return json.dumps({"status": "error", "message": "无权访问该会话"}, ensure_ascii=False)
             from bridge.bridge import Bridge
             agent_bridge = Bridge().get_agent_bridge()
+            requested_agent = override_agent_id if override_agent_id else json_data.get("agent_id")
             resolved_agent_id = agent_bridge.agent_router.resolve(
                 channel_type="web",
                 conversation_ids=(session_id,),
-                explicit_agent_id=json_data.get("agent_id"),
+                explicit_agent_id=requested_agent,
             )
             prompt = json_data.get('message', '')
             use_sse = json_data.get('stream', True)
@@ -1700,7 +1754,9 @@ class WebChannel(ChatChannel):
                     logger.debug(f"[WebChannel] Added prefix to message: {prompt}")
 
             msg = WebMessage(self._generate_msg_id(), prompt)
-            msg.from_user_id = session_id
+            # 身份修正：数据分析专用端点传入真实企微 userid 时，用它替代 session_id，
+            # 使金蝶权限按企微用户生效（避免 session_id 命中 _is_admin_user 全权）。
+            msg.from_user_id = override_user_id if override_user_id else session_id
 
             context = self._compose_context(ContextType.TEXT, prompt, msg=msg, isgroup=False)
 
@@ -2145,6 +2201,7 @@ class WebChannel(ChatChannel):
             '/stream', 'StreamHandler',
             '/cancel', 'CancelHandler',
             '/chat', 'ChatHandler',
+            '/analysis', 'AnalysisPageHandler',
             '/config', 'ConfigHandler',
             '/api/models', 'ModelsHandler',
             '/api/channels', 'ChannelsHandler',
@@ -2180,11 +2237,17 @@ class WebChannel(ChatChannel):
             '/api/permissions/folders', 'PermissionsFoldersHandler',
             '/api/permissions/sync-users', 'PermissionsSyncUsersHandler',
             '/api/permissions/audit-log', 'PermissionsAuditLogHandler',
+            '/api/permissions/kingdee-form-roles', 'PermissionsKingdeeFormRolesHandler',
+            '/api/permissions/kingdee/super-admins', 'PermissionsKingdeeSuperAdminsHandler',
             '/api/kingdee/kanban', 'KingdeeKanbanHandler',
             '/api/kingdee/bill-detail', 'KingdeeBillDetailHandler',
             '/api/kingdee/conversion-stats', 'KingdeeConversionStatsHandler',
             '/api/kingdee/conversion-customer-bills', 'KingdeeConversionCustomerBillsHandler',
             '/api/kingdee/ar-overdue', 'KingdeeArOverdueHandler',
+            '/api/analysis/context', 'AnalysisContextHandler',
+            '/api/analysis/template/apply', 'AnalysisTemplateApplyHandler',
+            '/api/analysis/chat', 'AnalysisChatHandler',
+            '/api/analysis/history', 'AnalysisHistoryHandler',
             '/api/projects/analyze', 'ProjectAnalyzeHandler',
             '/mcp/oauth/callback', 'McpOAuthCallbackHandler',
             '/assets/(.*)', 'AssetsHandler',
@@ -2404,6 +2467,9 @@ class WecomOAuthStartHandler:
         userid, authed, kingdee_allowed = _check_wecom_auth()
         if authed:
             if kingdee_allowed:
+                # 数据分析页面是独立页面 /analysis，其余 target 走 chat.html 视图
+                if target == "analysis":
+                    raise web.seeother('/analysis')
                 raise web.seeother(f'/chat#{target}')
             else:
                 web.header('Content-Type', 'text/html; charset=utf-8')
@@ -2478,7 +2544,7 @@ class WecomOAuthCallbackHandler:
         logger.info(f"[WecomOAuth] User authenticated: {userid}")
         
         # 检查金蝶权限
-        from common.permission_checker import check_kingdee_permission
+        from common.permission_checker import check_kingdee_permission, has_kingdee_form_access
         allowed, scope, msg = check_kingdee_permission(userid)
         kingdee_allowed = allowed and scope != ""
         
@@ -2487,6 +2553,15 @@ class WecomOAuthCallbackHandler:
             return _wecom_error_page(
                 "权限不足",
                 "您没有金蝶查询权限，请联系管理员开通。"
+            )
+
+        # 检查是否配置了至少一个金蝶表单（避免"启用但无表单"进入看板）
+        form_access = has_kingdee_form_access(userid)
+        if form_access is not None and len(form_access) == 0:
+            logger.warning(f"[WecomOAuth] User {userid} has no Kingdee form access")
+            return _wecom_error_page(
+                "权限不足",
+                "尚未为您配置金蝶表单权限，请联系管理员开通。"
             )
         
         # 创建会话
@@ -2497,8 +2572,11 @@ class WecomOAuthCallbackHandler:
                       expires=_WECOM_SESSION_EXPIRE,
                       path="/", httponly=True, samesite="Lax", secure=is_https)
         
-        logger.info(f"[WecomOAuth] Session created for {userid}, redirecting to /chat#{target}")
+        logger.info(f"[WecomOAuth] Session created for {userid}, redirecting to target={target}")
         # 客户端 JS 重定向替代 302，切断 PNA 追溯链
+        # 数据分析页面是独立页面 /analysis，其余 target 走 chat.html 视图
+        if target == "analysis":
+            return _js_redirect_page('/analysis')
         return _js_redirect_page(f'/chat#{target}')
 
 
@@ -2843,10 +2921,13 @@ class ChatHandler:
                     extracted = _validate_wecom_state(params.state)
                     if extracted:
                         target_hash = extracted
-                from common.permission_checker import check_kingdee_permission
+                from common.permission_checker import check_kingdee_permission, has_kingdee_form_access
                 allowed, scope, msg = check_kingdee_permission(userid)
                 kingdee_allowed = allowed and scope != ""
-                if kingdee_allowed:
+                # 检查是否配置了至少一个金蝶表单
+                form_access = has_kingdee_form_access(userid) if kingdee_allowed else None
+                has_form = form_access is None or len(form_access) > 0
+                if kingdee_allowed and has_form:
                     session_id = _create_wecom_session(userid, kingdee_allowed=True)
                     is_https = conf().get("wecom_public_base", "").startswith("https://")
                     web.setcookie(_WECOM_AUTH_COOKIE, session_id,
@@ -2855,25 +2936,32 @@ class ChatHandler:
                     logger.info(f"[ChatHandler] Session created for {userid}, redirecting to /chat#{target_hash}")
                     # 客户端 JS 重定向替代 302，切断 PNA 追溯链
                     return _js_redirect_page(f'/chat#{target_hash}')
-                else:
+                elif not kingdee_allowed:
                     return _wecom_error_page(
                         "权限不足",
                         "您没有金蝶查询权限，请联系管理员开通。"
+                    )
+                else:
+                    return _wecom_error_page(
+                        "权限不足",
+                        "尚未为您配置金蝶表单权限，请联系管理员开通。"
                     )
             else:
                 logger.warning(f"[ChatHandler] Direct OAuth failed: {errmsg}")
                 # code 无效/过期，继续走现有流程（JS 跳转 OAuth redirect）
 
-        # 企微场景：未认证用户自动跳转到 OAuth 静默授权，
-        # 认证通过后设置 Cookie 再原路返回，实现免密访问。
+        # 企微场景：只有企微浏览器（User-Agent 含 wxwork）且未认证时，
+        # 才跳转到 OAuth 静默授权；普通浏览器（本地/桌面）未认证时继续
+        # 渲染 chat.html，由 console.js 显示密码登录界面。
         wecom_configured = bool(conf().get("wecom_public_base", ""))
         _, wecom_authed, _ = _check_wecom_auth()
+        _ua = web.ctx.env.get('HTTP_USER_AGENT', '') or ''
+        is_wecom_browser = ('wxwork' in _ua) or ('MicroMessenger' in _ua)
 
-        if wecom_configured and not wecom_authed and not _check_auth():
-            # 既无企微会话也无密码会话 → 返回 JS 页面。
-            # JS 检查是否在企微浏览器中（User-Agent 含 wxwork），
-            # 是则读取 URL hash（如 #kanban-conversion）跳转到 OAuth 入口；
-            # 否则不跳转，让 console.js 正常显示登录界面。
+        if wecom_configured and is_wecom_browser and not wecom_authed and not _check_auth():
+            # 企微浏览器且无会话 → 返回 JS 页面。
+            # JS 读取 URL hash（如 #kanban-conversion）跳转到 OAuth 入口；
+            # 普通浏览器不会走到此分支，直接渲染 chat.html 显示登录界面。
             web.header('Content-Type', 'text/html; charset=utf-8')
             return (
                 '<!doctype html>'
@@ -2903,6 +2991,71 @@ class ChatHandler:
         html = html.replace('assets/css/console.css', f'assets/css/console.css?v={cache_bust}')
         # Inject the backend-resolved default language for first-load fallback.
         html = html.replace("{{COW_DEFAULT_LANG}}", i18n.get_language())
+        return html
+
+
+class AnalysisPageHandler:
+    """金蝶数据分析页面（独立 analysis.html）。
+
+    - 企微场景：未认证用户自动跳转 OAuth 免密登录（target=analysis）
+    - 密码管理员：直接访问
+    渲染 analysis.html 并注入缓存版本号。
+    """
+
+    def GET(self):
+        # 企微菜单直连 OAuth code 处理（复用 ChatHandler 逻辑）
+        params = web.input(code="", state="", target="")
+        if params.code and not _check_wecom_auth()[1] and not _check_auth():
+            userid, errmsg = _wecom_get_userid_by_code(params.code)
+            if userid:
+                from common.permission_checker import check_kingdee_permission, has_kingdee_form_access
+                allowed, scope, msg = check_kingdee_permission(userid)
+                kingdee_allowed = allowed and scope != ""
+                form_access = has_kingdee_form_access(userid) if kingdee_allowed else None
+                has_form = form_access is None or len(form_access) > 0
+                if kingdee_allowed and has_form:
+                    session_id = _create_wecom_session(userid, kingdee_allowed=True)
+                    is_https = conf().get("wecom_public_base", "").startswith("https://")
+                    web.setcookie(_WECOM_AUTH_COOKIE, session_id,
+                                  expires=_WECOM_SESSION_EXPIRE,
+                                  path="/", httponly=True, samesite="Lax", secure=is_https)
+                    return _js_redirect_page('/analysis')
+                return _wecom_error_page("权限不足", "您没有金蝶查询权限，请联系管理员开通。")
+
+        # 企微场景：只有企微浏览器（UA 含 wxwork）且未认证时才跳 OAuth；
+        # 普通浏览器（本地/桌面）未认证时渲染 analysis.html，由前端显示密码登录框。
+        wecom_configured = bool(conf().get("wecom_public_base", ""))
+        _, wecom_authed, _ = _check_wecom_auth()
+        _ua = web.ctx.env.get('HTTP_USER_AGENT', '') or ''
+        is_wecom_browser = ('wxwork' in _ua) or ('MicroMessenger' in _ua)
+
+        if wecom_configured and is_wecom_browser and not wecom_authed and not _check_auth():
+            web.header('Content-Type', 'text/html; charset=utf-8')
+            return (
+                '<!doctype html><html><head><meta charset="utf-8">'
+                '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                '<title>跳转中...</title></head><body><script>'
+                '(function(){var ua=navigator.userAgent||"";'
+                'if(ua.indexOf("wxwork")!==-1||ua.indexOf("MicroMessenger")!==-1){'
+                'window.location.replace("/auth/wecom/start?target=analysis");}})();'
+                '</script><p>正在跳转到企业微信认证...</p></body></html>'
+            )
+
+        web.header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        web.header('Pragma', 'no-cache')
+        file_path = os.path.join(os.path.dirname(__file__), 'analysis.html')
+        with open(file_path, 'r', encoding='utf-8') as f:
+            html = f.read()
+        cache_bust = str(int(time.time()))
+        html = html.replace('assets/js/analysis.js', f'assets/js/analysis.js?v={cache_bust}')
+        html = html.replace('assets/css/analysis.css', f'assets/css/analysis.css?v={cache_bust}')
+        html = html.replace('{{CACHE_BUST}}', cache_bust)
+        # 注入企微配置标记：整段替换（含模板默认 false），避免替换后出现 "= false false;" 双值语法错误。
+        # 若模板未被替换（如直接静态打开），`/*{{WECOM_CONFIGURED}}*/ false` 中注释被忽略 → 值为 false，合法。
+        html = html.replace(
+            '/*{{WECOM_CONFIGURED}}*/ false',
+            'true' if wecom_configured else 'false',
+        )
         return html
 
 
@@ -6005,6 +6158,39 @@ def _kingdee_cache_set(cache_type: str, key: str, value, ttl: int = None):
             del _kingdee_cache[k]
 
 
+def _get_current_kingdee_userid() -> str:
+    """
+    获取当前请求的企微 userid，用于金蝶数据范围过滤。
+
+    规则：
+    - 若企微会话已认证 → 返回真实企微 userid
+    - 否则（密码管理员 / 未认证）→ 返回 web 管理员标识（session_ 前缀），
+      使其通过 `_is_admin_user` 检查而全权访问。
+    """
+    userid, authed, _ = _check_wecom_auth()
+    if authed and userid:
+        return userid
+    # web 管理员（密码登录 / 未企微认证）→ 全权
+    return "session_web_admin"
+
+
+def _apply_kingdee_form_filter(form_id: str, filter_string: str):
+    """
+    对金蝶查询应用表单权限 + 业务员过滤。
+
+    返回：
+        (new_filter, error_message)
+        - new_filter: 应使用的过滤条件
+        - error_message: 若为 None 表示放行；否则为拒绝提示
+    """
+    from common.permission_checker import build_kingdee_form_filter
+    userid = _get_current_kingdee_userid()
+    new_fs = build_kingdee_form_filter(userid, form_id, filter_string)
+    if new_fs is None:
+        return None, "您没有访问该金蝶表单的权限"
+    return new_fs, None
+
+
 class KingdeeKanbanHandler:
     """金蝶云星空订单审批看板 — 按单据类型+状态分组返回看板数据。只读，不走Agent推理链路。"""
     def GET(self):
@@ -6018,6 +6204,12 @@ class KingdeeKanbanHandler:
                 days = max(1, min(int(params.days), 365))
             except (ValueError, TypeError):
                 days = 30
+
+            # 客户/供应商字段按表单映射：
+            #   销售订单/报价单 → FCustId；销售出库单 → FCustomerID（无 FCustId）；采购 → FSupplierId
+            # 修复：此前对 SAL_OUTSTOCK 用 FCustId.FName 会报"元数据字段不存在"，导致出库单看板不可查。
+            from common.permission_checker import get_customer_field
+            cust_field = get_customer_field(form_id)
 
             # 构建过滤条件
             filter_parts = []
@@ -6048,16 +6240,21 @@ class KingdeeKanbanHandler:
                 else:
                     filter_parts.append(
                         f"(FBillNo LIKE '%{search_escaped}%' "
-                        f"OR FCustId.FName LIKE '%{search_escaped}%')"
+                        f"OR {cust_field}.FName LIKE '%{search_escaped}%')"
                     )
 
             filter_string = " AND ".join(filter_parts)
 
-            # 销售订单 / 采购订单用不同字段
+            # 应用表单权限 + 业务员过滤
+            filter_string, kd_err = _apply_kingdee_form_filter(form_id, filter_string)
+            if kd_err:
+                return json.dumps({"status": "error", "message": kd_err})
+
+            # 按表单选择客户/供应商字段
             if form_id == 'PUR_PurchaseOrder':
                 field_keys = "FBillNo,FDate,FCreateDate,FDocumentStatus,FSupplierId.FName,FCreatorId.FName,FAllAmount"
             else:
-                field_keys = "FBillNo,FDate,FCreateDate,FDocumentStatus,FCustId.FName,FCreatorId.FName,FAllAmount"
+                field_keys = f"FBillNo,FDate,FCreateDate,FDocumentStatus,{cust_field}.FName,FCreatorId.FName,FAllAmount"
 
             from agent.tools.tool_manager import ToolManager
             tm = ToolManager()
@@ -6148,7 +6345,7 @@ class KingdeeKanbanHandler:
                         "bill_no": row.get("FBillNo", ""),
                         "date": row.get("FDate", ""),
                         "create_date": row.get("FCreateDate", ""),
-                        "customer": row.get("FCustId.FName") or row.get("FSupplierId.FName") or "",
+                        "customer": row.get(f"{cust_field}.FName") or row.get("FSupplierId.FName") or "",
                         "creator": row.get("FCreatorId.FName", ""),
                         "amount": amount,
                         "status": status,
@@ -6200,6 +6397,11 @@ class KingdeeBillDetailHandler:
             tool = tm._mcp_tool_instances.get("view_bill")
             if not tool:
                 return json.dumps({"status": "error", "message": "金蝶MCP工具 view_bill 尚未就绪"})
+
+            # 表单权限校验（详情是单条记录，不追加业务员过滤）
+            _, kd_err = _apply_kingdee_form_filter(form_id, "1=1")
+            if kd_err:
+                return json.dumps({"status": "error", "message": kd_err})
 
             result = tool.execute({"form_id": form_id, "number": number})
             if result.status != "success":
@@ -6336,6 +6538,14 @@ class KingdeeConversionStatsHandler:
 
             filter_string_so = " AND ".join(filter_parts)
             filter_string_qt = " AND ".join(filter_parts)
+
+            # 应用表单权限 + 业务员过滤（转化统计同时查销售订单与报价单）
+            filter_string_so, kd_err = _apply_kingdee_form_filter("SAL_SaleOrder", filter_string_so)
+            if kd_err:
+                return json.dumps({"status": "error", "message": kd_err})
+            filter_string_qt, kd_err = _apply_kingdee_form_filter("SAL_QUOTATION", filter_string_qt)
+            if kd_err:
+                return json.dumps({"status": "error", "message": kd_err})
 
             # Step 1: 元数据探索 — 发现字段名
             from agent.tools.tool_manager import ToolManager
@@ -7256,6 +7466,11 @@ class KingdeeConversionCustomerBillsHandler:
 
             filter_string = " AND ".join(filter_parts)
 
+            # 应用表单权限 + 业务员过滤
+            filter_string, kd_err = _apply_kingdee_form_filter(form_id, filter_string)
+            if kd_err:
+                return json.dumps({"status": "error", "message": kd_err})
+
             field_keys = "FBillNo,FDate,FCustId.FName,FMaterialId.FNumber,FMaterialId.FSpecification,FTaxPrice,FAllAmount"
             top_count = 500
 
@@ -7350,6 +7565,11 @@ class KingdeeArOverdueHandler:
             all_tool = tm._mcp_tool_instances.get("query_bill_all")
             if not so_tool or not all_tool:
                 return json.dumps({"status": "error", "message": "金蝶MCP工具尚未就绪"})
+
+            # 表单权限校验（AR_receivable 为非销售类，仅校验表单权限）
+            _, kd_err = _apply_kingdee_form_filter("AR_receivable", "1=1")
+            if kd_err:
+                return json.dumps({"status": "error", "message": kd_err})
 
             # Step 1: 元数据探索 → 发现字段 (14个)
             (due_field, material_field, spec_field, settle_field, unsettle_field,
@@ -7680,16 +7900,19 @@ class KingdeeArOverdueHandler:
         open_amount_field = ""
 
         # 兜底值（仅在元数据解析失败或无匹配时使用）
+        # 注意：字段名必须与金蝶元数据一致（2026-08-27 实测确认）
+        #   - 应收单业务员字段是 FSALEERID（不是 FSalerId）
+        #   - 应收单"已收/结算金额"用 FRECEIVEAMOUNT（实收金额），FRECTOTALAMOUNTFOR 不存在
         fallback_defaults = {
             "due": "FENDDATE_H",
             "material": "FMaterialId.FName",
             "spec": "FMaterialId.FSpecification",
-            "settle": "FRECTOTALAMOUNTFOR",
+            "settle": "FRECEIVEAMOUNT",
             "unsettle": "",  # AR_receivable 无"未结算金额"字段，由 amt - settle 计算
             "cust": "FCUSTOMERID.FName",
             "amount": "FAllAmountFor",
             "bill_type": "FBillTypeId.FName",
-            "saler": "FSalerId.FName",
+            "saler": "FSALEERID.FName",
             "status": "FWRITTENOFFSTATUS",
             "open_amount": "FALLAMOUNTFOR",
         }
@@ -7700,12 +7923,12 @@ class KingdeeArOverdueHandler:
             due_field = "FENDDATE_H"
             material_field = "FMaterialId.FName"
             spec_field = "FMaterialId.FSpecification"
-            settle_field = "FRECTOTALAMOUNTFOR"
+            settle_field = "FRECEIVEAMOUNT"
             unsettle_field = ""
             cust_field = "FCUSTOMERID.FName"
             amount_field = "FAllAmountFor"
             bill_type_field = "FBillTypeId.FName"
-            saler_field = "FSalerId.FName"
+            saler_field = "FSALEERID.FName"
             status_field = "FWRITTENOFFSTATUS"
             open_amount_field = fallback_defaults.get("open_amount", "")
             return (due_field, material_field, spec_field, settle_field, unsettle_field,
@@ -8506,6 +8729,310 @@ class KingdeeArOverdueHandler:
         web.header('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         web.header('Content-Disposition', "attachment; filename*=UTF-8''{}".format(quote(file_name)))
         return output.getvalue()
+
+
+# =========================================================================
+# 金蝶数据分析页面 · 后端 Handler
+# 说明：
+#   - 模板/固定报表：提供模板配置与看板指令（不直接聚合数据）
+#   - 对话：AnalysisChatHandler 通过 override_user_id 注入真实企微 userid，
+#     使金蝶权限按企微用户生效（复用 WebChannel.post_message 链路）
+# =========================================================================
+
+# 内置数据分析模板（v1.0 · 5 个）
+# required_forms: 模板依赖的金蝶表单，用户缺任一表单则模板锁定
+ANALYSIS_TEMPLATES = [
+    {
+        "id": "sales_daily",
+        "name": "销售经营日报",
+        "icon": "📈",
+        "description": "销售额 KPI、销售趋势、客户排行、部门占比",
+        "required_forms": ["SAL_SaleOrder"],
+        "metric_definition": "销售金额 = 已审核订单(SAL_SaleOrder, 状态C)含税合计",
+    },
+    {
+        "id": "product_line",
+        "name": "产品线销售分析",
+        "icon": "🏭",
+        "description": "各产品线销售额 KPI、销售趋势、产品线占比、产品排行",
+        "required_forms": ["SAL_SaleOrder", "BD_MATERIAL"],
+        "metric_definition": "销售金额 = 已审核订单含税合计；产品线 = 物料档案分类",
+    },
+    {
+        "id": "customer_sales",
+        "name": "客户销售分析",
+        "icon": "🏆",
+        "description": "Top客户、客户分布、转化率、复购率、流失预警",
+        "required_forms": ["SAL_SaleOrder", "BD_Customer"],
+        "metric_definition": "销售金额 = 已审核订单含税合计；按客户维度聚合",
+    },
+    {
+        "id": "ar_overdue",
+        "name": "应收账款分析",
+        "icon": "💰",
+        "description": "逾期金额 KPI、账龄分布、逾期客户排行、到期预警",
+        "required_forms": ["AR_receivable"],
+        "metric_definition": "逾期金额 = AR_receivable 财务应收超期未结金额",
+    },
+    {
+        "id": "outstock",
+        "name": "出库数据分析",
+        "icon": "📦",
+        "description": "出库量 KPI、出库趋势、出库品类分布、出库区域排行",
+        "required_forms": ["SAL_OUTSTOCK"],
+        "metric_definition": "出库量 = 销售出库单(SAL_OUTSTOCK)已审核出库数量",
+    },
+    {
+        "id": "conversion",
+        "name": "样品单/报价单分析",
+        "icon": "🔁",
+        "description": "样品单/报价单→销售订单转化统计、按客户转化率、转化金额",
+        "required_forms": ["SAL_SaleOrder", "SAL_QUOTATION"],
+        "metric_definition": "样品单/报价单转化率 = 已转化为销售订单的单据数 / 样品单+报价单总数；转化金额 = 由样品/报价转化的销售订单含税金额（参考看板'转化统计'逻辑：按客户+物料+规格+含税单价+日期先后匹配）",
+    },
+]
+
+
+def _analysis_template_brief(t):
+    """返回模板对外展示的最小字段（不泄露内部口径细节）。"""
+    return {
+        "id": t["id"],
+        "name": t["name"],
+        "icon": t["icon"],
+        "description": t["description"],
+        "required_forms": t["required_forms"],
+        "metric_definition": t["metric_definition"],
+    }
+
+
+def _user_has_forms(userid: str, form_ids) -> bool:
+    """判断用户是否拥有 form_ids 中所有表单权限（管理员/未启用权限时视为全权）。
+
+    表单权限集合的 key 保留原始大小写（如 SAL_SaleOrder），因此用大小写不敏感比较。
+    """
+    from common.permission_checker import get_kingdee_form_access
+    form_access = get_kingdee_form_access(userid)
+    if form_access is None:
+        # 不限（权限未启用 / 管理员 / 超级账户）
+        return True
+    access_lower = {f.lower() for f in form_access}
+    for fid in form_ids:
+        if fid.lower() not in access_lower:
+            return False
+    return True
+
+
+def _analysis_agent_available() -> bool:
+    """检测是否注册了专用 kingdee-analysis 智能体。
+
+    未注册时前端回退默认 agent（功能仍可用，只是没有金蝶专用人设）。
+    """
+    try:
+        from agent.registry import get_agent_registry
+        get_agent_registry().get("kingdee-analysis")
+        return True
+    except Exception:
+        return False
+
+
+def _current_analysis_user():
+    """解析当前请求的企微 userid 与金蝶权限。
+    返回 (userid, authed, scope, kingdee_allowed)。
+    """
+    from common.permission_checker import (
+        check_kingdee_permission,
+        get_kingdee_scope,
+        is_permissions_enabled,
+    )
+    userid, authed, _ = _check_wecom_auth()
+    if authed and userid:
+        allowed, scope, _ = check_kingdee_permission(userid)
+        if not allowed:
+            return userid, True, "none", False
+        return userid, True, get_kingdee_scope(userid), True
+    # 密码管理员 / 未认证 → 全权
+    return "session_web_admin", False, "all", True
+
+
+def _analysis_session_owner(session_id: str, userid: str) -> bool:
+    """校验 session_id 是否属于当前请求用户（会话按用户命名空间隔离）。
+
+    会话 id 格式：analysis_{userid}_{时间戳}（时间戳为纯数字）。
+    - 企微用户与管理员的 userid 不同 → 会话天然隔离；
+    - 仅靠 ``startswith`` 不够：userid 若含下划线（如 ``li_na``），``analysis_li_``
+      会让 user ``li`` 误匹配他人的 ``analysis_li_na_…``。因此要求前缀之后剩余段
+      **必须为纯数字**，杜绝前缀碰撞（前端始终生成 ``analysis_{userid}_{Date.now()}``）。
+    """
+    if not session_id or not userid:
+        return False
+    prefix = f"analysis_{userid}_"
+    if not session_id.startswith(prefix):
+        return False
+    return session_id[len(prefix):].isdigit()
+
+
+def _analysis_history_store():
+    """数据分析会话历史读取库：与 AnalysisChatHandler 写入库保持一致。
+
+    AnalysisChatHandler 经 post_message 在专用 kingdee-analysis 智能体上运行，
+    会话消息持久化到该 agent workspace 的 ConversationStore；未注册专用 agent
+    时回退默认 agent（默认 store）。历史恢复必须读同一 store，否则读不到。
+    """
+    from agent.memory.conversation_store import get_conversation_store
+    if _analysis_agent_available():
+        try:
+            from agent.registry import get_agent_registry
+            profile = get_agent_registry().get("kingdee-analysis")
+            return get_conversation_store(profile.workspace)
+        except Exception as e:
+            logger.warning(f"[Analysis] resolve kingdee-analysis store failed, fallback default: {e}")
+    return get_conversation_store()
+
+
+class AnalysisContextHandler:
+    """数据分析页 · 初始化上下文：返回当前用户身份、金蝶权限、可用模板。"""
+
+    def GET(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        userid, authed, scope, kingdee_allowed = _current_analysis_user()
+        available = [
+            _analysis_template_brief(t)
+            for t in ANALYSIS_TEMPLATES
+            if _user_has_forms(userid, t["required_forms"])
+        ]
+        locked = [
+            {"id": t["id"], "name": t["name"], "icon": t["icon"],
+             "required_forms": t["required_forms"]}
+            for t in ANALYSIS_TEMPLATES
+            if not _user_has_forms(userid, t["required_forms"])
+        ]
+        return json.dumps({
+            "status": "success",
+            "userid": userid,
+            "wecom_authenticated": authed,
+            "kingdee_allowed": kingdee_allowed,
+            "scope": scope,
+            "templates": available,
+            "locked_templates": locked,
+            # 是否注册了专用 kingdee-analysis 智能体；未注册时前端回退默认 agent（功能仍可用）
+            "agent_available": _analysis_agent_available(),
+        }, ensure_ascii=False)
+
+
+class AnalysisTemplateApplyHandler:
+    """数据分析页 · 应用模板：返回模板看板指令（由前端作为系统级引导注入 Agent）。
+
+    不直接聚合数据 —— 看板由专用 kingdee-analysis Agent 统一生成。
+    """
+
+    def POST(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            data = web.data()
+            json_data = json.loads(data) if data else {}
+            template_id = (json_data.get("template_id") or "").strip()
+            userid = _get_current_kingdee_userid()
+            template = next((t for t in ANALYSIS_TEMPLATES if t["id"] == template_id), None)
+            if not template:
+                return json.dumps({"status": "error", "message": "模板不存在"})
+            if not _user_has_forms(userid, template["required_forms"]):
+                return json.dumps({"status": "error", "message": "您没有该模板所需的表单权限"})
+            return json.dumps({
+                "status": "success",
+                "template": _analysis_template_brief(template),
+                # 看板指令：作为系统引导注入 agent，对话区不直接展示
+                "instruction": (
+                    f"请基于金蝶数据生成「{template['name']}」分析看板。"
+                    f"指标口径：{template['metric_definition']}。"
+                    f"按模板生成：KPI 指标卡、趋势图、排行图、占比图等。"
+                    f"每个图表的数据点除主维度/主数值外，尽量附带该维度的主要伴随指标"
+                    f"（如订单数、数量、占比、环比；量化指标用数值、占比/环比用带%字符串）；"
+                    f"每张图可注明 dimensionLabel（维度名）与分析口径 analysis_meta。"
+                    f"排行类默认返回前 10~20 名，便于前端切换显示数量。"
+                    f"生成后主动给出 2~3 条下一步分析建议。"
+                ),
+            }, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[Analysis] apply template error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+
+class AnalysisChatHandler:
+    """数据分析页 · 专用对话端点（关键权限修正）。
+
+    复用 WebChannel.post_message 链路，但通过 override_user_id 传入真实企微
+    userid，使 msg.from_user_id = 企微 userid（而非 session_id），从而让
+    agent_stream.py:1721 的金蝶权限拦截按企微用户生效。
+    """
+
+    def POST(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            # 注意：不要在此处调用 web.data()（会消耗请求体），
+            # post_message 内部会读取 web.data() 解析 message/agent_id/session_id。
+            userid, authed, _, kingdee_allowed = _current_analysis_user()
+            if not kingdee_allowed:
+                return json.dumps({"status": "error", "message": "您没有金蝶查询权限，请联系管理员开通"})
+
+            # 复用 post_message，override_user_id = 真实企微 userid（或 web_admin 全权）。
+            # override_agent_id：若专用 kingdee-analysis 未注册，则回退默认 agent，
+            # 保证功能开箱即用（后续配置专用 agent 后自动升级为专用人设）。
+            override_agent_id = None
+            if _analysis_agent_available():
+                override_agent_id = "kingdee-analysis"
+            result = WebChannel().post_message(
+                override_user_id=userid,
+                override_agent_id=override_agent_id,
+            )
+            # post_message 已返回 json 字符串，直接透传
+            if isinstance(result, str):
+                return result
+            return json.dumps(result, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[Analysis] chat error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
+
+
+class AnalysisHistoryHandler:
+    """数据分析页 · 历史会话恢复（复用 ConversationStore 分页返回）。
+
+    权限加固：session_id 已按用户命名空间隔离（analysis_{userid}_），读取前必须
+    校验归属——仅允许当前请求用户读取自己前缀的会话，阻断构造他人 session_id
+    越权读取历史/看板数据的请求。
+    """
+
+    def GET(self):
+        _require_auth()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            params = web.input(session_id='', page='1', page_size='20')
+            session_id = params.session_id.strip()
+            if not session_id:
+                return json.dumps({"status": "error", "message": "缺少 session_id"})
+            # 归属校验：session_id 必须携带当前请求用户的命名空间前缀
+            userid, _authed, _scope, _allowed = _current_analysis_user()
+            if not _analysis_session_owner(session_id, userid):
+                logger.warning(
+                    f"[Analysis] 历史归属校验拒绝: session={session_id!r} user={userid!r}"
+                )
+                return json.dumps({"status": "error", "message": "无权访问该会话"}, ensure_ascii=False)
+            try:
+                page = max(1, int(params.page))
+            except (ValueError, TypeError):
+                page = 1
+            try:
+                page_size = max(1, min(int(params.page_size), 50))
+            except (ValueError, TypeError):
+                page_size = 20
+            store = _analysis_history_store()
+            history = store.load_history_page(session_id, page, page_size)
+            return json.dumps({"status": "success", "history": history}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[Analysis] history error: {e}")
+            return json.dumps({"status": "error", "message": str(e)})
 
 
 class MemoryHandler:
@@ -9902,11 +10429,88 @@ class VersionHandler:
         return json.dumps({"version": __version__})
 
 
+class PermissionsKingdeeFormRolesHandler:
+    """返回金蝶表单目录、预置角色默认表单集、销售类表单清单（供前端渲染，不硬编码）。"""
+
+    def GET(self):
+        _require_admin()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            from common.permission_checker import (
+                DEFAULT_FORM_ROLES, KINGDEE_FORM_CATALOG, ROLE_NAMES,
+                SALE_SCOPED_FORMS,
+            )
+            return json.dumps({
+                "status": "success",
+                "data": {
+                    "forms": KINGDEE_FORM_CATALOG,
+                    "roles": DEFAULT_FORM_ROLES,
+                    "role_names": ROLE_NAMES,
+                    "sale_scoped_forms": sorted(SALE_SCOPED_FORMS),
+                },
+            }, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[PermissionsKingdeeFormRolesHandler] GET error: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+
+class PermissionsKingdeeSuperAdminsHandler:
+    """保存金蝶超级账户名单。"""
+
+    def GET(self):
+        _require_admin()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            config = self._load_config()
+            kp = config.get('kingdee_permissions', {}) or {}
+            return json.dumps({
+                "status": "success",
+                "data": {"super_admins": kp.get('super_admins', [])},
+            }, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[PermissionsKingdeeSuperAdminsHandler] GET error: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+    def POST(self):
+        _require_admin()
+        web.header('Content-Type', 'application/json; charset=utf-8')
+        try:
+            data = json.loads(web.data())
+            super_admins = data.get('super_admins', [])
+            if not isinstance(super_admins, list):
+                return json.dumps({"status": "error", "message": "super_admins 必须是数组"})
+
+            config = self._load_config()
+            config.setdefault('kingdee_permissions', {})
+            config['kingdee_permissions']['super_admins'] = [str(u) for u in super_admins]
+            self._save_config(config)
+            return json.dumps({"status": "success"}, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"[PermissionsKingdeeSuperAdminsHandler] POST error: {e}")
+            return json.dumps({"status": "error", "message": str(e)}, ensure_ascii=False)
+
+    def _load_config(self):
+        config_path = self._get_config_path()
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        return {"kingdee_permissions": {"super_admins": []}}
+
+    def _save_config(self, config):
+        _atomic_write_json(self._get_config_path(), config)
+
+    def _get_config_path(self):
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        tmp_dir = os.path.join(project_root, "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        return os.path.join(tmp_dir, "permission_config.json")
+
+
 class PermissionsConfigHandler:
     """API for managing permission configuration."""
 
     def GET(self):
-        _require_auth()
+        _require_admin()
         web.header('Content-Type', 'application/json; charset=utf-8')
         try:
             config = self._load_config()
@@ -9916,7 +10520,7 @@ class PermissionsConfigHandler:
             return json.dumps({"status": "error", "message": str(e)})
 
     def POST(self):
-        _require_auth()
+        _require_admin()
         web.header('Content-Type', 'application/json; charset=utf-8')
         try:
             data = json.loads(web.data())
@@ -9932,7 +10536,9 @@ class PermissionsConfigHandler:
 
             # Update kingdee permissions
             if 'kingdee_permissions' in data:
-                config['kingdee_permissions'] = data['kingdee_permissions']
+                kd_perm = data['kingdee_permissions']
+                self._validate_kingdee_permissions(kd_perm)
+                config['kingdee_permissions'] = kd_perm
 
             # Update folder permissions
             if 'folder_permissions' in data:
@@ -9957,6 +10563,95 @@ class PermissionsConfigHandler:
             logger.error(f"[PermissionsConfigHandler] POST error: {e}")
             return json.dumps({"status": "error", "message": str(e)})
 
+    def _validate_kingdee_permissions(self, kd_perm):
+        """
+        校验金蝶权限配置的合法性，非法则抛出 ValueError。
+
+        校验项：
+        - role 必须存在于预置角色
+        - extra_forms / removed_forms 必须是合法 form_id
+        - direct_subordinates 不能成环（DFS）
+        - 启用时至少有一个有效表单
+        - super_admins 必须是已知用户（宽松校验：仅要求是列表）
+        """
+        from common.permission_checker import (
+            DEFAULT_FORM_ROLES, KINGDEE_FORM_CATALOG, ROLE_NAMES,
+        )
+        if not isinstance(kd_perm, dict):
+            raise ValueError("kingdee_permissions 必须是对象")
+
+        user_permissions = kd_perm.get('user_permissions', {}) or {}
+        valid_roles = set(DEFAULT_FORM_ROLES.keys())
+        valid_forms = set(KINGDEE_FORM_CATALOG.keys())
+
+        for userid, perm in user_permissions.items():
+            if not isinstance(perm, dict):
+                raise ValueError(f"用户 {userid} 的金蝶配置必须是对象")
+
+            # role 合法性
+            role = perm.get('role') or ''
+            if role and role not in valid_roles:
+                raise ValueError(f"用户 {userid} 的角色「{role}」不存在（可选：{', '.join(sorted(valid_roles))}）")
+
+            # form 合法性（宽容处理）
+            # 对"不在权限清单内"的历史遗留表单（如 STK_OutStock）宽容跳过校验，
+            # 仅为避免旧配置阻塞保存。注意：这类表单在运行时不会放行——
+            # build_kingdee_form_filter 对不在用户「有效表单」内的任何 form_id 都返回 None
+            # （见 permission_checker 安全修复），即保存通过但实际查询会被拒绝，
+            # 因此应在权限页面移除这类表单后再使用。
+            for key in ('extra_forms', 'removed_forms'):
+                for fid in (perm.get(key) or []):
+                    if fid.upper() not in {f.upper() for f in valid_forms}:
+                        # 不在权限清单内的表单：宽容跳过，不阻塞
+                        logger.info(f"[Permissions] 用户 {userid} 的 {key} 含清单外表单「{fid}」，已忽略校验")
+                        continue
+
+            # scope 合法性
+            scope = perm.get('scope') or 'all'
+            if scope not in ('self', 'self_and_subordinates', 'all'):
+                raise ValueError(f"用户 {userid} 的 scope「{scope}」非法")
+
+            # 启用时必须有至少一个有效表单
+            # 仅当用户显式配置了表单相关字段（role / extra_forms）时才强制校验；
+            # 旧格式（只有 enabled 或只有 scope，无 role/表单）视为"待迁移"，不阻塞保存。
+            if perm.get('enabled'):
+                has_form_config = any(
+                    k in perm for k in ('role', 'extra_forms')
+                )
+                if has_form_config:
+                    base = set(DEFAULT_FORM_ROLES.get(role, [])) if role else set()
+                    extra = set(perm.get('extra_forms') or [])
+                    removed = set(perm.get('removed_forms') or [])
+                    effective = (base | extra) - removed
+                    if not effective:
+                        raise ValueError(f"用户 {userid} 已启用但未配置任何表单，请至少选择一个表单或角色")
+
+        # direct_subordinates 循环检测（全局 DFS）
+        self._check_subordinate_cycles(user_permissions)
+
+    def _check_subordinate_cycles(self, user_permissions):
+        """检测 direct_subordinates 是否成环。"""
+        WHITE, GRAY, BLACK = 0, 1, 2
+        color = {}
+        for uid in user_permissions:
+            color[uid] = WHITE
+
+        def dfs(uid, path):
+            color[uid] = GRAY
+            perm = user_permissions.get(uid) or {}
+            for sub in (perm.get('direct_subordinates') or []):
+                if sub not in color:
+                    color[sub] = WHITE
+                if color[sub] == GRAY:
+                    raise ValueError(f"下属关系存在循环: {' -> '.join(path + [sub])}")
+                if color[sub] == WHITE:
+                    dfs(sub, path + [sub])
+            color[uid] = BLACK
+
+        for uid in list(user_permissions.keys()):
+            if color[uid] == WHITE:
+                dfs(uid, [uid])
+
     def _load_config(self):
         config_path = self._get_config_path()
         if os.path.exists(config_path):
@@ -9970,9 +10665,7 @@ class PermissionsConfigHandler:
         }
 
     def _save_config(self, config):
-        config_path = self._get_config_path()
-        with open(config_path, 'w', encoding='utf-8') as f:
-            json.dump(config, f, ensure_ascii=False, indent=2)
+        _atomic_write_json(self._get_config_path(), config)
 
     def _get_config_path(self):
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -9985,7 +10678,7 @@ class PermissionsUsersHandler:
     """API for getting user list."""
 
     def GET(self):
-        _require_auth()
+        _require_admin()
         web.header('Content-Type', 'application/json; charset=utf-8')
         try:
             params = web.input(department='')
@@ -10074,7 +10767,7 @@ class PermissionsFoldersHandler:
     """API for getting knowledge base folder list."""
 
     def GET(self):
-        _require_auth()
+        _require_admin()
         web.header('Content-Type', 'application/json; charset=utf-8')
         try:
             folders = self._get_knowledge_folders()
@@ -10103,7 +10796,7 @@ class PermissionsSyncUsersHandler:
     """API for syncing users from WeCom API."""
 
     def POST(self):
-        _require_auth()
+        _require_admin()
         web.header('Content-Type', 'application/json; charset=utf-8')
         try:
             logger.info("[PermissionsSyncUsersHandler] Syncing users from WeCom API")
@@ -10138,8 +10831,7 @@ class PermissionsSyncUsersHandler:
             valid_userids = set(converted_users.keys())
             config = self._cleanup_invalid_user_refs(config, valid_userids)
             
-            with open(config_path, 'w', encoding='utf-8') as f:
-                json.dump(config, f, ensure_ascii=False, indent=2)
+            _atomic_write_json(config_path, config)
             
             # 如果数据来自 API（最新最准确），同时覆写 wecom_user_details.json 缓存
             if api_users is not None:
@@ -10352,10 +11044,27 @@ class PermissionsSyncUsersHandler:
                 dept_paths[dept_id] = '/'.join(parts)
 
             # 4. 获取活跃用户列表（status=1 只返回已激活成员，排除离职/禁用）
-            root_dept_id = self._find_root_department_id(dept_list)
-            if not root_dept_id:
-                return {}
-            user_list = ch.client.user.list(root_dept_id, fetch_child=True, simple=False, status=1)
+            #    注意：不能只用根部门 + fetch_child=True 拉取——企微 API 在部分部署下
+            #    只返回根部门直属用户，子部门用户会全部缺失。因此改为遍历所有部门
+            #    逐个拉取，再按 userid 去重，确保拿到全量活跃用户（否则后续用它过滤
+            #    会误删子部门用户，导致权限管理页面用户缺失）。
+            user_list = []
+            seen_userids = set()
+            for dept in dept_list:
+                dept_id = dept.get('id')
+                if not dept_id:
+                    continue
+                try:
+                    ul = ch.client.user.list(dept_id, fetch_child=False, simple=False, status=1)
+                except Exception as e:
+                    logger.warning(f"[PermissionsSyncUsersHandler] 拉取部门[{dept_id}]用户失败: {e}")
+                    continue
+                ul_users = ul.get('userlist', ul) if isinstance(ul, dict) else ul
+                for u in ul_users or []:
+                    uid = (u.get('userid') or '').strip()
+                    if uid and uid not in seen_userids:
+                        seen_userids.add(uid)
+                        user_list.append(u)
 
             # 5. 为每个用户构建完整部门路径
             result = {}
@@ -10416,8 +11125,8 @@ class PermissionsSyncUsersHandler:
         """
         清理 config 中已离职用户的引用。
         
-        从 folder_permissions 和 kingdee_permissions.user_permissions 中
-        移除 valid_userids 中不存在的 userid。
+        从 folder_permissions、kingdee_permissions.user_permissions、
+        direct_subordinates 和 super_admins 中移除 valid_userids 中不存在的 userid。
         """
         # 清理 folder_permissions
         folder_perms = config.get('folder_permissions', {})
@@ -10428,14 +11137,34 @@ class PermissionsSyncUsersHandler:
                 removed = len(original) - len(folder_perms[folder])
                 logger.info(f"[PermissionsSyncUsersHandler] 清理文件夹「{folder}」权限中 {removed} 个离职用户")
 
-        # 清理 kingdee_permissions.user_permissions
+        # 清理 kingdee_permissions.user_permissions（含 direct_subordinates 中的离职 userid）
         kingdee_perms = config.get('kingdee_permissions', {})
+        if not isinstance(kingdee_perms, dict):
+            kingdee_perms = {}
+            config['kingdee_permissions'] = kingdee_perms
         user_perms = kingdee_perms.get('user_permissions', {})
         removed_kd = [uid for uid in user_perms if uid not in valid_userids]
         for uid in removed_kd:
             del user_perms[uid]
         if removed_kd:
             logger.info(f"[PermissionsSyncUsersHandler] 清理金蝶权限中 {len(removed_kd)} 个离职用户: {removed_kd}")
+
+        # 清理每个用户配置中 direct_subordinates 里的离职 userid
+        for uid, perm in list(user_perms.items()):
+            if not isinstance(perm, dict):
+                continue
+            subs = perm.get('direct_subordinates') or []
+            valid_subs = [s for s in subs if s in valid_userids]
+            if len(valid_subs) != len(subs):
+                perm['direct_subordinates'] = valid_subs
+                logger.info(f"[PermissionsSyncUsersHandler] 清理用户 {uid} 的直属下属中离职用户")
+
+        # 清理 super_admins 中的离职 userid
+        super_admins = kingdee_perms.get('super_admins') or []
+        valid_admins = [s for s in super_admins if s in valid_userids]
+        if len(valid_admins) != len(super_admins):
+            kingdee_perms['super_admins'] = valid_admins
+            logger.info(f"[PermissionsSyncUsersHandler] 清理超级账户中的离职用户")
 
         return config
 
@@ -10470,7 +11199,7 @@ class PermissionsAuditLogHandler:
     """API for getting audit log."""
 
     def GET(self):
-        _require_auth()
+        _require_admin()
         web.header('Content-Type', 'application/json; charset=utf-8')
         try:
             params = web.input(permission_type='', search='', limit='500')

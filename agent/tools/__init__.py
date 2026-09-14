@@ -21,6 +21,9 @@ from agent.tools.evolution_undo.evolution_undo import EvolutionUndoTool
 # Import sub agent tools
 from agent.tools.subagent.subagent import SubagentTool
 
+# Import analysis (Kingdee dashboard) tools
+from agent.tools.analysis.render_dashboard import RenderDashboard
+
 # Import tools with optional dependencies
 def _import_optional_tools():
     """Import tools that have optional dependencies"""
@@ -155,6 +158,7 @@ __all__ = [
     'MemoryGetTool',
     'EvolutionUndoTool',
     'SubagentTool',
+    'RenderDashboard',
     'EnvConfig',
     'SchedulerTool',
     'WebSearch',

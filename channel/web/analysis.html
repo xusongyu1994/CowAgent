@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>金蝶数据分析智能体</title>
+    <link rel="icon" href="assets/favicon.ico" type="image/x-icon">
+    <link rel="stylesheet" href="assets/vendor/fontawesome/css/all.min.css">
+    <link rel="stylesheet" href="assets/vendor/fonts/inter/inter.css">
+    <script src="assets/vendor/tailwind/tailwind.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script src="assets/vendor/xlsx/xlsx.full.min.js"></script>
+    <link rel="stylesheet" href="assets/css/analysis.css">
+    <script>
+    tailwind.config = {
+        darkMode: 'class',
+        theme: {
+            extend: {
+                fontFamily: {
+                    sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+                    mono: ['"JetBrains Mono"', '"Fira Code"', 'Consolas', 'monospace'],
+                },
+                colors: {
+                    primary: {
+                        50: '#EDFDF3', 100: '#D4FAE2', 200: '#ABF4C7', 300: '#74E9A4',
+                        400: '#4ABE6E', 500: '#35A85B', 600: '#228547', 700: '#1C6B3B',
+                        800: '#1A5532', 900: '#16462A',
+                    }
+                },
+            }
+        }
+    }
+    </script>
+</head>
+<body class="bg-neutral-50 dark:bg-neutral-950 text-neutral-800 dark:text-neutral-200">
+<!-- 企微配置标记（后端注入） -->
+<script>window.COW_WECOM_CONFIGURED = /*{{WECOM_CONFIGURED}}*/ false;</script>
+
+<!-- 密码登录框（普通浏览器未认证时显示） -->
+<div id="login-overlay" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+    <div class="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-8 w-80 shadow-2xl fade-in">
+        <div class="text-center">
+            <div class="w-12 h-12 mx-auto mb-3 bg-primary-500/10 rounded-full flex items-center justify-center">
+                <i class="fas fa-lock text-primary-500 text-xl"></i>
+            </div>
+            <div class="text-base font-semibold mb-1">数据分析</div>
+            <div class="text-[13px] text-neutral-500 mb-4">请输入访问密码</div>
+        </div>
+        <form id="login-form">
+            <input id="login-password" type="password" placeholder="访问密码" class="w-full px-3 py-2 mb-3 bg-neutral-50 dark:bg-neutral-950 border border-neutral-300 dark:border-neutral-700 rounded-lg text-sm outline-none focus:border-primary-500/60">
+            <div id="login-error" class="hidden text-[12px] text-red-500 mb-3">密码错误，请重试</div>
+            <button type="submit" class="w-full px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white rounded-lg text-sm cursor-pointer">登录</button>
+        </form>
+    </div>
+</div>
+
+<div id="app" class="h-screen flex flex-col">
+
+    <!-- ==================== 顶部标题栏 ==================== -->
+    <header class="shrink-0 bg-white dark:bg-neutral-900 border-b border-neutral-200 dark:border-neutral-800 px-5 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+            <button onclick="history.back()" class="text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 text-sm cursor-pointer">← 返回</button>
+            <div class="w-px h-5 bg-neutral-200 dark:bg-neutral-700"></div>
+            <h1 class="text-base font-semibold text-neutral-900 dark:text-white">数据分析</h1>
+            <span class="text-xs text-primary-500">金蝶经营分析 · 专用智能体</span>
+        </div>
+        <div class="flex items-center gap-3 text-xs" id="userInfoBar">
+            <span class="flex items-center gap-1.5 text-emerald-500"><span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>智能体在线</span>
+            <span class="text-neutral-400" id="currentUserLabel">加载中...</span>
+        </div>
+    </header>
+
+    <div class="flex-1 flex overflow-hidden relative">
+
+        <!-- 对话栏已收起时的悬浮展开按钮 -->
+        <button id="expandChatBtn" onclick="analysis.expandChat()" class="hidden absolute left-2 top-1/2 -translate-y-1/2 z-30 items-center gap-1 px-2 py-2 bg-primary-500 hover:bg-primary-600 text-white text-[12px] rounded-lg shadow-lg cursor-pointer" title="展开对话栏">
+            <i class="fas fa-chevron-right"></i>
+        </button>
+
+        <!-- ==================== 左侧 · 对话区 (38%，可收起) ==================== -->
+        <div id="chatPanel" class="w-[38%] min-w-[340px] max-w-[520px] border-r border-neutral-200 dark:border-neutral-800 flex flex-col bg-white dark:bg-neutral-900 transition-all duration-300">
+            <div class="px-4 py-3 border-b border-neutral-200 dark:border-neutral-800 flex items-center gap-3 shrink-0">
+                <div class="w-9 h-9 rounded-full bg-gradient-to-br from-primary-500 to-emerald-600 flex items-center justify-center text-white font-bold text-sm shrink-0">AI</div>
+                <div class="flex-1 min-w-0">
+                    <div class="text-sm font-medium text-neutral-900 dark:text-white">金蝶分析智能体</div>
+                    <div class="text-[11px] text-neutral-400">资深经营分析师 · 引导你层层下钻</div>
+                </div>
+                <button id="collapseChatBtn" onclick="analysis.collapseChat()" title="收起对话栏（看板占满全屏）" class="toolbar-btn shrink-0 px-2 py-1 text-[11px] bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-700 rounded-lg text-neutral-400 hover:text-neutral-700 dark:hover:text-neutral-200 cursor-pointer">
+                    <i class="fas fa-chevron-left mr-1"></i>收起
+                </button>
+            </div>
+            <!-- 分析状态提示条 -->
+            <div id="analysisStatus" class="hidden shrink-0 px-4 py-2 border-b border-neutral-200 dark:border-neutral-800 flex items-center gap-2">
+                <span id="analysisStatusIcon" class="w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0"></span>
+                <span id="analysisStatusText" class="text-[12px] text-neutral-500">分析中...</span>
+            </div>
+            <div id="chatStream" class="flex-1 overflow-y-auto p-4 space-y-4">
+                <!-- 对话消息流动态生成 -->
+            </div>
+            <div class="p-4 border-t border-neutral-200 dark:border-neutral-800 shrink-0">
+                <div class="flex items-end gap-2 bg-neutral-50 dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-700 rounded-xl px-3 py-2 focus-within:border-primary-500/60">
+                    <textarea rows="2" id="userInput" class="flex-1 bg-transparent resize-none outline-none text-[13px] placeholder-neutral-400" placeholder="告诉智能体你想分析什么，例如：按产品线下钻分析销售"></textarea>
+                    <button id="sendBtn" onclick="analysis.sendChat()" class="bg-primary-500 hover:bg-primary-600 text-white rounded-lg w-8 h-8 flex items-center justify-center shrink-0 cursor-pointer">
+                        <i class="fas fa-paper-plane text-xs"></i>
+                    </button>
+                </div>
+                <div class="text-[11px] text-neutral-400 mt-1.5 px-1" id="permissionHint">数据权限: 加载中...</div>
+            </div>
+        </div>
+
+        <!-- ==================== 右侧 · 看板工作区 (62%) ==================== -->
+        <div class="flex-1 flex flex-col bg-neutral-50 dark:bg-neutral-950">
+
+            <!-- 看板工具栏 -->
+            <div class="px-5 py-3 border-b border-neutral-200 dark:border-neutral-800 flex items-center gap-3 flex-wrap shrink-0">
+                <button onclick="analysis.showTemplatePicker()" class="toolbar-btn flex items-center gap-2 px-3 py-1.5 text-[13px] bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-lg hover:border-neutral-400 cursor-pointer">
+                    <i class="fas fa-columns text-primary-500"></i>
+                    <span id="currentTemplateLabel">选择模板</span>
+                    <i class="fas fa-chevron-down text-neutral-400 text-xs"></i>
+                </button>
+                <!-- 时间范围选择 -->
+                <div class="toolbar-btn flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-lg text-[12px]">
+                    <i class="fas fa-calendar-alt text-primary-500"></i>
+                    <select id="timeRangePreset" onchange="analysis.onTimePresetChange()" class="bg-transparent outline-none text-neutral-700 dark:text-neutral-200 cursor-pointer">
+                        <option value="this_month">本月</option>
+                        <option value="last_month" selected>上月</option>
+                        <option value="this_quarter">本季度</option>
+                        <option value="this_year">本年</option>
+                        <option value="last_7d">近7天</option>
+                        <option value="last_30d">近30天</option>
+                        <option value="custom">自定义</option>
+                    </select>
+                    <span class="text-neutral-400">|</span>
+                    <input type="date" id="timeStart" class="bg-transparent outline-none text-[12px] text-neutral-600 dark:text-neutral-300 hidden" title="开始日期">
+                    <span id="timeSep" class="text-neutral-400 hidden">~</span>
+                    <input type="date" id="timeEnd" class="bg-transparent outline-none text-[12px] text-neutral-600 dark:text-neutral-300 hidden" title="结束日期">
+                </div>
+                <!-- 列数切换：只影响图表网格，KPI 独立排不受影响 -->
+                <div class="toolbar-btn flex items-center gap-0.5 px-1.5 py-1 bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-lg text-[11px]" id="colSwitch">
+                    <button onclick="analysis.setBoardCols(1)" id="colBtn1" class="px-2 py-0.5 rounded-md border border-neutral-300 dark:border-neutral-700 text-neutral-400 dark:text-neutral-300 cursor-pointer hover:border-neutral-400 analysis-cols active">1列</button>
+                    <button onclick="analysis.setBoardCols(2)" id="colBtn2" class="px-2 py-0.5 rounded-md border border-neutral-300 dark:border-neutral-700 text-neutral-400 dark:text-neutral-300 cursor-pointer hover:border-neutral-400 analysis-cols">2列</button>
+                </div>
+                <div class="flex-1"></div>
+                <button onclick="analysis.exportDashboard()" class="toolbar-btn px-3 py-1.5 text-[12px] bg-emerald-50 dark:bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-500/30 rounded-lg hover:bg-emerald-100 cursor-pointer" title="导出整个看板所有图表数据为 Excel">
+                    <i class="fas fa-file-excel mr-1"></i>导出 Excel
+                </button>
+                <button onclick="analysis.clearSession()" class="toolbar-btn px-3 py-1.5 text-[12px] bg-red-50 dark:bg-red-500/10 text-red-500 border border-red-200 dark:border-red-500/30 rounded-lg hover:bg-red-100 cursor-pointer">↺ 清空会话</button>
+            </div>
+
+            <div class="flex-1 overflow-y-auto p-5" id="mainArea">
+                <!-- 模板选择面板（初始显示） -->
+                <div id="templatePicker">
+                    <div class="text-sm text-neutral-500 mb-3">选择一个分析模板，智能体会生成初始看板并主动给出分析建议</div>
+                    <div id="templateGrid" class="grid grid-cols-2 lg:grid-cols-3 gap-4">
+                        <!-- 模板卡片动态生成 -->
+                    </div>
+                </div>
+
+                <!-- 看板区（选模板后显示） -->
+                <div id="dashboardArea" class="hidden relative">
+                    <div class="flex items-center justify-between mb-3">
+                        <div class="flex items-center gap-2">
+                            <span id="boardTitle" class="font-medium text-sm">看板</span>
+                            <span class="text-[11px] text-neutral-400">由智能体生成</span>
+                            <span class="px-2 py-0.5 text-[10px] text-primary-500 bg-primary-500/10 rounded" id="scopeBadge">数据范围</span>
+                        </div>
+                        <div class="text-[11px] text-neutral-400" id="metricHint"></div>
+                    </div>
+                    <!-- 看板顶部分析状态条：不遮挡图表（sticky 贴顶），分析中旧图可查看/切标签，交互锁定 -->
+                    <div id="dashboardLoading" class="hidden sticky top-0 z-20 flex items-center gap-2 px-3 py-1.5 mb-2 bg-amber-50/95 dark:bg-neutral-900/85 border border-amber-200 dark:border-amber-500/30 rounded-lg text-[12px] text-amber-600 dark:text-amber-400 pointer-events-none">
+                        <span class="w-3.5 h-3.5 border-2 border-amber-500/30 border-t-amber-500 rounded-full animate-spin shrink-0"></span>
+                        <span>分析中… 可查看/切换已有图表（新图完成后自动跳转）</span>
+                    </div>
+                    <!-- 看板标签栏：每次生成的数据图表独立标签页 -->
+                    <div id="dashboardTabs" class="hidden flex items-center gap-1.5 mb-3 overflow-x-auto pb-1"></div>
+                    <!-- KPI 指标卡：独立 auto-fit 排布，不受列数切换影响 -->
+                    <div id="kpiGrid" class="hidden grid grid-cols-2 xl:grid-cols-4 gap-4 mb-5"></div>
+                    <!-- 图表网格：受 1/2 列数切换控制 -->
+                    <div id="chartGrid" class="grid grid-cols-1 gap-5"></div>
+                </div>
+            </div>
+
+            <!-- 建议面板（底部） -->
+            <div id="suggestionPanel" class="hidden shrink-0 bg-white dark:bg-neutral-900 border-t border-neutral-200 dark:border-neutral-800">
+                <div class="px-5 py-2 flex items-center justify-between">
+                    <div class="flex items-center gap-2">
+                        <i class="fas fa-lightbulb text-primary-500 text-sm"></i>
+                        <span class="text-[12px] font-medium">智能体建议</span>
+                        <span class="text-[11px] text-neutral-400">点击卡片让智能体深入分析</span>
+                    </div>
+                    <button id="sugToggleBtn" onclick="analysis.toggleSuggestionPanel()" class="text-neutral-400 hover:text-neutral-700 cursor-pointer text-xs">收起 ▾</button>
+                </div>
+                <div id="suggestionCards" class="px-5 pb-3 flex gap-3 overflow-x-auto"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div id="toast" class="fixed bottom-5 right-5 z-50 hidden"></div>
+
+<!-- 分析完成通知弹窗 -->
+<div id="analysisDoneModal" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+    <div class="bg-white dark:bg-neutral-900 border border-neutral-200 dark:border-neutral-700 rounded-2xl p-6 w-80 shadow-2xl fade-in">
+        <div class="text-center">
+            <div class="w-12 h-12 mx-auto mb-3 bg-emerald-500/10 rounded-full flex items-center justify-center">
+                <i class="fas fa-check-circle text-emerald-500 text-2xl"></i>
+            </div>
+            <div id="doneModalTitle" class="text-base font-semibold mb-1">分析完成</div>
+            <div id="doneModalDesc" class="text-[13px] text-neutral-500 mb-4">智能体已生成分析结果，现在可以继续提问或操作看板了。</div>
+            <button onclick="analysis.dismissDoneModal()" class="w-full px-4 py-2 bg-primary-500 hover:bg-primary-600 text-white rounded-lg text-sm cursor-pointer">知道了</button>
+        </div>
+    </div>
+</div>
+
+<script src="assets/js/analysis.js?v={{CACHE_BUST}}"></script>
+</body>
+</html>
