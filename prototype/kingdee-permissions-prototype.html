@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>金蝶权限管理 · 可交互原型 v4</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  theme: {
+    extend: {
+      colors: {
+        primary: { DEFAULT:'#35A85B', dark:'#228547', deeper:'#1C6B3B' },
+        bg: { DEFAULT:'#111111', card:'#1A1A1A', deep:'#0A0A0A' },
+      },
+      fontFamily: { sans: ['Inter','system-ui','sans-serif'] },
+    }
+  }
+}
+</script>
+<style>
+  body { font-family: 'Inter','system-ui',sans-serif; }
+  .fade-in { animation: fadeIn .2s ease; }
+  @keyframes fadeIn { from{opacity:0; transform:translateY(4px);} to{opacity:1; transform:none;} }
+  input[type=checkbox].toggle { appearance:none; width:34px; height:20px; border-radius:9999px;
+    background:#475569; position:relative; cursor:pointer; transition:background .2s; flex-shrink:0; }
+  input[type=checkbox].toggle:checked { background:#35A85B; }
+  input[type=checkbox].toggle::after { content:''; position:absolute; top:2px; left:2px; width:16px; height:16px;
+    border-radius:50%; background:#fff; transition:transform .2s; }
+  input[type=checkbox].toggle:checked::after { transform:translateX(14px); }
+  input[type=radio].scope-radio { accent-color:#35A85B; width:15px; height:15px; }
+  .chip { transition: all .15s; }
+</style>
+</head>
+<body class="bg-bg text-slate-200 min-h-screen">
+
+<!-- ===================== 顶部说明栏 ===================== -->
+<div class="bg-primary-deeper/30 border-b border-primary-dark/30 px-6 py-3 flex items-center justify-between">
+  <div class="flex items-center gap-3">
+    <span class="text-primary font-semibold text-sm tracking-wide">金蝶权限管理 · 可交互原型 v5</span>
+    <span class="text-[11px] text-slate-400">实施定位：页面骨架已存在，本原型演示「金蝶 Tab」三层模型升级</span>
+  </div>
+</div>
+<div class="bg-blue-500/10 border-b border-blue-500/30 px-6 py-2 text-[12px] text-blue-300 flex flex-wrap gap-x-4 gap-y-1">
+  <span>✅ 侧边栏菜单 / 视图 / 路由 / i18n 已存在</span>
+  <span>🔧 本原型 = 升级金蝶列表 + 编辑弹窗（表单授权 + 销售 scope + 超级账户）</span>
+</div>
+
+<div class="max-w-6xl mx-auto px-6 py-8">
+
+  <!-- ===================== 页面标题区 ===================== -->
+  <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+    <div>
+      <h1 class="text-2xl font-semibold text-white">权限管理</h1>
+      <p class="text-sm text-slate-400 mt-1">管理企微用户访问知识库和使用金蝶查询的权限</p>
+    </div>
+    <div class="flex items-center gap-4">
+      <label class="flex items-center gap-2 cursor-pointer">
+        <input type="checkbox" id="master-enabled" checked class="toggle" onchange="toggleMaster()">
+        <span class="text-sm text-slate-400">启用权限管理</span>
+      </label>
+      <button class="px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-600 hover:bg-slate-700 transition-colors cursor-pointer flex items-center gap-1.5">
+        <span class="text-primary">↻</span> 同步用户
+      </button>
+    </div>
+  </div>
+
+  <!-- ===================== Tab 导航 ===================== -->
+  <div class="flex gap-1 border-b border-slate-700/50 mb-6">
+    <button class="px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-500 hover:text-slate-300 cursor-pointer transition-colors">知识库权限</button>
+    <button class="px-4 py-2 text-sm font-medium border-b-2 border-primary text-primary cursor-pointer transition-colors">金蝶权限</button>
+    <button class="px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-500 hover:text-slate-300 cursor-pointer transition-colors">审计日志</button>
+  </div>
+
+  <!-- ===================== 金蝶权限面板 ===================== -->
+  <div class="fade-in" id="kingdee-panel">
+
+    <!-- 超级账户配置条 -->
+    <div class="bg-primary-deeper/20 border border-primary-dark/40 rounded-xl px-4 py-3 mb-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+      <div class="flex items-center gap-3">
+        <span class="w-8 h-8 rounded-lg bg-primary-dark/40 flex items-center justify-center text-primary">★</span>
+        <div>
+          <div class="text-sm font-medium text-white">超级账户（可查看所有金蝶表单，优先级最高）</div>
+          <div class="text-[12px] text-slate-400 mt-0.5" id="super-list-text">当前：叶帅-Kyle</div>
+        </div>
+      </div>
+      <button onclick="openSuperPicker()"
+              class="px-3 py-1.5 text-xs rounded-lg border border-primary text-primary hover:bg-primary-dark/20 transition-colors cursor-pointer flex items-center gap-1.5">
+        ✎ 配置超级账户
+      </button>
+    </div>
+
+    <!-- 搜索 + 部门筛选 -->
+    <div class="flex flex-col sm:flex-row gap-4 mb-5">
+      <div class="flex-1 relative">
+        <span class="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500 text-sm">🔍</span>
+        <input id="kd-search" type="text" placeholder="搜索用户..." oninput="renderTable()"
+               class="w-full pl-9 pr-3 py-2 rounded-lg border border-slate-600 bg-bg-card text-sm focus:outline-none focus:border-primary placeholder-slate-500">
+      </div>
+      <select id="kd-dept" onchange="renderTable()"
+              class="px-3 py-2 rounded-lg border border-slate-600 bg-bg-card text-sm focus:outline-none focus:border-primary">
+        <option value="">所有部门</option>
+        <option>营销中心</option>
+        <option>营销中心/销售部</option>
+        <option>运营中心</option>
+        <option>运营中心/财务部</option>
+        <option>运营中心/商务部</option>
+        <option>产品部</option>
+        <option>总经办</option>
+      </select>
+    </div>
+
+    <!-- 用户表格 -->
+    <div class="bg-bg-card rounded-xl border border-slate-700/60 overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="bg-slate-800/40 text-left text-slate-400 text-[13px]">
+              <th class="px-4 py-3 font-medium">用户</th>
+              <th class="px-4 py-3 font-medium">部门</th>
+              <th class="px-4 py-3 font-medium">角色 / 表单</th>
+              <th class="px-4 py-3 font-medium">数据范围</th>
+              <th class="px-4 py-3 font-medium">启用</th>
+              <th class="px-4 py-3 font-medium text-right">操作</th>
+            </tr>
+          </thead>
+          <tbody id="kd-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <p class="text-[12px] text-slate-500 mt-4 flex flex-wrap items-center gap-2">
+      <span class="text-slate-400">●</span> 角色/表单 = 可访问哪些金蝶单据；
+      <span class="text-emerald-400">数据范围</span> = 销售类单据是否按业务员过滤；
+      <span class="text-amber-400">★超级账户</span> = 所有表单，优先于其他配置
+    </p>
+  </div>
+</div>
+
+<!-- ===================== 编辑金蝶权限弹窗 ===================== -->
+<div id="edit-overlay" class="hidden fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+  <div class="bg-bg-card rounded-2xl border border-slate-700/60 shadow-2xl w-full max-w-2xl fade-in" onclick="event.stopPropagation()">
+    <div class="p-6">
+      <div class="flex items-center gap-3 mb-6">
+        <div class="w-10 h-10 rounded-xl bg-primary-dark/30 flex items-center justify-center flex-shrink-0 text-primary">✏️</div>
+        <div class="min-w-0 flex-1">
+          <h3 class="font-semibold text-white text-base">编辑金蝶权限</h3>
+          <p class="text-xs text-slate-400 mt-0.5" id="edit-subtitle">配置用户可访问的金蝶表单和数据范围</p>
+        </div>
+        <button onclick="closeEdit()" class="p-2 rounded-lg hover:bg-slate-700 text-slate-400 cursor-pointer transition-colors">✕</button>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3 mb-4">
+        <div>
+          <label class="block text-sm font-medium text-slate-400 mb-1.5">用户</label>
+          <div id="edit-user" class="px-3 py-2 rounded-lg bg-bg-deep text-sm text-slate-200"></div>
+        </div>
+        <div>
+          <label class="block text-sm font-medium text-slate-400 mb-1.5">部门</label>
+          <div id="edit-dept" class="px-3 py-2 rounded-lg bg-bg-deep text-sm text-slate-200"></div>
+        </div>
+      </div>
+
+      <!-- 超级账户提示 -->
+      <div id="super-hint" class="hidden px-3 py-2.5 rounded-lg bg-amber-500/10 border border-amber-500/30 text-sm text-amber-300 mb-4">
+        ★ 该用户是超级账户，可查看所有金蝶表单（优先级最高，表单与数据范围均锁定为全部）
+      </div>
+
+      <!-- 启用开关 -->
+      <div class="mb-5">
+        <label class="flex items-center gap-2 cursor-pointer">
+          <input type="checkbox" id="edit-enabled" class="toggle" checked onchange="updateNoFormWarning()">
+          <span class="text-sm text-slate-200">启用金蝶权限</span>
+        </label>
+      </div>
+
+      <!-- 角色 + 表单授权 -->
+      <div class="mb-5">
+        <label class="block text-sm font-medium text-slate-400 mb-2">表单授权（角色组 + 自定义微调）</label>
+        <div class="flex items-center gap-3 mb-3">
+          <span class="text-sm text-slate-300">基础角色</span>
+          <select id="edit-role" onchange="applyRole()" class="px-3 py-2 rounded-lg border border-slate-600 bg-bg-card text-sm focus:outline-none focus:border-primary">
+            <option value="">无角色（自定义）</option>
+            <option value="sales">销售</option>
+            <option value="business">商务</option>
+            <option value="finance">财务</option>
+            <option value="rd">研发/质检</option>
+          </select>
+          <span class="text-[11px] text-slate-500">角色默认表单由后端下发，可再手动微调</span>
+        </div>
+        <div id="form-grid" class="grid grid-cols-1 sm:grid-cols-2 gap-2"></div>
+        <div id="no-form-warning" class="hidden mt-2 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-[12px] text-red-300">
+          ⚠️ 未授权任何表单：该用户将无法查询任何金蝶数据。请至少勾选一个表单，或选择基础角色。
+        </div>
+        <p class="text-[11px] text-slate-500 mt-2" id="form-summary"></p>
+      </div>
+
+      <!-- 数据范围（销售单据过滤） -->
+      <div class="mb-5">
+        <label class="block text-sm font-medium text-slate-400 mb-2">销售单据数据范围</label>
+        <div class="space-y-2">
+          <label class="flex items-center gap-3 px-3 py-2 rounded-lg border border-slate-600 hover:border-primary cursor-pointer transition-colors">
+            <input type="radio" name="scope" value="self" class="scope-radio">
+            <span class="flex-1">
+              <span class="block text-sm text-slate-200">仅本人</span>
+              <span class="block text-xs text-slate-500 mt-0.5">销售类单据只看自己作为业务员的</span>
+            </span>
+          </label>
+          <label class="flex items-center gap-3 px-3 py-2 rounded-lg border border-slate-600 hover:border-primary cursor-pointer transition-colors">
+            <input type="radio" name="scope" value="self_and_subordinates" class="scope-radio">
+            <span class="flex-1">
+              <span class="block text-sm text-slate-200">本人及下属</span>
+              <span class="block text-xs text-slate-500 mt-0.5">销售类单据看本人及直接下属的</span>
+            </span>
+          </label>
+          <label class="flex items-center gap-3 px-3 py-2 rounded-lg border border-slate-600 hover:border-primary cursor-pointer transition-colors">
+            <input type="radio" name="scope" value="all" class="scope-radio">
+            <span class="flex-1">
+              <span class="block text-sm text-slate-200">全部（不按业务员过滤）</span>
+              <span class="block text-xs text-slate-500 mt-0.5">商务/财务/研发等非销售岗默认选此项，避免查不到数据</span>
+            </span>
+          </label>
+        </div>
+      </div>
+
+      <!-- 直接下属 -->
+      <div id="subordinate-section" class="hidden mb-5">
+        <label class="block text-sm font-medium text-slate-400 mb-2">直接下属（用于"本人及下属"）</label>
+        <div class="px-3 py-2.5 rounded-lg border border-slate-600 bg-bg-deep">
+          <div class="flex flex-wrap gap-2 mb-2" id="sub-chips"></div>
+          <button onclick="openSubordinatePicker()"
+                  class="px-3 py-1.5 text-xs rounded-lg border border-dashed border-primary-dark text-primary hover:bg-primary-dark/20 transition-colors cursor-pointer">+ 添加下属...</button>
+        </div>
+        <p class="text-[11px] text-slate-500 mt-1.5">不能选择自己或自己的上级，避免循环（后端保存时也会校验）</p>
+      </div>
+
+      <!-- 风险等级 -->
+      <div>
+        <label class="block text-sm font-medium text-slate-400 mb-2">风险等级（预留）</label>
+        <select id="edit-risk" class="w-full px-3 py-2 rounded-lg border border-slate-600 bg-bg-card text-sm focus:outline-none focus:border-primary">
+          <option value="low">低 (low)</option>
+          <option value="medium">中 (medium)</option>
+          <option value="high">高 (high)</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-700/50 rounded-b-2xl">
+      <button onclick="closeEdit()" class="px-4 py-2 rounded-lg border border-slate-600 text-slate-300 text-sm font-medium hover:bg-slate-700 cursor-pointer transition-colors">取消</button>
+      <button onclick="saveEdit()" class="px-4 py-2 rounded-lg bg-primary hover:bg-primary-dark text-white text-sm font-medium cursor-pointer transition-colors">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== 添加下属多选弹窗 ===================== -->
+<div id="sub-picker-overlay" class="hidden fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4">
+  <div class="bg-bg-card rounded-2xl border border-slate-700/60 shadow-2xl w-full max-w-md fade-in" onclick="event.stopPropagation()">
+    <div class="p-6">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-semibold text-white text-base">选择直接下属</h3>
+        <button onclick="closeSubordinatePicker()" class="p-2 rounded-lg hover:bg-slate-700 text-slate-400 cursor-pointer transition-colors">✕</button>
+      </div>
+      <input id="sub-search" type="text" placeholder="搜索用户..." oninput="renderSubList()"
+             class="w-full px-3 py-2 rounded-lg border border-slate-600 bg-bg-deep text-sm focus:outline-none focus:border-primary placeholder-slate-500 mb-2">
+      <div id="sub-list" class="max-h-72 overflow-y-auto space-y-1"></div>
+    </div>
+    <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-700/50 rounded-b-2xl">
+      <button onclick="closeSubordinatePicker()" class="px-4 py-2 rounded-lg border border-slate-600 text-slate-300 text-sm font-medium hover:bg-slate-700 cursor-pointer transition-colors">取消</button>
+      <button onclick="confirmSubordinates()" class="px-4 py-2 rounded-lg bg-primary hover:bg-primary-dark text-white text-sm font-medium cursor-pointer transition-colors">确定</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== 超级账户配置弹窗 ===================== -->
+<div id="super-picker-overlay" class="hidden fixed inset-0 bg-black/60 z-[70] flex items-center justify-center p-4">
+  <div class="bg-bg-card rounded-2xl border border-slate-700/60 shadow-2xl w-full max-w-md fade-in" onclick="event.stopPropagation()">
+    <div class="p-6">
+      <div class="flex items-center justify-between mb-2">
+        <h3 class="font-semibold text-white text-base">配置超级账户</h3>
+        <button onclick="closeSuperPicker()" class="p-2 rounded-lg hover:bg-slate-700 text-slate-400 cursor-pointer transition-colors">✕</button>
+      </div>
+      <p class="text-[12px] text-slate-400 mb-4">超级账户可查看所有金蝶表单和数据，适合公司高层</p>
+      <input id="super-search" type="text" placeholder="搜索用户..." oninput="renderSuperList()"
+             class="w-full px-3 py-2 rounded-lg border border-slate-600 bg-bg-deep text-sm focus:outline-none focus:border-primary placeholder-slate-500 mb-4">
+      <div id="super-list" class="max-h-72 overflow-y-auto space-y-1"></div>
+    </div>
+    <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-700/50 rounded-b-2xl">
+      <button onclick="closeSuperPicker()" class="px-4 py-2 rounded-lg border border-slate-600 text-slate-300 text-sm font-medium hover:bg-slate-700 cursor-pointer transition-colors">取消</button>
+      <button onclick="confirmSuper()" class="px-4 py-2 rounded-lg bg-primary hover:bg-primary-dark text-white text-sm font-medium cursor-pointer transition-colors">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ===================== 表单目录（后端下发，前端只读展示） =====================
+const FORMS = [
+  { id:'SAL_SaleOrder',   name:'销售订单' },
+  { id:'SAL_QUOTATION',   name:'报价单' },
+  { id:'SAL_OUTSTOCK',    name:'销售出库单' },
+  { id:'PUR_PurchaseOrder', name:'采购订单' },
+  { id:'STK_InStock',     name:'采购入库单' },
+  { id:'STK_Inventory',   name:'库存查询' },
+  { id:'AR_receivable',   name:'应收账款' },
+  { id:'BD_Customer',     name:'客户档案' },
+  { id:'BD_Supplier',     name:'供应商档案' },
+  { id:'BD_MATERIAL',     name:'物料档案' },
+];
+
+// 预置角色 → 默认表单（此表在后端下发；原型仅用于演示）
+const ROLES = {
+  sales:   ['SAL_SaleOrder','SAL_QUOTATION','SAL_OUTSTOCK','BD_Customer'],
+  business:['PUR_PurchaseOrder','STK_InStock','BD_Supplier','BD_Customer'],
+  finance: ['AR_receivable','PUR_PurchaseOrder','BD_Supplier'],
+  rd:      ['BD_MATERIAL','STK_Inventory','SAL_OUTSTOCK'],
+};
+const ROLE_NAMES = { sales:'销售', business:'商务', finance:'财务', rd:'研发/质检' };
+
+// ===================== 模拟数据 =====================
+// 演示旧配置迁移：王芳 old_style=true 表示历史 {enabled:true} 无 role 无表单
+let superAdmins = ['叶帅-Kyle'];
+
+const USERS = [
+  { name:'张伟-ZhangSan', dept:'营销中心/销售部', enabled:true, scope:'self', role:'sales', extra:[], removed:[], subs:['李萌-LiMeng','龙超富-Dragon'], risk:'low' },
+  { name:'李娜-LiNa',     dept:'营销中心/销售部', enabled:true, scope:'self', role:'sales', extra:[], removed:[], subs:[], risk:'low' },
+  { name:'王芳-WangFang', dept:'运营中心/商务部', enabled:true, scope:'all', role:'', extra:[], removed:[], subs:[], risk:'low', migrated:true },
+  { name:'陈杰-ChenJie',  dept:'产品部',          enabled:true, scope:'all', role:'rd', extra:[], removed:['STK_Inventory'], subs:[], risk:'medium' },
+  { name:'李萌-LiMeng',   dept:'营销中心/销售部', enabled:true, scope:'self', role:'sales', extra:[], removed:[], subs:[], risk:'low' },
+  { name:'龙超富-Dragon', dept:'营销中心/销售部', enabled:true, scope:'self', role:'sales', extra:[], removed:[], subs:[], risk:'low' },
+  { name:'曾丹-Lydia',    dept:'营销中心/销售部', enabled:true, scope:'self_and_subordinates', role:'sales', extra:[], removed:[], subs:['郭金博-Bill'], risk:'low' },
+  { name:'郭金博-Bill',   dept:'营销中心/销售部', enabled:false, scope:'self', role:'sales', extra:[], removed:[], subs:[], risk:'low' },
+  { name:'吴丽红-Cindy',  dept:'运营中心/财务部', enabled:true, scope:'all', role:'finance', extra:[], removed:[], subs:[], risk:'medium' },
+  { name:'叶帅-Kyle',     dept:'总经办',          enabled:true, scope:'all', role:'', extra:[], removed:[], subs:[], risk:'high' },
+];
+
+let currentEditUser = null;
+let formSelection = [];
+let selectedSubs = [];
+let subPickerSel = [];
+let superPickerSel = [];
+
+// ===================== 工具函数 =====================
+function isSuper(name) { return superAdmins.includes(name); }
+
+// 有效表单 = role 默认 + extra - removed
+function effectiveForms(u) {
+  const base = u.role ? [...(ROLES[u.role]||[])] : [];
+  return [...new Set([...base, ...(u.extra||[])].filter(f => !(u.removed||[]).includes(f)))];
+}
+
+function getAllSuperiors(name, seen = {}) {
+  let result = [];
+  for (const u of USERS) {
+    if (u.name === name) continue;
+    if ((u.subs||[]).includes(name) && !seen[u.name]) {
+      seen[u.name] = true;
+      result.push(u.name);
+      result = result.concat(getAllSuperiors(u.name, seen));
+    }
+  }
+  return result;
+}
+
+// ===================== 列表渲染 =====================
+function formLabel(u) {
+  if (!u.enabled) return '<span class="text-slate-600">未启用</span>';
+  if (isSuper(u.name)) return '<span class="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400">★ 全部</span>';
+  const forms = effectiveForms(u);
+  const roleName = u.role ? ROLE_NAMES[u.role] : '自定义';
+  const count = forms.length;
+  // 迁移/无表单警示
+  if (count === 0 && !u.migrated) return '<span class="text-[11px] px-2 py-0.5 rounded-full bg-red-500/20 text-red-400">无表单!</span>';
+  if (u.migrated) return '<span class="text-[11px] px-2 py-0.5 rounded-full bg-yellow-500/20 text-yellow-400">待配置</span>';
+  return `<span class="text-[11px] px-2 py-0.5 rounded-full bg-primary-dark/30 text-primary">${roleName} · ${count}个表单</span>`;
+}
+
+function scopeLabel(u) {
+  if (!u.enabled) return '';
+  if (isSuper(u.name)) return '<span class="text-[11px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-400">★ 全部</span>';
+  if (u.scope === 'self') return '<span class="text-[11px] px-2 py-0.5 rounded-full bg-slate-700/60 text-slate-300">仅本人</span>';
+  if (u.scope === 'self_and_subordinates') return '<span class="text-[11px] px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-400">本人+下属(' + (u.subs||[]).length + ')</span>';
+  return '<span class="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400">全部</span>';
+}
+
+function renderTable() {
+  const q = (document.getElementById('kd-search').value || '').toLowerCase();
+  const d = document.getElementById('kd-dept').value;
+  const list = USERS.filter(u =>
+    (!q || u.name.toLowerCase().includes(q)) &&
+    (!d || u.dept.startsWith(d))
+  );
+  document.getElementById('kd-tbody').innerHTML = list.map(u => {
+    const star = isSuper(u.name) ? ' <span class="text-amber-400 text-[10px]">★</span>' : '';
+    return `
+    <tr class="border-b border-slate-700/40 hover:bg-slate-800/30 transition-colors">
+      <td class="px-4 py-3">
+        <div class="flex items-center gap-2">
+          <span class="w-7 h-7 rounded-full ${isSuper(u.name)?'bg-amber-500/30 text-amber-300':'bg-primary-dark/30 text-primary'} flex items-center justify-center text-xs">${u.name[0]}</span>
+          <span class="font-medium text-slate-200">${u.name}${star}</span>
+        </div>
+      </td>
+      <td class="px-4 py-3 text-slate-400 text-[13px]">${u.dept}</td>
+      <td class="px-4 py-3">${formLabel(u)}</td>
+      <td class="px-4 py-3">${scopeLabel(u)}</td>
+      <td class="px-4 py-3">
+        <input type="checkbox" class="toggle" ${u.enabled?'checked':''} onclick="toggleQuick('${u.name}')">
+      </td>
+      <td class="px-4 py-3 text-right">
+        <button onclick="openEdit('${u.name}')"
+                class="px-2 py-1 text-xs rounded-lg border border-slate-600 hover:bg-slate-700 transition-colors cursor-pointer">编辑</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+function updateSuperText() {
+  document.getElementById('super-list-text').textContent =
+    '当前：' + (superAdmins.length ? superAdmins.join('、') : '（未设置）');
+}
+
+function toggleQuick(name) {
+  const u = USERS.find(x => x.name === name);
+  if (u) { u.enabled = !u.enabled; renderTable(); }
+}
+
+function toggleMaster() {
+  document.getElementById('kingdee-panel').classList.toggle('opacity-40');
+  document.getElementById('kingdee-panel').classList.toggle('pointer-events-none');
+}
+
+// ===================== 表单网格 =====================
+function renderFormGrid() {
+  const superUser = isSuper(currentEditUser.name);
+  document.getElementById('form-grid').innerHTML = FORMS.map(f => {
+    const checked = formSelection.includes(f.id);
+    return `
+    <label class="flex items-center gap-2 px-3 py-2 rounded-lg border ${checked?'border-primary bg-primary-dark/10':'border-slate-600'} hover:border-primary cursor-pointer transition-colors ${superUser?'opacity-40 pointer-events-none':''}">
+      <input type="checkbox" ${checked?'checked':''} ${superUser?'disabled':''} class="scope-radio" onchange="toggleForm('${f.id}')">
+      <span class="text-sm text-slate-200">${f.name}</span>
+      <span class="text-[10px] text-slate-500 font-mono ml-auto">${f.id}</span>
+    </label>`;
+  }).join('');
+  updateFormSummary();
+}
+
+function updateFormSummary() {
+  const roleName = document.getElementById('edit-role').value;
+  document.getElementById('form-summary').textContent =
+    '已授权 ' + formSelection.length + ' 个表单' + (roleName ? '（基础角色：' + ROLE_NAMES[roleName] + '）' : '');
+  updateNoFormWarning();
+}
+
+function updateNoFormWarning() {
+  const enabled = document.getElementById('edit-enabled').checked;
+  const warn = document.getElementById('no-form-warning');
+  const show = enabled && formSelection.length === 0 && !isSuper(currentEditUser.name);
+  warn.classList.toggle('hidden', !show);
+}
+
+function toggleForm(id) {
+  formSelection.includes(id) ? formSelection.splice(formSelection.indexOf(id),1) : formSelection.push(id);
+  renderFormGrid();
+}
+
+function applyRole() {
+  const role = document.getElementById('edit-role').value;
+  formSelection = role ? [...ROLES[role]] : [];
+  renderFormGrid();
+}
+
+// ===================== 编辑弹窗 =====================
+function openEdit(name) {
+  currentEditUser = USERS.find(x => x.name === name);
+  document.getElementById('edit-user').textContent = currentEditUser.name;
+  document.getElementById('edit-dept').textContent = currentEditUser.dept;
+  document.getElementById('edit-enabled').checked = currentEditUser.enabled;
+  document.getElementById('edit-risk').value = currentEditUser.risk || 'low';
+
+  const superUser = isSuper(name);
+  document.getElementById('super-hint').classList.toggle('hidden', !superUser);
+
+  document.getElementById('edit-role').value = superUser ? '' : (currentEditUser.role || '');
+  formSelection = superUser ? FORMS.map(f=>f.id) : effectiveForms(currentEditUser);
+  selectedSubs = [...(currentEditUser.subs||[])];
+
+  const scopeVal = superUser ? 'all' : (currentEditUser.scope || 'all');
+  document.querySelectorAll('input[name=scope]').forEach(r => {
+    r.checked = (r.value === scopeVal);
+    r.disabled = superUser;
+  });
+
+  renderFormGrid();
+  updateScopeUI();
+  updateNoFormWarning();
+  document.getElementById('edit-overlay').classList.remove('hidden');
+}
+
+function updateScopeUI() {
+  const sel = document.querySelector('input[name=scope]:checked');
+  const subSection = document.getElementById('subordinate-section');
+  const isSub = sel && sel.value === 'self_and_subordinates';
+  const superUser = isSuper(currentEditUser.name);
+  subSection.classList.toggle('hidden', !isSub || superUser);
+  if (isSub) renderSubChips();
+}
+
+function renderSubChips() {
+  document.getElementById('sub-chips').innerHTML = selectedSubs.map(s =>
+    `<span class="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-blue-500/20 text-blue-300 chip">
+       ${s} <button onclick="removeSub('${s}')" class="hover:text-white cursor-pointer">×</button>
+     </span>`).join('');
+}
+
+function removeSub(name) { selectedSubs = selectedSubs.filter(s => s !== name); renderSubChips(); }
+
+// ===================== 下属选择器 =====================
+function openSubordinatePicker() {
+  subPickerSel = [...selectedSubs];
+  renderSubList();
+  document.getElementById('sub-picker-overlay').classList.remove('hidden');
+}
+
+function renderSubList() {
+  const q = (document.getElementById('sub-search').value || '').toLowerCase();
+  const excluded = new Set([currentEditUser.name]);
+  getAllSuperiors(currentEditUser.name).forEach(x => excluded.add(x));
+  const list = USERS.filter(u => !excluded.has(u.name) && (!q || u.name.toLowerCase().includes(q)));
+  document.getElementById('sub-list').innerHTML = list.map(u => `
+    <label class="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-800/50 cursor-pointer transition-colors">
+      <input type="checkbox" class="scope-radio" ${subPickerSel.includes(u.name)?'checked':''} onchange="toggleSubSel('${u.name}')">
+      <span class="flex-1">
+        <span class="block text-sm text-slate-200">${u.name}</span>
+        <span class="block text-xs text-slate-500">${u.dept}</span>
+      </span>
+    </label>`).join('');
+}
+
+function toggleSubSel(name) {
+  subPickerSel.includes(name) ? subPickerSel.splice(subPickerSel.indexOf(name),1) : subPickerSel.push(name);
+}
+function confirmSubordinates() { selectedSubs = [...subPickerSel]; renderSubChips(); closeSubordinatePicker(); }
+function closeSubordinatePicker() { document.getElementById('sub-picker-overlay').classList.add('hidden'); }
+
+// ===================== 超级账户 =====================
+function openSuperPicker() { superPickerSel = [...superAdmins]; renderSuperList(); document.getElementById('super-picker-overlay').classList.remove('hidden'); }
+function renderSuperList() {
+  const q = (document.getElementById('super-search').value || '').toLowerCase();
+  const list = USERS.filter(u => !q || u.name.toLowerCase().includes(q));
+  document.getElementById('super-list').innerHTML = list.map(u => `
+    <label class="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-800/50 cursor-pointer transition-colors">
+      <input type="checkbox" class="scope-radio" ${superPickerSel.includes(u.name)?'checked':''} onchange="toggleSuperSel('${u.name}')">
+      <span class="flex-1">
+        <span class="block text-sm text-slate-200">${u.name}</span>
+        <span class="block text-xs text-slate-500">${u.dept}</span>
+      </span>
+      <span class="text-[10px] text-amber-400">★ 全部表单</span>
+    </label>`).join('');
+}
+function toggleSuperSel(name) { superPickerSel.includes(name) ? superPickerSel.splice(superPickerSel.indexOf(name),1) : superPickerSel.push(name); }
+function confirmSuper() { superAdmins = [...superPickerSel]; updateSuperText(); renderTable(); closeSuperPicker(); }
+function closeSuperPicker() { document.getElementById('super-picker-overlay').classList.add('hidden'); }
+
+// ===================== 保存（含后端校验模拟） =====================
+function saveEdit() {
+  // 前端兜底校验：启用但无表单
+  const enabled = document.getElementById('edit-enabled').checked;
+  if (enabled && formSelection.length === 0 && !isSuper(currentEditUser.name)) {
+    alert('未授权任何表单，无法保存。请至少勾选一个表单或选择基础角色。');
+    return;
+  }
+
+  if (!isSuper(currentEditUser.name)) {
+    const sel = document.querySelector('input[name=scope]:checked');
+    const role = document.getElementById('edit-role').value;
+    currentEditUser.enabled = enabled;
+    currentEditUser.scope = sel ? sel.value : 'all';
+    currentEditUser.role = role;
+    currentEditUser.subs = selectedSubs;
+    currentEditUser.risk = document.getElementById('edit-risk').value;
+    currentEditUser.migrated = false;
+
+    const base = role ? [...(ROLES[role]||[])] : [];
+    currentEditUser.extra = formSelection.filter(f => !base.includes(f));
+    currentEditUser.removed = base.filter(f => !formSelection.includes(f));
+  }
+  closeEdit();
+  renderTable();
+}
+function closeEdit() { document.getElementById('edit-overlay').classList.add('hidden'); }
+
+// 初始化
+updateSuperText();
+renderTable();
+</script>
+</body>
+</html>

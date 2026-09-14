@@ -1376,6 +1376,21 @@
 
                             <!-- Kingdee Permissions Tab -->
                             <div id="permissions-kingdee-panel" class="hidden">
+                                <!-- 超级账户配置条 -->
+                                <div class="bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded-xl px-4 py-3 mb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                                    <div class="flex items-center gap-3">
+                                        <span class="w-8 h-8 rounded-lg bg-amber-100 dark:bg-amber-500/20 flex items-center justify-center text-amber-600 dark:text-amber-400">★</span>
+                                        <div>
+                                            <div class="text-sm font-medium text-slate-800 dark:text-slate-100">超级账户（可查看所有金蝶表单）</div>
+                                            <div class="text-xs text-slate-500 dark:text-slate-400 mt-0.5" id="permissions-kingdee-superadmins-text">当前：无</div>
+                                        </div>
+                                    </div>
+                                    <button onclick="openKingdeeSuperAdminsPicker()"
+                                            class="px-3 py-1.5 text-xs rounded-lg border border-amber-400 text-amber-600 dark:text-amber-400 hover:bg-amber-100 dark:hover:bg-amber-500/20 cursor-pointer whitespace-nowrap">
+                                        ✎ 配置超级账户
+                                    </button>
+                                </div>
+
                                 <div class="flex flex-col sm:flex-row gap-4 mb-4">
                                     <div class="flex-1">
                                         <div class="relative">
@@ -1399,6 +1414,8 @@
                                                 <tr class="bg-slate-50 dark:bg-slate-800/50 text-left text-slate-500 dark:text-slate-400">
                                                     <th class="px-4 py-3 font-medium">用户</th>
                                                     <th class="px-4 py-3 font-medium">部门</th>
+                                                    <th class="px-4 py-3 font-medium">角色 / 表单</th>
+                                                    <th class="px-4 py-3 font-medium">数据范围</th>
                                                     <th class="px-4 py-3 font-medium">启用金蝶</th>
                                                     <th class="px-4 py-3 font-medium text-right">操作</th>
                                                 </tr>
@@ -2489,28 +2506,106 @@
 
     <!-- Kingdee Permission Edit Modal -->
     <div id="permissions-kingdee-modal-overlay" class="fixed inset-0 bg-black/50 z-[100] hidden flex items-center justify-center">
-        <div class="bg-white dark:bg-[#1A1A1A] rounded-2xl border border-slate-200 dark:border-white/10 shadow-xl w-full max-w-lg mx-4">
-            <div class="p-6">
+        <div class="bg-white dark:bg-[#1A1A1A] rounded-2xl border border-slate-200 dark:border-white/10 shadow-xl w-full max-w-2xl mx-4 max-h-[90vh] flex flex-col">
+            <div class="p-6 overflow-y-auto">
                 <div class="flex items-center gap-3 mb-5">
                     <div class="w-10 h-10 rounded-xl bg-primary-500/10 flex items-center justify-center flex-shrink-0">
                         <i class="fas fa-database text-primary-500"></i>
                     </div>
                     <div class="min-w-0 flex-1">
                         <h3 class="font-semibold text-slate-800 dark:text-slate-100 text-base">编辑金蝶权限</h3>
-                        <p id="permissions-kingdee-modal-subtitle" class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">配置用户的金蝶访问权限</p>
+                        <p id="permissions-kingdee-modal-subtitle" class="text-xs text-slate-500 dark:text-slate-400 mt-0.5">配置用户可访问的金蝶表单和数据范围</p>
                     </div>
                 </div>
 
-                <div class="space-y-4">
-                    <div>
-                        <label class="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-1.5">用户</label>
-                        <div id="permissions-kingdee-modal-user-name" class="px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800 text-sm text-slate-700 dark:text-slate-300"></div>
+                <div class="space-y-5">
+                    <!-- 用户 + 超级账户提示 -->
+                    <div class="grid grid-cols-2 gap-3">
+                        <div>
+                            <label class="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-1.5">用户</label>
+                            <div id="permissions-kingdee-modal-user-name" class="px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800 text-sm text-slate-700 dark:text-slate-300"></div>
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-1.5">部门</label>
+                            <div id="permissions-kingdee-modal-user-dept" class="px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800 text-sm text-slate-700 dark:text-slate-300"></div>
+                        </div>
                     </div>
+
+                    <div id="permissions-kingdee-modal-super-hint" class="hidden px-3 py-2.5 rounded-lg bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 text-sm text-amber-700 dark:text-amber-300">
+                        ★ 该用户是超级账户，可查看所有金蝶表单（表单与数据范围锁定为全部）
+                    </div>
+
+                    <!-- 启用开关 -->
                     <div>
                         <label class="flex items-center gap-2 cursor-pointer">
                             <input id="permissions-kingdee-modal-enabled" type="checkbox" class="rounded border-slate-300 dark:border-slate-600 text-primary-500 focus:ring-primary-500">
                             <span class="text-sm text-slate-700 dark:text-slate-300">启用金蝶权限</span>
                         </label>
+                    </div>
+
+                    <!-- 表单授权：角色 + 表单网格 -->
+                    <div>
+                        <label class="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">表单授权（角色组 + 自定义微调）</label>
+                        <div class="flex items-center gap-3 mb-2">
+                            <span class="text-sm text-slate-700 dark:text-slate-300 whitespace-nowrap">基础角色</span>
+                            <select id="permissions-kingdee-modal-role" onchange="onKingdeeModalRoleChange()"
+                                    class="flex-1 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-[#1A1A1A] text-sm focus:outline-none focus:border-primary-500">
+                                <option value="">无角色（自定义）</option>
+                            </select>
+                        </div>
+                        <div id="permissions-kingdee-modal-forms" class="grid grid-cols-1 sm:grid-cols-2 gap-2"></div>
+                        <div id="permissions-kingdee-modal-noform" class="hidden mt-2 px-3 py-2 rounded-lg bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 text-xs text-red-700 dark:text-red-300">
+                            ⚠️ 未授权任何表单：该用户将无法查询任何金蝶数据。请至少勾选一个表单，或选择基础角色。
+                        </div>
+                    </div>
+
+                    <!-- 销售数据范围 -->
+                    <div>
+                        <label class="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">销售单据数据范围</label>
+                        <div class="space-y-2">
+                            <label class="flex items-center gap-3 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 cursor-pointer">
+                                <input type="radio" name="permissions-kingdee-scope" value="self" class="text-primary-500 focus:ring-primary-500" onchange="updateKingdeeModalScopeUI()">
+                                <span class="text-sm text-slate-700 dark:text-slate-300">仅本人</span>
+                                <span class="text-xs text-slate-500 dark:text-slate-400">销售类单据只看自己作为业务员的</span>
+                            </label>
+                            <label class="flex items-center gap-3 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 cursor-pointer">
+                                <input type="radio" name="permissions-kingdee-scope" value="self_and_subordinates" class="text-primary-500 focus:ring-primary-500" onchange="updateKingdeeModalScopeUI()">
+                                <span class="text-sm text-slate-700 dark:text-slate-300">本人及下属</span>
+                                <span class="text-xs text-slate-500 dark:text-slate-400">销售类单据看本人及直接下属的</span>
+                            </label>
+                            <label class="flex items-center gap-3 px-3 py-2 rounded-lg border border-slate-200 dark:border-slate-600 cursor-pointer">
+                                <input type="radio" name="permissions-kingdee-scope" value="all" class="text-primary-500 focus:ring-primary-500" onchange="updateKingdeeModalScopeUI()">
+                                <span class="text-sm text-slate-700 dark:text-slate-300">全部（不按业务员过滤）</span>
+                                <span class="text-xs text-slate-500 dark:text-slate-400">商务/财务/研发等非销售岗选此项</span>
+                            </label>
+                        </div>
+                        <div id="permissions-kingdee-modal-allhint" class="hidden mt-2 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 text-xs text-amber-700 dark:text-amber-300">
+                            ⚠️ 该用户已授权销售类表单，选择「全部」后将<b>可查看全公司销售数据</b>（不按业务员过滤）。仅建议高管/确有需要者，请确认。
+                        </div>
+                        <p class="mt-2 text-xs text-slate-500 dark:text-slate-400">说明：数据范围仅对销售类表单（销售订单/报价单/销售出库单/销售退货单）生效；应收、库存、采购、档案等其它表单不受范围限制（按表单授权即可见全部）。</p>
+                    </div>
+
+                    <!-- 直接下属（仅"本人及下属"显示） -->
+                    <div id="permissions-kingdee-modal-subordinate" class="hidden">
+                        <label class="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">直接下属</label>
+                        <div class="px-3 py-2.5 rounded-lg border border-slate-200 dark:border-slate-600">
+                            <div class="flex flex-wrap gap-2 mb-2" id="permissions-kingdee-modal-subchips"></div>
+                            <button onclick="openKingdeeSubordinatePicker()"
+                                    class="px-3 py-1.5 text-xs rounded-lg border border-dashed border-primary-500 text-primary-500 hover:bg-primary-500/10 cursor-pointer">
+                                + 添加下属...
+                            </button>
+                        </div>
+                        <p class="text-xs text-slate-500 dark:text-slate-400 mt-1.5">不能选择自己或自己的上级，避免循环</p>
+                    </div>
+
+                    <!-- 风险等级 -->
+                    <div>
+                        <label class="block text-sm font-medium text-slate-600 dark:text-slate-400 mb-2">风险等级（预留）</label>
+                        <select id="permissions-kingdee-modal-risk" class="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-[#1A1A1A] text-sm focus:outline-none focus:border-primary-500">
+                            <option value="low">低 (low)</option>
+                            <option value="medium">中 (medium)</option>
+                            <option value="high">高 (high)</option>
+                        </select>
                     </div>
                 </div>
             </div>
@@ -2523,6 +2618,49 @@
                         class="px-4 py-2 rounded-lg bg-primary-500 hover:bg-primary-600 text-white text-sm font-medium cursor-pointer transition-colors duration-150">
                     保存
                 </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Kingdee Subordinate Picker Modal -->
+    <div id="permissions-kingdee-subpicker-overlay" class="fixed inset-0 bg-black/50 z-[101] hidden flex items-center justify-center">
+        <div class="bg-white dark:bg-[#1A1A1A] rounded-2xl border border-slate-200 dark:border-white/10 shadow-xl w-full max-w-md mx-4">
+            <div class="p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h3 class="font-semibold text-slate-800 dark:text-slate-100 text-base">选择直接下属</h3>
+                    <button onclick="closeKingdeeSubordinatePicker()" class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5 text-slate-400 cursor-pointer">✕</button>
+                </div>
+                <input id="permissions-kingdee-subpicker-search" type="text" placeholder="搜索用户..." oninput="renderKingdeeSubordinateList()"
+                       class="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-[#1A1A1A] text-sm focus:outline-none focus:border-primary-500 mb-3">
+                <div id="permissions-kingdee-subpicker-list" class="max-h-72 overflow-y-auto space-y-1"></div>
+            </div>
+            <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-100 dark:border-white/5 rounded-b-2xl">
+                <button onclick="closeKingdeeSubordinatePicker()"
+                        class="px-4 py-2 rounded-lg border border-slate-200 dark:border-white/10 text-slate-600 dark:text-slate-300 text-sm font-medium hover:bg-slate-50 dark:hover:bg-white/5 cursor-pointer">取消</button>
+                <button onclick="confirmKingdeeSubordinates()"
+                        class="px-4 py-2 rounded-lg bg-primary-500 hover:bg-primary-600 text-white text-sm font-medium cursor-pointer">确定</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Kingdee Super Admins Picker Modal -->
+    <div id="permissions-kingdee-superadmins-overlay" class="fixed inset-0 bg-black/50 z-[102] hidden flex items-center justify-center">
+        <div class="bg-white dark:bg-[#1A1A1A] rounded-2xl border border-slate-200 dark:border-white/10 shadow-xl w-full max-w-md mx-4">
+            <div class="p-6">
+                <div class="flex items-center justify-between mb-2">
+                    <h3 class="font-semibold text-slate-800 dark:text-slate-100 text-base">配置超级账户</h3>
+                    <button onclick="closeKingdeeSuperAdminsPicker()" class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-white/5 text-slate-400 cursor-pointer">✕</button>
+                </div>
+                <p class="text-xs text-slate-500 dark:text-slate-400 mb-4">超级账户可查看所有金蝶表单和数据，适合公司高层</p>
+                <input id="permissions-kingdee-superadmins-search" type="text" placeholder="搜索用户..." oninput="renderKingdeeSuperAdminsList()"
+                       class="w-full px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-[#1A1A1A] text-sm focus:outline-none focus:border-primary-500 mb-3">
+                <div id="permissions-kingdee-superadmins-list" class="max-h-72 overflow-y-auto space-y-1"></div>
+            </div>
+            <div class="flex items-center justify-end gap-3 px-6 py-4 border-t border-slate-100 dark:border-white/5 rounded-b-2xl">
+                <button onclick="closeKingdeeSuperAdminsPicker()"
+                        class="px-4 py-2 rounded-lg border border-slate-200 dark:border-white/10 text-slate-600 dark:text-slate-300 text-sm font-medium hover:bg-slate-50 dark:hover:bg-white/5 cursor-pointer">取消</button>
+                <button onclick="confirmKingdeeSuperAdmins()"
+                        class="px-4 py-2 rounded-lg bg-primary-500 hover:bg-primary-600 text-white text-sm font-medium cursor-pointer">保存</button>
             </div>
         </div>
     </div>

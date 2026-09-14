@@ -914,7 +914,8 @@ class AgentStreamExecutor:
 
                         # Truncate excessively large tool results for the current turn
                         # Historical turns will be further truncated in _trim_messages()
-                        MAX_CURRENT_TURN_RESULT_CHARS = 50000
+                        # 数据分析场景需查询大量金蝶数据，提高当前轮工具结果上限
+                        MAX_CURRENT_TURN_RESULT_CHARS = 200000
                         if len(result_content) > MAX_CURRENT_TURN_RESULT_CHARS:
                             truncated_len = len(result_content)
                             result_content = result_content[:MAX_CURRENT_TURN_RESULT_CHARS] + \
@@ -1717,20 +1718,43 @@ class AgentStreamExecutor:
             if not tool:
                 raise ValueError(self._build_tool_not_found_message(tool_name))
 
-            # 金蝶 MCP 工具权限检查
+            # 金蝶 MCP 工具权限检查（表单授权 + 业务员过滤注入）
             if getattr(tool, 'server_name', None) == 'kingdee-k3cloud':
                 user_id = getattr(self.agent, 'current_user_id', None)
-                if user_id:
-                    from common.permission_checker import is_permissions_enabled, check_kingdee_permission
-                    if is_permissions_enabled():
-                        allowed, scope, message = check_kingdee_permission(user_id)
-                        if not allowed:
-                            logger.warning(f"[Permission] 用户 {user_id} 无金蝶权限，拦截工具调用: {tool_name}")
-                            return {
-                                "status": "error",
-                                "result": f"权限不足：{message}",
-                                "execution_time": 0
-                            }
+                if not user_id:
+                    # 定时任务/多智能体等无用户上下文时，安全优先：拒绝金蝶工具
+                    logger.warning(f"[Permission] 金蝶工具 {tool_name} 在无用户上下文（user_id 为空）时被拦截")
+                    return {
+                        "status": "error",
+                        "result": "权限不足：无法确认当前用户身份，金蝶查询已禁止",
+                        "execution_time": 0
+                    }
+                # 金蝶写工具无条件拒绝（对所有用户，含超管/管理员）：
+                # 金蝶 MCP 以 readonly 方式接入，此处是独立于 MCP_MODE=readonly 的第二道防线，
+                # 防止 mcp.json 配置漂移（被误改为 readwrite）后写操作在 CowAgent 层可用。
+                if tool_name in ('save_bill', 'submit_bill', 'audit_bill',
+                                 'unaudit_bill', 'delete_bill', 'execute_operation', 'push_bill'):
+                    logger.warning(f"[Permission] 用户 {user_id} 尝试调用金蝶写工具 {tool_name}，已无条件拦截（系统只读接入）")
+                    return {
+                        "status": "error",
+                        "result": "金蝶当前为只读接入，不支持保存/提交/审核/删除等写入操作。如需执行，请由管理员在金蝶系统中处理。",
+                        "execution_time": 0
+                    }
+                from common.permission_checker import build_kingdee_form_filter, is_permissions_enabled
+                if is_permissions_enabled():
+                    form_id = arguments.get('form_id')
+                    fs = arguments.get('filter_string', '') or ''
+                    new_fs = build_kingdee_form_filter(user_id, form_id, fs)
+                    if new_fs is None:
+                        logger.warning(f"[Permission] 用户 {user_id} 无金蝶表单 {form_id} 权限，拦截工具调用: {tool_name}")
+                        return {
+                            "status": "error",
+                            "result": f"权限不足：您没有访问该金蝶表单的权限",
+                            "execution_time": 0
+                        }
+                    if new_fs != fs:
+                        logger.info(f"[Permission] 用户 {user_id} 注入业务员过滤到 {tool_name} (form={form_id})")
+                        arguments['filter_string'] = new_fs
 
             # 知识库工具权限检查（对所有可能访问 knowledge/ 的工具）
             user_id = getattr(self.agent, 'current_user_id', None)
@@ -1997,12 +2021,12 @@ class AgentStreamExecutor:
         """
         Truncate tool_result content in historical messages to reduce context size.
 
-        Current turn results are kept at 30K chars (truncated at creation time).
-        Historical turn results are further truncated to 10K chars here.
+        Current turn results are kept at 200K chars (truncated at creation time).
+        Historical turn results are further truncated to 50K chars here.
         This runs before token-based trimming so that we first shrink oversized
         results, potentially avoiding the need to drop entire turns.
         """
-        MAX_HISTORY_RESULT_CHARS = 20000
+        MAX_HISTORY_RESULT_CHARS = 50000
 
         if len(self.messages) < 2:
             return

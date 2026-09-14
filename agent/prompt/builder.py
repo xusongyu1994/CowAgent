@@ -687,11 +687,34 @@ def _build_user_identity_section(user_identity: Dict[str, str], language: str) -
             lines.append(f"**知识库权限**: 可访问的文件夹 - {folders_str}")
         has_permission_info = True
     if user_identity.get("kingdee_enabled"):
-        if is_en:
-            lines.append("**Kingdee access**: enabled")
+        kforms = user_identity.get("kingdee_forms")
+        kscope = user_identity.get("kingdee_scope") or ""
+        if kforms is None:
+            # 不限制（管理员 / 超级账户）
+            if is_en:
+                lines.append("**Kingdee access**: all forms (administrator / super account)")
+            else:
+                lines.append("**金蝶权限**: 全部表单（管理员/超级账户）")
+            has_permission_info = True
+        elif kforms:
+            forms_str = "、".join(kforms) if not is_en else ", ".join(kforms)
+            if is_en:
+                lines.append(f"**Kingdee access**: forms - {forms_str}")
+            else:
+                lines.append(f"**金蝶权限**: 可查询表单 - {forms_str}")
+            if kscope:
+                if is_en:
+                    lines.append(f"**Kingdee data scope**: {kscope}")
+                else:
+                    lines.append(f"**金蝶数据范围**: {kscope}")
+            has_permission_info = True
         else:
-            lines.append("**金蝶权限**: 已启用")
-        has_permission_info = True
+            # 已启用但尚未配置任何表单（待配置用户）
+            if is_en:
+                lines.append("**Kingdee access**: enabled but NO form configured - tell the user to ask the admin for form access")
+            else:
+                lines.append("**金蝶权限**: 已开通但尚未配置可查表单 - 请提示用户联系管理员配置表单权限")
+            has_permission_info = True
     if user_identity.get("knowledge_folders") is None and user_identity.get("kingdee_enabled") is None:
         if is_en:
             lines.append("**Permissions**: default - no special access")

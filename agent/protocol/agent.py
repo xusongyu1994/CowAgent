@@ -245,19 +245,28 @@ class Agent:
                 try:
                     from common.permission_checker import (
                         is_permissions_enabled,
-                        check_knowledge_permission,
                         check_kingdee_permission,
                         get_user_accessible_folders,
+                        get_kingdee_permission_brief,
                     )
                     if is_permissions_enabled():
                         # 知识库权限
                         accessible = get_user_accessible_folders(self.current_user_id)
                         if accessible and accessible != ['*']:
                             user_identity["knowledge_folders"] = accessible
-                        # 金蝶权限
+                        # 金蝶权限：注入"可查哪些表单 + 数据范围"，让模型按权限选择表单，
+                        # 避免凭空猜测"无 XX 权限"或拿其它表单的数据顶替（如销售订单冒充出库）。
                         kd_allowed, kd_scope, _ = check_kingdee_permission(self.current_user_id)
                         if kd_allowed:
                             user_identity["kingdee_enabled"] = True
+                            kd_brief = get_kingdee_permission_brief(self.current_user_id)
+                            if kd_brief and kd_brief.get('enabled'):
+                                if kd_brief.get('unrestricted'):
+                                    user_identity["kingdee_forms"] = None   # 不限制（管理员/超管）
+                                    user_identity["kingdee_scope"] = kd_brief.get('scope_label', '全部数据')
+                                else:
+                                    user_identity["kingdee_forms"] = kd_brief.get('form_names') or []
+                                    user_identity["kingdee_scope"] = kd_brief.get('scope_label', '')
                 except Exception as e:
                     logger.debug(f"[Agent] Failed to add permission info: {e}")
 

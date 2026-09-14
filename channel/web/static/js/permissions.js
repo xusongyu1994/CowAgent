@@ -458,18 +458,56 @@ function savePermissionsUserModal() {
 // =====================================================================
 // 金蝶权限管理
 // =====================================================================
+// 金蝶表单目录 / 角色（后端下发，前端缓存）
+let kingdeeFormCatalog = {};      // form_id -> 中文名
+let kingdeeRoles = {};            // role -> [form_id, ...]
+let kingdeeRoleNames = {};        // role -> 中文名
+let kingdeeSaleScopedForms = [];  // 需要按业务员过滤的销售类表单
+let kingdeeSuperAdmins = [];      // 超级账户 userid 列表
+// 当前编辑用户的表单选中态
+let currentKingdeeFormSelection = [];   // 勾选的 form_id 列表
+let currentKingdeeSubordinates = [];    // 直接下属 userid 列表
+
+function loadKingdeeFormCatalog() {
+    return fetch('/api/permissions/kingdee-form-roles').then(r => r.json()).then(data => {
+        if (data.status === 'success' && data.data) {
+            kingdeeFormCatalog = data.data.forms || {};
+            kingdeeRoles = data.data.roles || {};
+            kingdeeRoleNames = data.data.role_names || {};
+            kingdeeSaleScopedForms = data.data.sale_scoped_forms || [];
+        }
+    }).catch(err => {
+        console.error('[Permissions] Failed to load kingdee form catalog:', err);
+    });
+}
+
+function loadKingdeeSuperAdmins() {
+    return fetch('/api/permissions/kingdee/super-admins').then(r => r.json()).then(data => {
+        if (data.status === 'success' && data.data) {
+            kingdeeSuperAdmins = data.data.super_admins || [];
+        }
+    }).catch(err => {
+        console.error('[Permissions] Failed to load kingdee super admins:', err);
+    });
+}
+
 function loadPermissionsKingdee() {
     Promise.all([
         fetch('/api/permissions/users').then(r => r.json()),
-        fetch('/api/permissions/config').then(r => r.json())
+        fetch('/api/permissions/config').then(r => r.json()),
+        loadKingdeeFormCatalog(),
+        loadKingdeeSuperAdmins()
     ]).then(([usersData, configData]) => {
         if (usersData.status === 'success' && configData.status === 'success') {
             // 缓存数据供搜索/筛选使用
             permissionsState.cachedKingdeeUsersData = usersData.data;
             permissionsState.cachedKingdeeConfig = configData.data;
 
-            // 填充部门下拉框
-            populateDepartmentFilter('permissions-kingdee-department-filter', usersData.data.users || []);
+            // 填充部门下拉框（层级前缀：可选上级部门）
+            populateDeptPrefixFilter('permissions-kingdee-department-filter', usersData.data.users || []);
+
+            // 渲染超级账户配置条
+            renderKingdeeSuperAdminsBar();
 
             // 读取当前的搜索词和部门筛选值
             const searchTerm = document.getElementById('permissions-kingdee-search')?.value || '';
@@ -482,42 +520,102 @@ function loadPermissionsKingdee() {
     });
 }
 
+// 计算用户的「有效表单」集合
+function kingdeeEffectiveForms(perms) {
+    const base = perms.role && kingdeeRoles[perms.role] ? [...kingdeeRoles[perms.role]] : [];
+    const extra = perms.extra_forms || [];
+    const removed = perms.removed_forms || [];
+    return [...new Set([...base, ...extra].filter(f => !removed.includes(f)))];
+}
+
+function isKingdeeSuperAdmin(userid) {
+    return kingdeeSuperAdmins.includes(userid);
+}
+
+function renderKingdeeSuperAdminsBar() {
+    const el = document.getElementById('permissions-kingdee-superadmins-text');
+    if (!el) return;
+    if (kingdeeSuperAdmins.length === 0) {
+        el.textContent = '当前：无';
+        return;
+    }
+    // 把 userid 映射为姓名
+    const users = permissionsState.cachedKingdeeUsersData?.users || [];
+    const nameMap = {};
+    users.forEach(u => { nameMap[u.userid] = u.name; });
+    const names = kingdeeSuperAdmins.map(id => nameMap[id] || id);
+    el.textContent = '当前：' + names.join('、');
+}
+
+function kingdeeFormLabel(perms) {
+    if (!perms.enabled) return '<span class="text-slate-400 dark:text-slate-500 text-sm">未启用</span>';
+    const forms = kingdeeEffectiveForms(perms);
+    const roleName = perms.role ? (kingdeeRoleNames[perms.role] || perms.role) : '自定义';
+    if (forms.length === 0) {
+        return '<span class="text-[11px] px-2 py-0.5 rounded-full bg-yellow-100 dark:bg-yellow-500/20 text-yellow-700 dark:text-yellow-400">待配置</span>';
+    }
+    return `<span class="text-[11px] px-2 py-0.5 rounded-full bg-primary-100 dark:bg-primary-500/20 text-primary-700 dark:text-primary-400">${escapeHtml(roleName)} · ${forms.length}个表单</span>`;
+}
+
+function kingdeeScopeLabel(perms) {
+    if (!perms.enabled) return '<span class="text-slate-400 dark:text-slate-500 text-sm">—</span>';
+    if (perms.scope === 'self') {
+        return '<span class="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-600 text-slate-600 dark:text-slate-300">仅本人</span>';
+    }
+    if (perms.scope === 'self_and_subordinates') {
+        const n = (perms.direct_subordinates || []).length;
+        return `<span class="text-[11px] px-2 py-0.5 rounded-full bg-blue-100 dark:bg-blue-500/20 text-blue-700 dark:text-blue-400">本人+下属(${n})</span>`;
+    }
+    return '<span class="text-[11px] px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400">全部</span>';
+}
+
 function renderPermissionsKingdee(usersData, config, searchTerm, department) {
     const tbody = document.getElementById('permissions-kingdee-tbody');
     tbody.innerHTML = '';
 
     const users = usersData.users || [];
     const userPermissions = config.kingdee_permissions?.user_permissions || {};
+    const nameMap = {};
+    users.forEach(u => { nameMap[u.userid] = u.name; });
 
-    // 过滤用户：搜索匹配用户名 + 部门筛选
+    // 过滤用户：搜索匹配用户名 + 部门（前缀匹配，选上级部门可看子部门）
     const filteredUsers = users.filter(user => {
         if (searchTerm && !user.name.toLowerCase().includes(searchTerm.toLowerCase())) return false;
-        if (department && user.department !== department) return false;
+        if (department && !(user.department || '').startsWith(department)) return false;
         return true;
     });
 
     filteredUsers.forEach(user => {
-        const perms = userPermissions[user.userid] || { enabled: false };
+        const perms = userPermissions[user.userid] || { enabled: false, scope: 'all', role: '', extra_forms: [], removed_forms: [], direct_subordinates: [] };
+        perms._userid = user.userid;
+        const isSuper = isKingdeeSuperAdmin(user.userid);
         const tr = document.createElement('tr');
         tr.className = 'border-b border-slate-100 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50';
+        const superStar = isSuper ? ' <span class="text-amber-500 text-xs">★</span>' : '';
         tr.innerHTML = `
             <td class="px-4 py-3">
                 <div class="flex items-center gap-2">
                     <i class="fas fa-user text-slate-400 text-sm"></i>
-                    <span class="font-medium text-slate-700 dark:text-slate-300">${escapeHtml(user.name)}</span>
+                    <span class="font-medium text-slate-700 dark:text-slate-300">${escapeHtml(user.name)}${superStar}</span>
                 </div>
             </td>
             <td class="px-4 py-3 text-sm text-slate-500 dark:text-slate-400">
                 ${escapeHtml(user.department)}
             </td>
             <td class="px-4 py-3">
-                <span class="inline-flex items-center gap-1.5 text-sm ${perms.enabled ? 'text-green-600 dark:text-green-400' : 'text-slate-400 dark:text-slate-500'}">
-                    <i class="fas ${perms.enabled ? 'fa-check-circle' : 'fa-times-circle'} text-xs"></i>
-                    ${perms.enabled ? '已启用' : '未启用'}
+                ${isSuper ? '<span class="text-[11px] px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-400">★ 全部</span>' : kingdeeFormLabel(perms)}
+            </td>
+            <td class="px-4 py-3">
+                ${isSuper ? '<span class="text-[11px] px-2 py-0.5 rounded-full bg-amber-100 dark:bg-amber-500/20 text-amber-700 dark:text-amber-400">★ 全部</span>' : kingdeeScopeLabel(perms)}
+            </td>
+            <td class="px-4 py-3">
+                <span class="inline-flex items-center gap-1.5 text-sm ${perms.enabled || isSuper ? 'text-green-600 dark:text-green-400' : 'text-slate-400 dark:text-slate-500'}">
+                    <i class="fas ${perms.enabled || isSuper ? 'fa-check-circle' : 'fa-times-circle'} text-xs"></i>
+                    ${perms.enabled || isSuper ? '已启用' : '未启用'}
                 </span>
             </td>
             <td class="px-4 py-3 text-right">
-                <button onclick="openPermissionsKingdeeModal('${escapeHtml(user.userid)}', '${escapeHtml(user.name)}')"
+                <button onclick="openPermissionsKingdeeModal('${escapeHtml(user.userid)}', '${escapeHtml(user.name)}', '${escapeHtml(user.department)}')"
                         class="px-2 py-1 text-xs rounded-lg border border-slate-200 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors cursor-pointer">
                     编辑
                 </button>
@@ -525,52 +623,247 @@ function renderPermissionsKingdee(usersData, config, searchTerm, department) {
         `;
         tbody.appendChild(tr);
     });
-
 }
 
-function updateKingdeePermission(userid, enabled) {
-    fetch('/api/permissions/config').then(r => r.json()).then(data => {
-        const config = data.data;
-        if (!config.kingdee_permissions) config.kingdee_permissions = {};
-        if (!config.kingdee_permissions.user_permissions) config.kingdee_permissions.user_permissions = {};
-
-        config.kingdee_permissions.user_permissions[userid] = { enabled: enabled };
-
-        // Add audit log
-        config.audit_log = config.audit_log || [];
-        const kdStatus = enabled ? '已启用' : '已禁用';
-        config.audit_log.push({
-            timestamp: new Date().toISOString(),
-            operator: 'admin',
-            action: enabled ? 'enable' : 'disable',
-            permission_type: 'kingdee',
-            target: userid,
-            details: `金蝶权限${kdStatus}`
-        });
-
-        return fetch('/api/permissions/config', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(config)
-        });
-    }).catch(err => {
-        console.error('[Permissions] Failed to update kingdee permission:', err);
-    });
-}
-
-function openPermissionsKingdeeModal(userid, name) {
+// ---- 编辑弹窗 ----
+function openPermissionsKingdeeModal(userid, name, department) {
     currentKingdeeModal.userid = userid;
     currentKingdeeModal.name = name;
     document.getElementById('permissions-kingdee-modal-user-name').textContent = name;
+    document.getElementById('permissions-kingdee-modal-user-dept').textContent = department || '';
+
+    const isSuper = isKingdeeSuperAdmin(userid);
+    document.getElementById('permissions-kingdee-modal-super-hint').classList.toggle('hidden', !isSuper);
 
     // Load config
-    fetch('/api/permissions/config').then(r => r.json()).then(configData => {
+    Promise.all([
+        fetch('/api/permissions/config').then(r => r.json()),
+        loadKingdeeFormCatalog()
+    ]).then(([configData]) => {
         const config = configData.data;
-        const perms = config.kingdee_permissions?.user_permissions?.[userid] || { enabled: false };
+        // 刷新缓存配置，保证"排除上级防环"用的是最新数据（可能被其它管理员改过）
+        permissionsState.cachedKingdeeConfig = config;
+        const perms = config.kingdee_permissions?.user_permissions?.[userid] || { enabled: false, scope: 'all', role: '', extra_forms: [], removed_forms: [], direct_subordinates: [], risk_level: 'low' };
 
-        document.getElementById('permissions-kingdee-modal-enabled').checked = perms.enabled;
+        const enabledBox = document.getElementById('permissions-kingdee-modal-enabled');
+        enabledBox.checked = isSuper ? true : !!perms.enabled;
+        enabledBox.disabled = isSuper;   // 超管的启停由 super_admins 名单控制
+
+        // 填充角色下拉
+        const roleSelect = document.getElementById('permissions-kingdee-modal-role');
+        roleSelect.innerHTML = '<option value="">无角色（自定义）</option>' +
+            Object.keys(kingdeeRoles || {}).map(r =>
+                `<option value="${escapeHtml(r)}">${escapeHtml(kingdeeRoleNames[r] || r)}</option>`
+            ).join('');
+        roleSelect.value = isSuper ? '' : (perms.role || '');
+        roleSelect.disabled = isSuper;
+
+        // 计算当前勾选表单
+        currentKingdeeFormSelection = isSuper ? Object.keys(kingdeeFormCatalog) : kingdeeEffectiveForms(perms);
+        currentKingdeeSubordinates = [...(perms.direct_subordinates || [])];
+
+        // 渲染表单网格
+        renderKingdeeModalForms(isSuper);
+
+        // scope
+        const scopeVal = isSuper ? 'all' : (perms.scope || 'all');
+        document.querySelectorAll('input[name="permissions-kingdee-scope"]').forEach(r => {
+            r.checked = (r.value === scopeVal);
+            r.disabled = isSuper;
+        });
+
+        // 风险等级
+        document.getElementById('permissions-kingdee-modal-risk').value = perms.risk_level || 'low';
+
+        updateKingdeeModalScopeUI();
+        updateKingdeeNoFormWarning();
         document.getElementById('permissions-kingdee-modal-overlay').classList.remove('hidden');
     });
+}
+
+function renderKingdeeModalForms(isSuper) {
+    const container = document.getElementById('permissions-kingdee-modal-forms');
+    const formIds = Object.keys(kingdeeFormCatalog || {});
+    container.innerHTML = formIds.map(fid => {
+        const checked = currentKingdeeFormSelection.includes(fid);
+        const name = kingdeeFormCatalog[fid] || fid;
+        return `
+            <label class="flex items-center gap-2 px-3 py-2 rounded-lg border cursor-pointer ${checked ? 'border-primary-500 bg-primary-500/10' : 'border-slate-200 dark:border-slate-600'} ${isSuper ? 'opacity-40 pointer-events-none' : ''}">
+                <input type="checkbox" ${checked ? 'checked' : ''} ${isSuper ? 'disabled' : ''} class="rounded border-slate-300 dark:border-slate-600 text-primary-500 focus:ring-primary-500" onchange="toggleKingdeeModalForm('${escapeHtml(fid)}')">
+                <span class="text-sm text-slate-700 dark:text-slate-300">${escapeHtml(name)}</span>
+                <span class="text-[10px] text-slate-400 dark:text-slate-500 font-mono ml-auto">${escapeHtml(fid)}</span>
+            </label>`;
+    }).join('');
+    updateKingdeeNoFormWarning();
+    updateKingdeeAllWarning();
+}
+
+function toggleKingdeeModalForm(fid) {
+    if (currentKingdeeFormSelection.includes(fid)) {
+        currentKingdeeFormSelection = currentKingdeeFormSelection.filter(f => f !== fid);
+    } else {
+        currentKingdeeFormSelection.push(fid);
+    }
+    renderKingdeeModalForms(false);
+}
+
+function onKingdeeModalRoleChange() {
+    const role = document.getElementById('permissions-kingdee-modal-role').value;
+    currentKingdeeFormSelection = role && kingdeeRoles[role] ? [...kingdeeRoles[role]] : [];
+    renderKingdeeModalForms(false);
+}
+
+function updateKingdeeNoFormWarning() {
+    const enabled = document.getElementById('permissions-kingdee-modal-enabled').checked;
+    const warn = document.getElementById('permissions-kingdee-modal-noform');
+    const show = enabled && currentKingdeeFormSelection.length === 0 && !isKingdeeSuperAdmin(currentKingdeeModal.userid);
+    warn.classList.toggle('hidden', !show);
+}
+
+// 当勾选「全部」且该用户拥有销售类表单权限时，显示"可查看全公司销售数据"的警示
+function updateKingdeeAllWarning() {
+    const el = document.getElementById('permissions-kingdee-modal-allhint');
+    if (!el) return;
+    const scope = document.querySelector('input[name="permissions-kingdee-scope"]:checked')?.value || 'all';
+    const selUpper = new Set(currentKingdeeFormSelection.map(f => String(f).toUpperCase()));
+    const hasSaleScoped = (kingdeeSaleScopedForms || []).some(f => selUpper.has(String(f).toUpperCase()));
+    const show = scope === 'all' && hasSaleScoped && !isKingdeeSuperAdmin(currentKingdeeModal.userid);
+    el.classList.toggle('hidden', !show);
+}
+
+// ---- 下属选择 ----
+let kingdeeSubPickerSel = [];
+function openKingdeeSubordinatePicker() {
+    kingdeeSubPickerSel = [...currentKingdeeSubordinates];
+    renderKingdeeSubordinateList();
+    document.getElementById('permissions-kingdee-subpicker-overlay').classList.remove('hidden');
+}
+function renderKingdeeSubordinateList() {
+    const q = document.getElementById('permissions-kingdee-subpicker-search')?.value?.toLowerCase() || '';
+    const users = permissionsState.cachedKingdeeUsersData?.users || [];
+    const exclude = new Set([currentKingdeeModal.userid]);
+    // 排除自己的上级（防止循环）：递归收集
+    kingdeeSuperiorsFor(currentKingdeeModal.userid).forEach(u => exclude.add(u));
+    const list = users.filter(u => !exclude.has(u.userid) && (!q || u.name.toLowerCase().includes(q)));
+    const el = document.getElementById('permissions-kingdee-subpicker-list');
+    el.innerHTML = list.map(u => `
+        <label class="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer">
+            <input type="checkbox" class="rounded text-primary-500" ${kingdeeSubPickerSel.includes(u.userid) ? 'checked' : ''} onchange="toggleKingdeeSubSel('${escapeHtml(u.userid)}')">
+            <span class="flex-1">
+                <span class="block text-sm text-slate-700 dark:text-slate-300">${escapeHtml(u.name)}</span>
+                <span class="block text-xs text-slate-500 dark:text-slate-400">${escapeHtml(u.department)}</span>
+            </span>
+        </label>`).join('');
+}
+function kingdeeSuperiorsFor(userid) {
+    // 从缓存的 config 递归收集 userid 的上级
+    const config = permissionsState.cachedKingdeeConfig;
+    const up = config?.kingdee_permissions?.user_permissions || {};
+    const result = [];
+    const seen = new Set();
+    const stack = [...useridsWhoseSubIs(userid, up)];
+    while (stack.length) {
+        const cur = stack.pop();
+        if (seen.has(cur)) continue;
+        seen.add(cur);
+        result.push(cur);
+        useridsWhoseSubIs(cur, up).forEach(u => stack.push(u));
+    }
+    return result;
+}
+function useridsWhoseSubIs(sub, up) {
+    const out = [];
+    Object.keys(up).forEach(uid => {
+        if ((up[uid].direct_subordinates || []).includes(sub)) out.push(uid);
+    });
+    return out;
+}
+function toggleKingdeeSubSel(userid) {
+    if (kingdeeSubPickerSel.includes(userid)) {
+        kingdeeSubPickerSel = kingdeeSubPickerSel.filter(u => u !== userid);
+    } else {
+        kingdeeSubPickerSel.push(userid);
+    }
+}
+function confirmKingdeeSubordinates() {
+    currentKingdeeSubordinates = [...kingdeeSubPickerSel];
+    renderKingdeeModalSubChips();
+    closeKingdeeSubordinatePicker();
+}
+function renderKingdeeModalSubChips() {
+    const users = permissionsState.cachedKingdeeUsersData?.users || [];
+    const nameMap = {};
+    users.forEach(u => { nameMap[u.userid] = u.name; });
+    const el = document.getElementById('permissions-kingdee-modal-subchips');
+    el.innerHTML = currentKingdeeSubordinates.map(uid =>
+        `<span class="inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full bg-blue-100 dark:bg-blue-500/20 text-blue-700 dark:text-blue-300">
+            ${escapeHtml(nameMap[uid] || uid)} <button onclick="removeKingdeeSub('${escapeHtml(uid)}')" class="hover:text-red-500 cursor-pointer">×</button>
+        </span>`).join('');
+}
+function removeKingdeeSub(uid) {
+    currentKingdeeSubordinates = currentKingdeeSubordinates.filter(u => u !== uid);
+    renderKingdeeModalSubChips();
+}
+function closeKingdeeSubordinatePicker() {
+    document.getElementById('permissions-kingdee-subpicker-overlay').classList.add('hidden');
+}
+
+function updateKingdeeModalScopeUI() {
+    const scope = document.querySelector('input[name="permissions-kingdee-scope"]:checked')?.value || 'all';
+    const subSection = document.getElementById('permissions-kingdee-modal-subordinate');
+    const isSub = scope === 'self_and_subordinates' && !isKingdeeSuperAdmin(currentKingdeeModal.userid);
+    subSection.classList.toggle('hidden', !isSub);
+    if (isSub) renderKingdeeModalSubChips();
+    updateKingdeeAllWarning();
+}
+
+// ---- 超级账户选择 ----
+let kingdeeSuperPickerSel = [];
+function openKingdeeSuperAdminsPicker() {
+    kingdeeSuperPickerSel = [...kingdeeSuperAdmins];
+    renderKingdeeSuperAdminsList();
+    document.getElementById('permissions-kingdee-superadmins-overlay').classList.remove('hidden');
+}
+function renderKingdeeSuperAdminsList() {
+    const q = document.getElementById('permissions-kingdee-superadmins-search')?.value?.toLowerCase() || '';
+    const users = permissionsState.cachedKingdeeUsersData?.users || [];
+    const list = users.filter(u => !q || u.name.toLowerCase().includes(q));
+    const el = document.getElementById('permissions-kingdee-superadmins-list');
+    el.innerHTML = list.map(u => `
+        <label class="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-slate-50 dark:hover:bg-slate-800/50 cursor-pointer">
+            <input type="checkbox" class="rounded text-primary-500" ${kingdeeSuperPickerSel.includes(u.userid) ? 'checked' : ''} onchange="toggleKingdeeSuperSel('${escapeHtml(u.userid)}')">
+            <span class="flex-1">
+                <span class="block text-sm text-slate-700 dark:text-slate-300">${escapeHtml(u.name)}</span>
+                <span class="block text-xs text-slate-500 dark:text-slate-400">${escapeHtml(u.department)}</span>
+            </span>
+            <span class="text-[10px] text-amber-500">★ 全部表单</span>
+        </label>`).join('');
+}
+function toggleKingdeeSuperSel(userid) {
+    if (kingdeeSuperPickerSel.includes(userid)) {
+        kingdeeSuperPickerSel = kingdeeSuperPickerSel.filter(u => u !== userid);
+    } else {
+        kingdeeSuperPickerSel.push(userid);
+    }
+}
+function confirmKingdeeSuperAdmins() {
+    fetch('/api/permissions/kingdee/super-admins', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ super_admins: kingdeeSuperPickerSel })
+    }).then(r => r.json()).then(data => {
+        if (data.status === 'success') {
+            kingdeeSuperAdmins = [...kingdeeSuperPickerSel];
+            renderKingdeeSuperAdminsBar();
+            loadPermissionsKingdee();
+        }
+        closeKingdeeSuperAdminsPicker();
+    }).catch(err => {
+        console.error('[Permissions] Failed to save super admins:', err);
+    });
+}
+function closeKingdeeSuperAdminsPicker() {
+    document.getElementById('permissions-kingdee-superadmins-overlay').classList.add('hidden');
 }
 
 function closePermissionsKingdeeModal() {
@@ -580,26 +873,54 @@ function closePermissionsKingdeeModal() {
 function savePermissionsKingdeeModal() {
     const userid = currentKingdeeModal.userid;
     const enabled = document.getElementById('permissions-kingdee-modal-enabled').checked;
+    const isSuper = isKingdeeSuperAdmin(userid);
+
+    // 前端兜底校验：启用但无表单
+    if (enabled && currentKingdeeFormSelection.length === 0 && !isSuper) {
+        alert('未授权任何表单，无法保存。请至少勾选一个表单或选择基础角色。');
+        return;
+    }
 
     fetch('/api/permissions/config').then(r => r.json()).then(data => {
         const config = data.data;
         if (!config.kingdee_permissions) config.kingdee_permissions = {};
         if (!config.kingdee_permissions.user_permissions) config.kingdee_permissions.user_permissions = {};
 
-        config.kingdee_permissions.user_permissions[userid] = {
-            enabled: enabled
+        if (isSuper) {
+            // 超级账户不保存 scope/role/表单（由 super_admins 名单控制）
+            closePermissionsKingdeeModal();
+            return null;
+        }
+
+        const role = document.getElementById('permissions-kingdee-modal-role').value;
+        const scope = document.querySelector('input[name="permissions-kingdee-scope"]:checked')?.value || 'all';
+        const base = role && kingdeeRoles[role] ? [...kingdeeRoles[role]] : [];
+
+        const newPerm = {
+            enabled: enabled,
+            scope: scope,
+            role: role || '',
+            extra_forms: currentKingdeeFormSelection.filter(f => !base.includes(f)),
+            removed_forms: base.filter(f => !currentKingdeeFormSelection.includes(f)),
+            direct_subordinates: scope === 'self_and_subordinates' ? currentKingdeeSubordinates : [],
+            risk_level: document.getElementById('permissions-kingdee-modal-risk').value
         };
+
+        config.kingdee_permissions.user_permissions[userid] = newPerm;
 
         // Add audit log
         config.audit_log = config.audit_log || [];
-        const kdStatus = enabled ? '已启用' : '已禁用';
+        const roleName = role ? (kingdeeRoleNames[role] || role) : '自定义';
+        const scopeCn = { self: '仅本人', self_and_subordinates: '本人及下属', all: '全部' }[scope] || scope;
+        const formNames = currentKingdeeFormSelection.map(fid => kingdeeFormCatalog[fid] || fid);
+        const subCount = scope === 'self_and_subordinates' ? currentKingdeeSubordinates.length : 0;
         config.audit_log.push({
             timestamp: new Date().toISOString(),
             operator: 'admin',
-            action: enabled ? 'enable' : 'disable',
+            action: 'update',
             permission_type: 'kingdee',
             target: userid,
-            details: `金蝶权限${kdStatus}`
+            details: `金蝶权限：${enabled ? '启用' : '禁用'}，角色=${roleName}，范围=${scopeCn}${subCount ? `，直接下属${subCount}人` : ''}，表单${formNames.length}个：${formNames.join('、')}`
         });
 
         return fetch('/api/permissions/config', {
@@ -607,7 +928,14 @@ function savePermissionsKingdeeModal() {
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(config)
         });
-    }).then(() => {
+    }).then(resp => {
+        if (resp) return resp.json();
+        return { status: 'success' };
+    }).then(data => {
+        if (data && data.status === 'error') {
+            alert('保存失败：' + (data.message || '未知错误'));
+            return;
+        }
         closePermissionsKingdeeModal();
         loadPermissionsKingdee();
     }).catch(err => {
@@ -821,6 +1149,37 @@ function populateDepartmentFilter(selectId, users) {
         select.appendChild(option);
     });
     // 恢复之前选中的值
+    if (currentValue && sorted.includes(currentValue)) {
+        select.value = currentValue;
+    }
+}
+
+/**
+ * 金蝶页专用：按部门层级前缀填充下拉（选"营销中心"即可筛出其下所有子部门人员）。
+ * 渲染端按 user.department.startsWith(选中值) 匹配。
+ */
+function populateDeptPrefixFilter(selectId, users) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+    const prefixes = new Set();
+    users.forEach(u => {
+        if (!u.department) return;
+        const parts = String(u.department).split('/');
+        let acc = '';
+        parts.forEach(p => {
+            acc = acc ? acc + '/' + p : p;
+            prefixes.add(acc);
+        });
+    });
+    const sorted = Array.from(prefixes).sort();
+    const currentValue = select.value;
+    select.innerHTML = '<option value="">所有部门</option>';
+    sorted.forEach(dept => {
+        const option = document.createElement('option');
+        option.value = dept;
+        option.textContent = dept;
+        select.appendChild(option);
+    });
     if (currentValue && sorted.includes(currentValue)) {
         select.value = currentValue;
     }
