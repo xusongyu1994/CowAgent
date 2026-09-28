@@ -1895,9 +1895,9 @@ class WebChannel(ChatChannel):
             from bridge.bridge import Bridge
             agent_bridge = Bridge().get_agent_bridge()
             requested_agent = override_agent_id if override_agent_id else json_data.get("agent_id")
+            # 上游 v2.1.8 起 AgentRouter.resolve() 仅接受 explicit_agent_id（旧的
+            # channel_type / conversation_ids 绑定表已被移除），故不再传这两个参数。
             resolved_agent_id = agent_bridge.agent_router.resolve(
-                channel_type="web",
-                conversation_ids=(session_id,),
                 explicit_agent_id=requested_agent,
             )
             prompt = json_data.get('message', '')
