@@ -18,6 +18,42 @@ from common.utils import expand_path
 
 _AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 
+
+def _name_from_agent_md(workspace: Optional[str]) -> Optional[str]:
+    """Best-effort persona name for an Agent, read from its workspace AGENT.md.
+
+    The fork's personas state the name in bold after 我是, e.g.
+    ``我是**金蝶数据分析智能体**（id: ...）``；a plain ``# 标题`` heading is the
+    second choice. Returns None when the file is absent or carries nothing
+    usable, so the caller can fall back to the agent id.
+    """
+    if not workspace:
+        return None
+    try:
+        path = Path(expand_path(str(workspace))) / "AGENT.md"
+        text = path.read_text(encoding="utf-8-sig")
+    except (OSError, ValueError):
+        return None
+    # 1) 人设首句的「我是**XXX**」形式（金蝶数据分析智能体等）。
+    m = re.search(r"我是\s*\*\*(.+?)\*\*", text)
+    if m and m.group(1).strip():
+        return m.group(1).strip()
+    # 2) 第一个一级标题（去掉 "AGENT.md - " 前缀）。
+    for line in text.splitlines():
+        h = re.match(r"^#\s+(.+?)\s*$", line)
+        if not h:
+            continue
+        candidate = re.sub(r"^AGENT\.md\s*[-—:：]?\s*", "", h.group(1)).strip()
+        if candidate and candidate not in ("我是谁？", "我是谁"):
+            return candidate
+    # 3) 极简 AGENT.md（创建/改名时只写了一行名字）→ 直接取首行。
+    stripped = text.strip()
+    if stripped and len(stripped) <= 60:
+        first = re.sub(r"^#{1,6}\s*", "", stripped.splitlines()[0]).strip()
+        if first and first not in ("我是谁？", "我是谁"):
+            return first
+    return None
+
 # Id of the built-in single agent, and the reserved alias by which the default
 # agent can always be addressed (see AgentRegistry.get_addressed).
 DEFAULT_AGENT_ALIAS = "default"
@@ -123,7 +159,15 @@ def _profile_from_mapping(
             "agent id must be 1-64 URL-safe characters: letters, numbers, _ or -"
         )
 
-    name = raw.get("name", agent_id)
+    workspace = raw.get("workspace")
+    if workspace is None:
+        workspace = default_workspace
+
+    # 名称：显式 name 优先；缺失时从该 agent 工作区的 AGENT.md 人设推导，
+    # 让「智能体」页面显示业务名（如「金蝶数据分析智能体」）而不是 id。
+    name = raw.get("name")
+    if name is None or (isinstance(name, str) and not name.strip()):
+        name = _name_from_agent_md(workspace) or agent_id
     if not isinstance(name, str) or not name.strip():
         raise AgentRegistryError(f"agent '{agent_id}' name must be a non-empty string")
 
@@ -142,10 +186,6 @@ def _profile_from_mapping(
             raise AgentRegistryError(
                 f"agent '{agent_id}' {key} must be a non-empty string when set"
             )
-
-    workspace = raw.get("workspace")
-    if workspace is None:
-        workspace = default_workspace
 
     avatar = raw.get("avatar")
     if avatar is not None and not isinstance(avatar, str):

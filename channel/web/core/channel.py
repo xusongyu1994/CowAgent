@@ -337,6 +337,10 @@ class WebChannel(ChatChannel):
         # subsequent agent_end handler can skip its "empty final_response"
         # fallback (which would otherwise overwrite the real error).
         streamed_error: List[str] = []
+        # Buffer for message_update deltas — only flushed to SSE when confirmed
+        # as the final reply (no tool_calls in message_end). If tool_calls are
+        # present, the buffered text is model thinking and gets discarded.
+        message_buffer: List[str] = []
 
         def on_event(event: dict):
             if request_id not in self.sse_streams:
@@ -366,7 +370,7 @@ class WebChannel(ChatChannel):
             elif event_type == "message_update":
                 delta = data.get("delta", "")
                 if delta:
-                    publish({"type": "delta", "content": delta})
+                    message_buffer.append(delta)  # 缓存，确认是最终回复后再发
 
             elif event_type == "peer_message_start":
                 # A teammate takes over for a stretch of this turn. What follows
@@ -404,50 +408,20 @@ class WebChannel(ChatChannel):
                 publish(payload)
 
             elif event_type == "tool_execution_start":
-                tool_name = data.get("tool_name", "tool")
-                arguments = data.get("arguments", {})
-                publish({"type": "tool_start", "tool_call_id": data.get("tool_call_id"), "tool": tool_name, "arguments": arguments})
+                pass  # 不暴露操作步骤和参数
 
             elif event_type == "tool_execution_progress":
-                publish({
-                    "type": "tool_progress",
-                    "tool_call_id": data.get("tool_call_id"),
-                    "tool": data.get("tool_name", "tool"),
-                    "content": str(data.get("message", ""))[-4 * 1024:],
-                })
+                pass  # 不暴露中间进度
 
             elif event_type == "tool_execution_end":
-                tool_name = data.get("tool_name", "tool")
-                status = data.get("status", "success")
-                result = data.get("result", "")
-                exec_time = data.get("execution_time", 0)
-                # Truncate long results to avoid huge SSE payloads
-                result_str = str(result)
-                if len(result_str) > 2000:
-                    result_str = result_str[:2000] + "…"
-                payload = {
-                    "type": "tool_end",
-                    "tool_call_id": data.get("tool_call_id"),
-                    "tool": tool_name,
-                    "status": status,
-                    "result": result_str,
-                    "execution_time": round(exec_time, 2)
-                }
-                # Carry the permission-refusal marker so the UI can offer a
-                # one-click "switch permission" hint rather than a generic error.
-                if data.get("permission_denied"):
-                    payload["permission_denied"] = True
-                    payload["permission_mode"] = data.get("permission_mode")
-                # A tool that wrote its outcome for a person sends that
-                # instead. It gets a far larger budget than `result`: this is
-                # the report itself, not a trace of how it was produced.
-                display = data.get("display")
-                if display:
-                    display = str(display)
-                    if len(display) > MAX_DISPLAY_STREAM_CHARS:
-                        display = display[:MAX_DISPLAY_STREAM_CHARS] + "…"
-                    payload["display"] = display
-                publish(payload)
+                # 金蝶数据分析：把 render_dashboard 工具结果（ChartSpec）推送给前端，
+                # 前端据此渲染看板图表。其余工具结果仍不暴露。
+                if data.get("tool_name") == "render_dashboard":
+                    publish({
+                        "type": "tool_execution_end",
+                        "tool_name": "render_dashboard",
+                        "result": data.get("result"),
+                    })
 
             elif event_type == "subagent_step":
                 # A tool call made by a sub agent, relayed so the card for
@@ -468,7 +442,14 @@ class WebChannel(ChatChannel):
             elif event_type == "message_end":
                 tool_calls = data.get("tool_calls", [])
                 if tool_calls:
+                    # 有工具调用 → 之前的文本是模型思考，丢弃（SSE 模式用 publish）
+                    message_buffer.clear()
                     publish({"type": "message_end", "has_tool_calls": True})
+                else:
+                    # 无工具调用 → 这是最终回复，flush 缓存的 delta
+                    for chunk in message_buffer:
+                        publish({"type": "delta", "content": chunk})
+                    message_buffer.clear()
 
             elif event_type == "error":
                 # Agent raised an exception (LLM 401/timeout/etc). Surface the
@@ -1000,20 +981,42 @@ class WebChannel(ChatChannel):
             logger.error(f"[WebChannel] Local file import error: {e}", exc_info=True)
             return json.dumps({"status": "error", "message": str(e)})
 
-    def post_message(self):
+    def post_message(self, override_user_id: Optional[str] = None,
+                     override_agent_id: Optional[str] = None):
         """
         Handle incoming messages from users via POST request.
         Returns a request_id for tracking this specific request.
         Supports optional attachments (file paths from /upload).
+
+        Args:
+            override_user_id: 数据分析等专用端点在调用时传入真实的企微 userid，
+                用于替换默认的 `session_id` 作为消息 from_user_id，从而让金蝶
+                权限按企微用户生效（避免 session_id 冒充 web 管理员全权）。
+            override_agent_id: 覆盖请求体中的 agent_id（数据分析页专用：
+                若 kingdee-analysis 未注册则回退默认 agent，避免报错）。
         """
         try:
             data = web.data()
             json_data = json.loads(data)
             session_id = json_data.get('session_id', f'session_{int(time.time())}')
+            # 数据分析专用端点（override_user_id 传入真实企微 userid / web_admin 全权）：
+            # 强制会话归属校验，阻断「用自己的身份携带他人 session_id」触发 agent
+            # 恢复并复述他人会话历史/看板数据的旁路。普通 /message 调用不受影响。
+            if override_user_id is not None:
+                # Lazy import: api.kingdee imports this module, so importing it at
+                # module scope would be circular.
+                from channel.web.api.kingdee import _analysis_session_owner
+                if not _analysis_session_owner(session_id, override_user_id):
+                    logger.warning(
+                        f"[Analysis] 会话归属校验拒绝: session={session_id!r} "
+                        f"user={override_user_id!r}（他人会话越权访问被拦截）"
+                    )
+                    return json.dumps({"status": "error", "message": "无权访问该会话"}, ensure_ascii=False)
             from bridge.bridge import Bridge
             agent_bridge = Bridge().get_agent_bridge()
+            requested_agent = override_agent_id if override_agent_id else json_data.get("agent_id")
             resolved_agent_id = agent_bridge.agent_router.resolve(
-                explicit_agent_id=json_data.get("agent_id"),
+                explicit_agent_id=requested_agent,
             )
             prompt = json_data.get('message', '')
             # Kept before any prefixing or attachment lines, so mention parsing
@@ -1138,7 +1141,9 @@ class WebChannel(ChatChannel):
                     logger.debug(f"[WebChannel] Added prefix to message: {prompt}")
 
             msg = WebMessage(self._generate_msg_id(), prompt)
-            msg.from_user_id = session_id
+            # 身份修正：数据分析专用端点传入真实企微 userid 时，用它替代 session_id，
+            # 使金蝶权限按企微用户生效（避免 session_id 命中 _is_admin_user 全权）。
+            msg.from_user_id = override_user_id if override_user_id else session_id
 
             context = self._compose_context(ContextType.TEXT, prompt, msg=msg, isgroup=False)
 
@@ -1626,6 +1631,10 @@ class WebChannel(ChatChannel):
             server.max_request_body_size = 512 * 1024 * 1024  # 512 MB
         except Exception:
             pass
+        # Expose the WSGI app so other channels can share it: WechatComAppChannel
+        # merges its /wxcomapp/ routes with this app on port 9898, which is what
+        # makes /auth/wecom/* (企微免密登录) reachable there.
+        self._wsgi_func = func
         self._http_server = server
         # Reclaim orphaned SSE logs so disconnected clients don't leak memory.
         self._start_sse_janitor()

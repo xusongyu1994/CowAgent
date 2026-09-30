@@ -12,7 +12,7 @@ import pytest
 
 import web
 
-from channel.web import web_channel as wc
+from channel.web.api import kingdee as wc
 
 
 class FakeCtx:

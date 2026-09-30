@@ -69,6 +69,22 @@ from channel.web.api.workspace import (  # noqa: F401
     WorkspaceMetaHandler, WorkspaceReadHandler, WorkspaceResolveHandler,
     WorkspaceSearchHandler, WorkspaceTreeHandler, WorkspaceWriteHandler,
 )
+# --- Custom business features (Kingdee analysis, WeCom SSO, permissions) ---
+from channel.web.api.kingdee import (  # noqa: F401
+    AnalysisChatHandler, AnalysisContextHandler, AnalysisHistoryHandler,
+    AnalysisPageHandler, AnalysisTemplateApplyHandler,
+    KingdeeArOverdueHandler, KingdeeBillDetailHandler,
+    KingdeeConversionCustomerBillsHandler, KingdeeConversionStatsHandler,
+    KingdeeKanbanHandler, ProjectAnalyzeHandler,
+    WecomAuthCheckHandler, WecomAuthLogoutHandler,
+    WecomOAuthCallbackHandler, WecomOAuthStartHandler,
+)
+from channel.web.api.permissions import (  # noqa: F401
+    PermissionsAuditLogHandler, PermissionsConfigHandler,
+    PermissionsFoldersHandler, PermissionsKingdeeFormRolesHandler,
+    PermissionsKingdeeSuperAdminsHandler, PermissionsSyncUsersHandler,
+    PermissionsUsersHandler,
+)
 # Re-exported, not used here. app.py waits on SERVING and channel_factory
 # resolves "channel.web.web_channel.WebChannel" by name, so both have to stay
 # reachable through this module; the tests reach for the rest.
@@ -81,10 +97,15 @@ from channel.web.core.channel import WebChannel  # noqa: F401
 URLS = (
     '/', 'ChatHandler',
     '/chat', 'RootHandler',
+    '/analysis', 'AnalysisPageHandler',
     '/api/health', 'HealthHandler',
     '/auth/login', 'AuthLoginHandler',
     '/auth/check', 'AuthCheckHandler',
     '/auth/logout', 'AuthLogoutHandler',
+    '/auth/wecom/start', 'WecomOAuthStartHandler',
+    '/auth/wecom/callback', 'WecomOAuthCallbackHandler',
+    '/auth/wecom/check', 'WecomAuthCheckHandler',
+    '/auth/wecom/logout', 'WecomAuthLogoutHandler',
     '/message', 'MessageHandler',
     '/upload', 'UploadHandler',
     '/uploads/(.*)', 'UploadsHandler',
@@ -158,6 +179,24 @@ URLS = (
     '/api/update/start', 'UpdateStartHandler',
     '/api/update/status', 'UpdateStatusHandler',
     '/mcp/oauth/callback', 'McpOAuthCallbackHandler',
+    # --- Custom business APIs (Kingdee / analysis / permissions) ---
+    '/api/kingdee/kanban', 'KingdeeKanbanHandler',
+    '/api/kingdee/bill-detail', 'KingdeeBillDetailHandler',
+    '/api/kingdee/conversion-stats', 'KingdeeConversionStatsHandler',
+    '/api/kingdee/conversion-customer-bills', 'KingdeeConversionCustomerBillsHandler',
+    '/api/kingdee/ar-overdue', 'KingdeeArOverdueHandler',
+    '/api/analysis/context', 'AnalysisContextHandler',
+    '/api/analysis/template/apply', 'AnalysisTemplateApplyHandler',
+    '/api/analysis/chat', 'AnalysisChatHandler',
+    '/api/analysis/history', 'AnalysisHistoryHandler',
+    '/api/projects/analyze', 'ProjectAnalyzeHandler',
+    '/api/permissions/config', 'PermissionsConfigHandler',
+    '/api/permissions/users', 'PermissionsUsersHandler',
+    '/api/permissions/folders', 'PermissionsFoldersHandler',
+    '/api/permissions/sync-users', 'PermissionsSyncUsersHandler',
+    '/api/permissions/audit-log', 'PermissionsAuditLogHandler',
+    '/api/permissions/kingdee-form-roles', 'PermissionsKingdeeFormRolesHandler',
+    '/api/permissions/kingdee/super-admins', 'PermissionsKingdeeSuperAdminsHandler',
     '/assets/(.*)', 'AssetsHandler',
     # Views inside the single-page console. Each serves the same shell;
     # the frontend router reads the path and opens the view it names,

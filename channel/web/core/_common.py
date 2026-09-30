@@ -317,26 +317,37 @@ def _check_auth():
 
 def _require_auth():
     """Raise 401 if not authenticated. Call at the top of protected handlers."""
-    if not _check_auth():
-        # Log which credential the caller offered (never the value). A rejected
-        # request is otherwise invisible in run.log, which makes client bugs —
-        # e.g. an endpoint that forgets the Authorization header — undiagnosable.
-        offered = []
-        if web.cookies().get("cow_auth_token", ""):
-            offered.append("cookie")
-        if _get_bearer_token():
-            offered.append("bearer")
-        if _get_query_token():
-            offered.append("query")
-        logger.warning(
-            "[WebChannel] 401 Unauthorized: %s %s (credentials offered: %s)",
-            web.ctx.env.get("REQUEST_METHOD", "?"),
-            web.ctx.env.get("PATH_INFO", "?"),
-            ", ".join(offered) or "none",
-        )
-        raise web.HTTPError("401 Unauthorized",
-                            {"Content-Type": "application/json; charset=utf-8"},
-                            json.dumps({"status": "error", "message": "Unauthorized"}))
+    if _check_auth():
+        return
+    # 密码认证未通过，回退检查企微认证：企微免密登录建立的会话同样视为已认证。
+    # _check_wecom_auth 定义在 api.kingdee，延迟导入以避免循环依赖。
+    try:
+        from channel.web.api.kingdee import _check_wecom_auth
+    except Exception:
+        _check_wecom_auth = None
+    if _check_wecom_auth is not None:
+        _, wecom_authed, _ = _check_wecom_auth()
+        if wecom_authed:
+            return
+    # Log which credential the caller offered (never the value). A rejected
+    # request is otherwise invisible in run.log, which makes client bugs —
+    # e.g. an endpoint that forgets the Authorization header — undiagnosable.
+    offered = []
+    if web.cookies().get("cow_auth_token", ""):
+        offered.append("cookie")
+    if _get_bearer_token():
+        offered.append("bearer")
+    if _get_query_token():
+        offered.append("query")
+    logger.warning(
+        "[WebChannel] 401 Unauthorized: %s %s (credentials offered: %s)",
+        web.ctx.env.get("REQUEST_METHOD", "?"),
+        web.ctx.env.get("PATH_INFO", "?"),
+        ", ".join(offered) or "none",
+    )
+    raise web.HTTPError("401 Unauthorized",
+                        {"Content-Type": "application/json; charset=utf-8"},
+                        json.dumps({"status": "error", "message": "Unauthorized"}))
 
 
 # Localized text for /cancel system replies. Web is the only channel that
@@ -677,7 +688,8 @@ class WebMessage(ChatMessage):
             msg_id,
             content,
             ctype=ContextType.TEXT,
-            from_user_id="User",
+            from_user_id="web_admin",
+            from_user_nickname="管理员",
             to_user_id="Chatgpt",
             other_user_id="Chatgpt",
     ):
@@ -685,6 +697,7 @@ class WebMessage(ChatMessage):
         self.ctype = ctype
         self.content = content
         self.from_user_id = from_user_id
+        self.from_user_nickname = from_user_nickname
         self.to_user_id = to_user_id
         self.other_user_id = other_user_id
 

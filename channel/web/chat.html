@@ -11,6 +11,10 @@
     <link rel="stylesheet" href="/assets/vendor/fonts/inter/inter.css">
     <script src="/assets/vendor/tailwind/tailwind.min.js"></script>
     <script src="/assets/vendor/markdown-it/markdown-it.min.js"></script>
+    <!-- Custom business views: Chart.js draws the kanban/overdue charts; SheetJS
+         (xlsx) exports the conversion/customer analysis to Excel. -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+    <script src="/assets/vendor/xlsx/xlsx.full.min.js"></script>
     <link id="hljs-light" rel="stylesheet" href="/assets/vendor/highlightjs/styles/github.min.css">
     <link id="hljs-dark" rel="stylesheet" href="/assets/vendor/highlightjs/styles/github-dark.min.css" disabled>
     <script src="/assets/vendor/highlightjs/highlight.min.js"></script>
@@ -53,6 +57,8 @@
     <link rel="stylesheet" href="/assets/css/workspace.css">
     <link rel="stylesheet" href="/assets/css/knowledge.css">
     <link rel="stylesheet" href="/assets/css/agents.css">
+    <!-- Custom business views (Kingdee kanban/overdue/projects, permissions). -->
+    <link rel="stylesheet" href="/assets/css/kingdee.css">
     <!-- Apply theme/lang before first paint to avoid flash of unstyled content.
          This runs synchronously in <head> so the correct class is on <html>
          before any CSS or body rendering occurs. -->
@@ -127,6 +133,14 @@
 
 <!--#include templates/views/tasks.html-->
 
+<!--#include templates/views/permissions.html-->
+
+<!--#include templates/views/kanban.html-->
+
+<!--#include templates/views/overdue.html-->
+
+<!--#include templates/views/projects.html-->
+
 <!--#include templates/views/logs.html-->
 
             </div><!-- /content-area -->
@@ -152,6 +166,10 @@
 <!--#include templates/modals/task-edit.html-->
 
 <!--#include templates/modals/run-detail.html-->
+
+<!--#include templates/modals/permissions-modals.html-->
+
+<!--#include templates/modals/kanban-detail.html-->
 
     <!-- Split out of a single console.js. These are classic scripts, not
          modules: they share one global scope and `defer` runs them in this
@@ -209,6 +227,11 @@
     <script defer src="/assets/js/views/doc-viewers.js"></script>
     <script defer src="/assets/js/views/knowledge.js"></script>
     <script defer src="/assets/js/views/logs.js"></script>
+    <!-- Custom business views. kingdee-i18n.js extends the I18N table built by
+         core/i18n.js; it must therefore load after the core layer. -->
+    <script defer src="/assets/js/views/kingdee-i18n.js"></script>
+    <script defer src="/assets/js/views/permissions.js"></script>
+    <script defer src="/assets/js/views/kingdee.js"></script>
 
     <!-- Last of the core layer rather than first, which is where it sat in
          console.js. It installs a window.fetch wrapper for 401 handling, and

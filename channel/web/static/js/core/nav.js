@@ -14,6 +14,10 @@ const VIEW_META = {
     knowledge:{ group: 'nav_manage',  page: 'menu_knowledge' },
     channels: { group: 'nav_manage',  page: 'menu_channels' },
     tasks:    { group: 'nav_manage',  page: 'menu_tasks' },
+    kanban:   { group: 'nav_manage',  page: 'menu_kanban' },
+    overdue:  { group: 'nav_manage',  page: 'menu_overdue' },
+    projects: { group: 'nav_manage',  page: 'menu_projects' },
+    permissions: { group: 'nav_manage', page: 'menu_permissions' },
     logs:     { group: 'nav_monitor', page: 'menu_logs' },
 };
 
@@ -126,6 +130,14 @@ window.addEventListener('resize', () => {
 // below refused to leave the current view, which is what lets the router put
 // the address bar back after a Back it could not honour.
 function navigateTo(viewId, tab) {
+    // 企微用户视图访问控制：不在企微菜单白名单内的视图一律拒绝，回退到可访问页。
+    if (typeof _wecomCanAccess === 'function' && !_wecomCanAccess(viewId)) {
+        var allowedView = (typeof _wecomOpenPages !== 'undefined' && _wecomOpenPages.length > 0)
+            ? _wecomOpenPages[0] : 'chat';
+        if (viewId !== allowedView) return navigateTo(allowedView, tab);
+        return true;
+    }
+
     // An open document editor is about to be replaced by another view, which
     // would drop the edit with nothing on screen to say so.
     if (!docGuardUnsaved(() => navigateTo(viewId, tab))) return false;
@@ -160,6 +172,15 @@ function navigateTo(viewId, tab) {
     else if (viewId === 'knowledge') { loadKnowledgeView(); if (tab) switchKnowledgeTab(tab); }
     else if (viewId === 'channels') loadChannelsView();
     else if (viewId === 'tasks') { switchTasksTab(tab || 'tasks'); loadTasksView(); }
+    else if (viewId === 'permissions') {
+        // Initialize permissions view - load default tab data
+        if (typeof switchPermissionsTab === 'function') {
+            switchPermissionsTab('knowledge');
+        }
+    }
+    else if (viewId === 'kanban') loadKanbanView();
+    else if (viewId === 'overdue') loadOverduePage();
+    else if (viewId === 'projects') loadProjectsView();
     else if (viewId === 'logs') startLogStream();
     return true;
 }

@@ -1,0 +1,25 @@
+    <!-- Kingdee Bill Detail Modal -->
+    <div id="kanban-detail-overlay" class="fixed inset-0 bg-black/50 z-[200] hidden flex items-center justify-center" onclick="closeKanbanDetail()">
+        <div class="bg-white dark:bg-[#1A1A1A] rounded-2xl border border-slate-200 dark:border-white/10 shadow-xl w-full max-w-3xl mx-4 max-h-[85vh] flex flex-col" onclick="event.stopPropagation()">
+            <div class="flex items-center justify-between px-6 py-4 border-b border-slate-100 dark:border-white/5">
+                <div class="flex items-center gap-3 min-w-0">
+                    <div class="w-10 h-10 rounded-xl bg-emerald-50 dark:bg-emerald-900/20 flex items-center justify-center flex-shrink-0">
+                        <i class="fas fa-file-invoice text-emerald-500"></i>
+                    </div>
+                    <div class="min-w-0">
+                        <h3 id="kanban-detail-title" class="font-semibold text-slate-800 dark:text-slate-100 truncate"></h3>
+                        <p id="kanban-detail-form-id" class="text-xs text-slate-400 dark:text-slate-500 mt-0.5 font-mono"></p>
+                    </div>
+                </div>
+                <button onclick="closeKanbanDetail()" class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-white/10 text-slate-400 cursor-pointer transition-colors duration-150">
+                    <i class="fas fa-times"></i>
+                </button>
+            </div>
+            <div id="kanban-detail-body" class="flex-1 overflow-y-auto p-6">
+                <!-- Dynamic content -->
+                <div class="flex items-center justify-center py-12">
+                    <i class="fas fa-spinner fa-spin text-2xl text-primary-500"></i>
+                </div>
+            </div>
+        </div>
+    </div>

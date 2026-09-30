@@ -3,7 +3,7 @@
 
 import pytest
 
-from channel.web import web_channel as wc
+from channel.web.api import kingdee as wc
 
 
 # ---------- 模板数据 ----------
@@ -44,7 +44,7 @@ def test_user_lacks_form_when_not_in_access_set(monkeypatch):
 
 def test_current_user_wecom_authenticated(monkeypatch):
     """企微用户且有权限 → 返回真实 userid + scope。"""
-    monkeypatch.setattr("channel.web.web_channel._check_wecom_auth", lambda: ("zhangsan", True, True))
+    monkeypatch.setattr("channel.web.api.kingdee._check_wecom_auth", lambda: ("zhangsan", True, True))
     monkeypatch.setattr("common.permission_checker.check_kingdee_permission", lambda uid: (True, "self", ""))
     monkeypatch.setattr("common.permission_checker.get_kingdee_scope", lambda uid: "self")
     userid, authed, scope, allowed = wc._current_analysis_user()
@@ -56,7 +56,7 @@ def test_current_user_wecom_authenticated(monkeypatch):
 
 def test_current_user_wecom_denied(monkeypatch):
     """企微用户无权限 → allowed=False。"""
-    monkeypatch.setattr("channel.web.web_channel._check_wecom_auth", lambda: ("lisi", True, False))
+    monkeypatch.setattr("channel.web.api.kingdee._check_wecom_auth", lambda: ("lisi", True, False))
     monkeypatch.setattr("common.permission_checker.check_kingdee_permission", lambda uid: (False, "", "无权限"))
     userid, authed, scope, allowed = wc._current_analysis_user()
     assert allowed is False
@@ -65,7 +65,7 @@ def test_current_user_wecom_denied(monkeypatch):
 
 def test_current_user_admin_fallback(monkeypatch):
     """密码管理员（无企微）→ 全权 web_admin。"""
-    monkeypatch.setattr("channel.web.web_channel._check_wecom_auth", lambda: (None, False, False))
+    monkeypatch.setattr("channel.web.api.kingdee._check_wecom_auth", lambda: (None, False, False))
     userid, authed, scope, allowed = wc._current_analysis_user()
     assert userid == "session_web_admin"
     assert authed is False

@@ -92,11 +92,40 @@ class McpOAuthCallbackHandler:
 class AuthCheckHandler:
     def GET(self):
         web.header('Content-Type', 'application/json; charset=utf-8')
+        # 企微白名单页面（前端据此过滤侧边栏）随认证结果一并返回。
+        from channel.web.api.kingdee import (
+            _check_wecom_auth, _get_wecom_open_pages,
+        )
+        result = {"status": "success", "wecom_open_pages": list(_get_wecom_open_pages().keys())}
+
         if not _is_password_enabled():
-            return json.dumps({"status": "success", "auth_required": False})
+            # 没有密码：检查企微登录
+            userid, wecom_authed, kingdee_allowed = _check_wecom_auth()
+            result["auth_required"] = False
+            result["wecom_user"] = wecom_authed
+            if wecom_authed:
+                result["userid"] = userid
+                result["kingdee_allowed"] = kingdee_allowed
+            return json.dumps(result)
+
         if _check_auth():
-            return json.dumps({"status": "success", "auth_required": True, "authenticated": True})
-        return json.dumps({"status": "success", "auth_required": True, "authenticated": False})
+            # 已通过密码登录
+            return json.dumps({
+                "status": "success", "auth_required": True, "authenticated": True,
+                "wecom_open_pages": list(_get_wecom_open_pages().keys()),
+            })
+
+        # 密码未通过，检查企微认证
+        userid, wecom_authed, kingdee_allowed = _check_wecom_auth()
+        if wecom_authed:
+            result.update({
+                "auth_required": True, "authenticated": True,
+                "wecom_user": True, "userid": userid, "kingdee_allowed": kingdee_allowed,
+            })
+        else:
+            result.update({"auth_required": True, "authenticated": False})
+
+        return json.dumps(result)
 
 
 class AuthLoginHandler:

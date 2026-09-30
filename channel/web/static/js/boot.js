@@ -27,6 +27,15 @@ applyTheme();
 applyI18n();
 
 fetch('/auth/check').then(r => r.json()).then(data => {
+    // 保存企微认证状态（无会话时保持 false）
+    if (data.wecom_user) {
+        _wecomUser = true;
+        _wecomUserid = data.userid || '';
+        _wecomKingdeeAllowed = !!data.kingdee_allowed;
+    }
+    if (data.wecom_open_pages) {
+        _wecomOpenPages = data.wecom_open_pages;
+    }
     if (data.auth_required && !data.authenticated) {
         // Keep background pollers parked until login succeeds (openAuthGate is
         // called from the login handler), so they don't spam 401s meanwhile.
@@ -38,6 +47,8 @@ fetch('/auth/check').then(r => r.json()).then(data => {
         }
         openAuthGate();
         initApp();
+        // 企微用户入场后应用菜单过滤
+        if (typeof _applyWecomFilter === 'function') _applyWecomFilter();
     }
 }).catch(() => {
     // No auth info available (e.g. request failed): fall back to running so a

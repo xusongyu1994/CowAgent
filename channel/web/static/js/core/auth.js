@@ -164,14 +164,16 @@ function initApp() {
             update_supported: !!data.update_supported,
             unsupported_reason: data.unsupported_reason || ''
         };
-        _setSidebarVersionLabel(`CowAgent ${APP_VERSION}`);
+        _setSidebarVersionLabel(`揽盛电气智能体 ${APP_VERSION}`);
     }).catch(() => {
-        _setSidebarVersionLabel('CowAgent');
+        _setSidebarVersionLabel('揽盛电气智能体');
     });
     chatInput.focus();
     // Last, and only from here: initApp() runs once auth has settled, on all
     // three paths into the app. Opening the routed view any earlier would
     // switch views behind the login overlay.
     routeApply();
+    // 处理 URL hash 路由（如企微自定义菜单跳转的 #kanban-conversion）。
+    if (typeof handleHashRoute === 'function') handleHashRoute();
 }
 

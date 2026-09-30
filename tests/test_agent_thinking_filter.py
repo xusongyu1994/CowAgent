@@ -146,25 +146,39 @@ class FakeContext:
         return getattr(self, key, default)
 
 
+class _SSEQueue:
+    """把 WebChannel 的 SSE 事件流适配成 queue 风格，便于测试读取。"""
+
+    def __init__(self, channel, request_id):
+        self.channel = channel
+        self.request_id = request_id
+
+    def qsize(self):
+        return len(self.channel.sse_streams[self.request_id].events)
+
+    def empty(self):
+        return self.qsize() == 0
+
+    def get_nowait(self):
+        item, _size = self.channel.sse_streams[self.request_id].events.popleft()
+        return item
+
+
 class TestWebSSECallback:
     """message_update delta is buffered; tool events are skipped."""
 
     @pytest.fixture
     def sse_env(self):
-        """
-        Build the on_event callback from _make_sse_callback.
-
-        We instantiate the WebChannel class minimally and call
-        _make_sse_callback directly.
-        """
+        """把 _make_sse_callback 产出的 on_event 挂到一个真实的 SSE 流上。"""
+        from channel.web.core._common import SSEStreamState
         from channel.web.web_channel import WebChannel
 
         ch = WebChannel()
         request_id = "test-req-1"
-        ch.sse_queues = {request_id: queue.Queue()}
+        ch.sse_streams[request_id] = SSEStreamState()
 
         on_event = ch._make_sse_callback(request_id)
-        return on_event, ch.sse_queues[request_id]
+        return on_event, _SSEQueue(ch, request_id)
 
     def test_message_update_buffered_not_sent(self, sse_env):
         """message_update should buffer delta, not push immediately."""
@@ -212,10 +226,10 @@ class TestWebSSECallback:
         items = []
         while not q.empty():
             items.append(q.get_nowait())
-        # Should have 2 delta events
+        # Should have 2 delta events (each carries an added `seq` field)
         assert len(items) == 2, f"Expected 2 delta events, got {len(items)}"
-        assert items[0] == {"type": "delta", "content": "最终"}
-        assert items[1] == {"type": "delta", "content": "回复"}
+        assert items[0]["type"] == "delta" and items[0]["content"] == "最终"
+        assert items[1]["type"] == "delta" and items[1]["content"] == "回复"
 
     def test_reasoning_update_still_sent(self, sse_env):
         """reasoning_update should still be pushed to frontend."""

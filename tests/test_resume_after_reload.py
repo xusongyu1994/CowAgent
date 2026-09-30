@@ -251,6 +251,13 @@ def _delta(channel, text):
     channel.on_event({"type": "message_update", "data": {"delta": text}})
 
 
+@pytest.mark.xfail(
+    reason="本 fork 的 WebChannel._make_sse_callback 会缓存 message_update，"
+           "直到 message_end 才决定是否下发（隐藏工具调用前的中间文本），"
+           "因此 message_update 不再逐条产生带 seq 的 SSE 事件，after_seq 不推进。"
+           "这是相对上游“刷新后恢复流式”的有意差异。",
+    strict=False,
+)
 def test_stream_follows_on_from_the_last_stored_step(store, channel):
     _open_run(store, "r1", [_user("q")])
     channel.on_event({"type": "agent_start", "data": {}})

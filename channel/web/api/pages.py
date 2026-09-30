@@ -41,6 +41,93 @@ class HealthHandler:
 
 class ChatHandler:
     def GET(self):
+        # 企微分支需要请求上下文（web.input / web.ctx.env）。直接调用本 handler
+        # （如单测）时没有上下文，此时跳过企微分支，直接渲染控制台页面。
+        if getattr(web.ctx, 'env', None) is not None:
+            # ====== 处理企微菜单直接注入的 OAuth code ======
+            # 企微自建应用在配置了网页授权回调域名后，用户点击菜单时
+            # 会自动在 URL 上附加 ?code=xxx&state=yyy，服务端直接
+            # 在后端换取 UserID，完全跳过浏览器的 OAuth 重定向，
+            # 从而避免触发 Private Network Access (RFC1918 Forbidden)
+            from channel.web.api.kingdee import (
+                _check_wecom_auth, _wecom_get_userid_by_code, _validate_wecom_state,
+                _create_wecom_session, _js_redirect_page, _wecom_error_page,
+                _WECOM_AUTH_COOKIE, _WECOM_SESSION_EXPIRE,
+            )
+            from channel.web.core._common import _check_auth
+            from config import conf
+
+            params = web.input(code="", state="", target="")
+            if params.code and not _check_wecom_auth()[1] and not _check_auth():
+                userid, errmsg = _wecom_get_userid_by_code(params.code)
+                if userid:
+                    logger.info(f"[ChatHandler] Direct OAuth for {userid} from menu URL")
+                    # 从 state 中提取目标页面（如 kanban-conversion）
+                    target_hash = "kanban-conversion"
+                    if params.state:
+                        extracted = _validate_wecom_state(params.state)
+                        if extracted:
+                            target_hash = extracted
+                    from common.permission_checker import check_kingdee_permission, has_kingdee_form_access
+                    allowed, scope, msg = check_kingdee_permission(userid)
+                    kingdee_allowed = allowed and scope != ""
+                    # 检查是否配置了至少一个金蝶表单
+                    form_access = has_kingdee_form_access(userid) if kingdee_allowed else None
+                    has_form = form_access is None or len(form_access) > 0
+                    if kingdee_allowed and has_form:
+                        session_id = _create_wecom_session(userid, kingdee_allowed=True)
+                        is_https = conf().get("wecom_public_base", "").startswith("https://")
+                        web.setcookie(_WECOM_AUTH_COOKIE, session_id,
+                                      expires=_WECOM_SESSION_EXPIRE,
+                                      path="/", httponly=True, samesite="Lax", secure=is_https)
+                        logger.info(f"[ChatHandler] Session created for {userid}, redirecting to /chat#{target_hash}")
+                        # 客户端 JS 重定向替代 302，切断 PNA 追溯链
+                        return _js_redirect_page(f'/chat#{target_hash}')
+                    elif not kingdee_allowed:
+                        return _wecom_error_page(
+                            "权限不足",
+                            "您没有金蝶查询权限，请联系管理员开通。"
+                        )
+                    else:
+                        return _wecom_error_page(
+                            "权限不足",
+                            "尚未为您配置金蝶表单权限，请联系管理员开通。"
+                        )
+                else:
+                    logger.warning(f"[ChatHandler] Direct OAuth failed: {errmsg}")
+                    # code 无效/过期，继续走现有流程（JS 跳转 OAuth redirect）
+
+            # 企微场景：只有企微浏览器（User-Agent 含 wxwork）且未认证时，
+            # 才跳转到 OAuth 静默授权；普通浏览器（本地/桌面）未认证时继续
+            # 渲染 chat.html，由 console.js 显示密码登录界面。
+            wecom_configured = bool(conf().get("wecom_public_base", ""))
+            _, wecom_authed, _ = _check_wecom_auth()
+            _ua = web.ctx.env.get('HTTP_USER_AGENT', '') or ''
+            is_wecom_browser = ('wxwork' in _ua) or ('MicroMessenger' in _ua)
+
+            if wecom_configured and is_wecom_browser and not wecom_authed and not _check_auth():
+                # 企微浏览器且无会话 → 返回 JS 页面。
+                # JS 读取 URL hash（如 #kanban-conversion）跳转到 OAuth 入口；
+                # 普通浏览器不会走到此分支，直接渲染 chat.html 显示登录界面。
+                web.header('Content-Type', 'text/html; charset=utf-8')
+                return (
+                    '<!doctype html>'
+                    '<html><head><meta charset="utf-8">'
+                    '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                    '<title>跳转中...</title></head><body>'
+                    '<script>'
+                    '(function(){'
+                    '  var ua = navigator.userAgent || "";'
+                    '  if (ua.indexOf("wxwork") !== -1 || ua.indexOf("MicroMessenger") !== -1) {'
+                    '    var target = window.location.hash.substring(1) || "kanban-conversion";'
+                    '    window.location.replace("/auth/wecom/start?target=" + encodeURIComponent(target));'
+                    '  }'
+                    '})();'
+                    '</script>'
+                    '<p>正在跳转到企业微信认证...</p>'
+                    '</body></html>'
+                )
+
         # Content-Type must be explicit: behind a reverse proxy that sends
         # X-Content-Type-Options: nosniff, a missing type makes browsers
         # refuse to sniff and render the page as plain text source.

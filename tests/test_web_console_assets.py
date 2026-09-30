@@ -38,6 +38,11 @@ def test_every_console_script_is_listed_exactly_once_and_exists():
 
     on_disk = set()
     for root, _, files in os.walk(os.path.join(STATIC, "js")):
+        # js/pages/*.js belong to standalone pages (e.g. the Kingdee /analysis
+        # page) rather than to the console shell, so they are deliberately not
+        # in the console's script list.
+        if os.path.basename(root) == "pages":
+            continue
         for name in files:
             if name.endswith(".js"):
                 rel = os.path.relpath(os.path.join(root, name), STATIC)
