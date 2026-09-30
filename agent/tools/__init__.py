@@ -11,6 +11,8 @@ from agent.tools.ls.ls import Ls
 from agent.tools.send.send import Send
 from agent.tools.search_files.search_files import SearchFiles
 
+from agent.tools.current_time.current_time import TimeTool
+
 # Import memory tools
 from agent.tools.memory.memory_search import MemorySearchTool
 from agent.tools.memory.memory_get import MemoryGetTool
@@ -170,6 +172,7 @@ __all__ = [
     'McpTool',
     'WecomAppSend',
     'WecomWebhookSend',
+    'TimeTool',
 ]
 
 """

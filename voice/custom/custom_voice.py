@@ -21,9 +21,17 @@ import requests
 
 from bridge.reply import Reply, ReplyType
 from common.log import logger
+from common.tmp_dir import TmpDir
 from config import conf
 from models.custom_provider import _find_provider_by_id, get_custom_providers, parse_custom_bot_type
 from voice.voice import Voice
+
+# Bound every outbound call. A vendor that stalls would otherwise leave the
+# request waiting forever: nothing is raised, nothing is logged, the turn never
+# finishes and the user never gets a reply. ASR uploads a file and TTS
+# synthesises a clip, so this uses the longer read timeout that mimo and linkai
+# also apply to the same two endpoints.
+REQUEST_TIMEOUT = (5, 120)
 
 
 class CustomVoice(Voice):
@@ -63,6 +71,7 @@ class CustomVoice(Voice):
                     headers={"Authorization": "Bearer " + api_key},
                     files={"file": f},
                     data={"model": model},
+                    timeout=REQUEST_TIMEOUT,
                 )
             try:
                 data = response.json()
@@ -101,6 +110,7 @@ class CustomVoice(Voice):
                     "input": text,
                     "voice": conf().get("tts_voice_id") or "alloy",
                 },
+                timeout=REQUEST_TIMEOUT,
             )
             if response.status_code != 200:
                 logger.error(
@@ -108,7 +118,7 @@ class CustomVoice(Voice):
                     f"resp={response.text[:200]}"
                 )
                 return Reply(ReplyType.ERROR, "遇到了一点小问题，请稍后再问我吧")
-            file_name = "tmp/" + datetime.datetime.now().strftime("%Y%m%d%H%M%S") + str(random.randint(0, 1000)) + ".mp3"
+            file_name = TmpDir().path() + datetime.datetime.now().strftime("%Y%m%d%H%M%S") + str(random.randint(0, 1000)) + ".mp3"
             with open(file_name, "wb") as f:
                 f.write(response.content)
             logger.info("[Custom] textToVoice success")

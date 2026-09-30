@@ -131,8 +131,8 @@ CowAgent 支援國內外主流廠商的大語言模型。**文字對話、影像
 | 廠商 | 代表模型 | 文字 | 影像理解 | 影像生成 | 語音識別 | 語音合成 | 向量 |
 | --- | --- | :-: | :-: | :-: | :-: | :-: | :-: |
 | [DeepSeek](https://docs.cowagent.ai/zh/models/deepseek) | deepseek-flash (V4.1) / pro | ✅ | ✅ | | | | |
-| [Claude](https://docs.cowagent.ai/zh/models/claude) | claude-opus-5 / fable-5.1 | ✅ | ✅ | | | | |
-| [OpenAI](https://docs.cowagent.ai/zh/models/openai) | gpt-6-astra / gpt-5.6 系列 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| [Claude](https://docs.cowagent.ai/zh/models/claude) | claude-opus-5-5 / fable-5.1 | ✅ | ✅ | | | | |
+| [OpenAI](https://docs.cowagent.ai/zh/models/openai) | gpt-6.1-sol / gpt-6 系列 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [Gemini](https://docs.cowagent.ai/zh/models/gemini) | gemini-3.8-flash | ✅ | ✅ | ✅ | | | |
 | [MiniMax](https://docs.cowagent.ai/zh/models/minimax) | MiniMax-M3 | ✅ | ✅ | ✅ | | ✅ | |
 | [智譜 GLM](https://docs.cowagent.ai/zh/models/glm) | glm-5.3-flash、glm-5v-turbo | ✅ | ✅ | | ✅ | | ✅ |
@@ -227,6 +227,8 @@ CowAgent 支援國內外主流廠商的大語言模型。**文字對話、影像
 
 ## 🏷 更新日誌
 
+> **2026.09.30：** [v2.2.0](https://github.com/zhayujie/CowAgent/releases/tag/2.2.0) — 新增能力中心、多 Agent 協作優化、Web 控制台重構、模型快取命中率提升、穩定性與安全全面加強
+
 > **2026.09.14：** [v2.1.9](https://github.com/zhayujie/CowAgent/releases/tag/2.1.9) — 多 Agent 協作體驗優化、模型列表配置與多兜底模型、通道接入修復、新增圖像模型（gpt-image-2.5）、語音修復
 
 > **2026.09.10：** [v2.1.8](https://github.com/zhayujie/CowAgent/releases/tag/2.1.8) — 推出多 Agent 團隊、定時任務支援手動建立、上下文用量視覺化、模型和搜尋工具接入、工作空間檔案編輯
@@ -294,7 +296,7 @@ CowAgent 支援國內外主流廠商的大語言模型。**文字對話、影像
 
 ## 🛠️ 開發與貢獻
 
-歡迎各種形式的貢獻：新功能、Bug 修復、效能最佳化、文件完善，或向 [Skill Hub](https://skills.cowagent.ai/submit) 分享你的技能。請先閱讀 [CONTRIBUTING.md](/CONTRIBUTING.md) 瞭解如何開始，然後提交 Issue 討論或直接發起 PR。
+歡迎各種形式的貢獻：新功能、Bug 修復、效能最佳化、文件完善，或向 [Skill Hub](https://skills.cowagent.ai/submit) 分享你的技能。請先閱讀 [CONTRIBUTING.md](../../CONTRIBUTING.md) 瞭解如何開始，然後提交 Issue 討論或直接發起 PR。
 
 歡迎 ⭐ Star 支援專案，並透過 Watch → Custom → Releases 訂閱新版本通知。也歡迎提交 PR、Issue 進行反饋。
 
@@ -306,7 +308,7 @@ CowAgent 支援國內外主流廠商的大語言模型。**文字對話、影像
 
 ## ⚠️ 宣告
 
-1. 本專案遵循 [MIT 開源協議](/LICENSE)，主要用於技術研究和學習。使用時請遵守所在地法律法規及相關政策，因使用本專案所產生的一切後果由使用者自行承擔。
+1. 本專案遵循 [MIT 開源協議](../../LICENSE)，主要用於技術研究和學習。使用時請遵守所在地法律法規及相關政策，因使用本專案所產生的一切後果由使用者自行承擔。
 2. **成本與安全：** Agent 模式 Token 消耗顯著高於普通對話，請根據效果與成本權衡選擇模型；Agent 具備訪問本地作業系統的能力，請謹慎選擇部署環境。
 3. CowAgent 專案專注於開源技術開發，不會參與、授權或發行任何加密貨幣。
 

@@ -22,6 +22,7 @@ import plugins
 from plugins import Plugin, Event, EventContext, EventAction
 from bridge.context import ContextType
 from bridge.reply import Reply, ReplyType
+from common.atomic_write import write_json_atomic
 from common.log import logger
 from common.i18n import t as _t
 from config import conf
@@ -63,6 +64,11 @@ DEFAULT_ALIASES = {
     "cfg": "config",
     "k":   "knowledge",
 }
+
+
+def _app_name() -> str:
+    """Product name shown in command output; a desktop build may rename it."""
+    return (os.environ.get("COW_APP_NAME") or "").strip() or "CowAgent"
 
 
 @plugins.register(
@@ -349,7 +355,7 @@ class CowCliPlugin(Plugin):
     def _cmd_help(self, args: str, e_context, **_) -> str:
         if _t("zh", "en") == "en":
             lines = [
-                "📋 CowAgent Commands",
+                f"📋 {_app_name()} Commands",
                 "",
                 "/help: Show this help",
                 "/version: Show version",
@@ -379,7 +385,7 @@ class CowCliPlugin(Plugin):
             ]
         else:
             lines = [
-                "📋 CowAgent 命令列表",
+                f"📋 {_app_name()} 命令列表",
                 "",
                 "/help: 显示此帮助",
                 "/version: 查看版本",
@@ -407,10 +413,14 @@ class CowCliPlugin(Plugin):
                 "",
                 "💡 也可以用 cow <command> 代替 /<command>",
             ]
-        return "\n".join(lines)
+        # The `cow` prefix is named after the default product; a renamed build
+        # keeps the slash form only in its help.
+        if os.environ.get("COW_APP_NAME"):
+            lines = [l for l in lines if "cow <command>" not in l]
+        return "\n".join(lines).rstrip()
 
     def _cmd_version(self, args: str, e_context, **_) -> str:
-        return f"CowAgent v{__version__}"
+        return f"{_app_name()} v{__version__}"
 
     # ------------------------------------------------------------------
     # tasks — read-only scheduler list scoped to the current chat.
@@ -543,7 +553,7 @@ class CowCliPlugin(Plugin):
         from config import conf
 
         cfg = conf()
-        lines = [_t("📊 CowAgent 运行状态", "📊 CowAgent Status"), ""]
+        lines = [_t(f"📊 {_app_name()} 运行状态", f"📊 {_app_name()} Status"), ""]
 
         lines.append(_t(f"  版本: v{__version__}", f"  Version: v{__version__}"))
         lines.append(_t(f"  进程: PID {os.getpid()}", f"  Process: PID {os.getpid()}"))
@@ -742,9 +752,6 @@ class CowCliPlugin(Plugin):
     _CONFIG_READABLE = _CONFIG_WRITABLE | {"channel_type"}
 
     def _cmd_config(self, args: str, e_context, **_) -> str:
-        from config import conf, load_config
-        import json as _json
-
         parts = args.strip().split(None, 1)
         if not parts:
             return self._config_show_all()
@@ -825,8 +832,7 @@ class CowCliPlugin(Plugin):
             with open(config_path, "r", encoding="utf-8-sig") as f:
                 file_config = _json.load(f)
             file_config.update(updates)
-            with open(config_path, "w", encoding="utf-8") as f:
-                _json.dump(file_config, f, indent=4, ensure_ascii=False)
+            write_json_atomic(config_path, file_config)
         except Exception as e:
             return _t(f"写入 config.json 失败: {e}", f"Failed to write config.json: {e}")
 
@@ -941,8 +947,8 @@ class CowCliPlugin(Plugin):
                 "you can also run `cow install-browser` in a terminal.",
             )
         return _t(
-            "✅ 安装流程已结束。请重启 CowAgent 后使用 browser 工具。",
-            "✅ Installation finished. Restart CowAgent to use the browser tool.",
+            f"✅ 安装流程已结束。请重启 {_app_name()} 后使用 browser 工具。",
+            f"✅ Installation finished. Restart {_app_name()} to use the browser tool.",
         )
 
     # ------------------------------------------------------------------
@@ -1153,7 +1159,9 @@ class CowCliPlugin(Plugin):
             lines.append(_t(f"💡 /skill list --remote --page {page - 1}: 上一页", f"💡 /skill list --remote --page {page - 1}: Previous page"))
         lines.append(_t("💡 /skill install <名称>: 安装技能", "💡 /skill install <name>: Install a skill"))
         lines.append(_t("💡 /skill search <关键词>: 搜索技能", "💡 /skill search <keyword>: Search skills"))
-        lines.append(_t("🌐 https://skills.cowagent.ai  在线浏览全部技能", "🌐 https://skills.cowagent.ai  Browse all skills online"))
+        # The hub site is the default product's; a renamed build leaves it out.
+        if not os.environ.get("COW_APP_NAME"):
+            lines.append(_t("🌐 https://skills.cowagent.ai  在线浏览全部技能", "🌐 https://skills.cowagent.ai  Browse all skills online"))
         return "\n".join(lines)
 
     def _skill_search(self, query: str) -> str:
@@ -1265,8 +1273,7 @@ class CowCliPlugin(Plugin):
                 with open(config_path, "r", encoding="utf-8") as f:
                     config = json.load(f)
                 config.pop(name, None)
-                with open(config_path, "w", encoding="utf-8") as f:
-                    json.dump(config, f, indent=4, ensure_ascii=False)
+                write_json_atomic(config_path, config)
             except Exception:
                 pass
 
@@ -1387,8 +1394,7 @@ class CowCliPlugin(Plugin):
             return _t(f"技能 '{name}' 未在配置中找到", f"Skill '{name}' not found in config")
 
         config[name]["enabled"] = enabled
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=4, ensure_ascii=False)
+        write_json_atomic(config_path, config)
 
         icon = "✅" if enabled else "⬚"
         if enabled:
@@ -1787,8 +1793,6 @@ class CowCliPlugin(Plugin):
     @staticmethod
     def _create_standalone_flush_manager():
         """Create a MemoryFlushManager without a running agent (for pre-init dream)."""
-        from pathlib import Path
-        from config import conf
         from common.state_dir import state_root
         from agent.memory.summarizer import MemoryFlushManager
         from bridge.bridge import Bridge
@@ -1828,8 +1832,7 @@ class CowCliPlugin(Plugin):
             with open(config_path, "r", encoding="utf-8-sig") as f:
                 file_config = _json.load(f)
             file_config["knowledge"] = enabled
-            with open(config_path, "w", encoding="utf-8") as f:
-                _json.dump(file_config, f, indent=4, ensure_ascii=False)
+            write_json_atomic(config_path, file_config)
         except Exception as e:
             return _t(f"⚠️ 内存中已切换，但写入 config.json 失败: {e}", f"⚠️ Switched in memory, but failed to write config.json: {e}")
 

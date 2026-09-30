@@ -99,6 +99,13 @@ class AgentAdminService:
             data = json.load(handle)
         if not isinstance(data, dict):
             raise AgentAdminError("config root must be an object")
+        # Values injected via environment at startup never reach config.json.
+        from config import conf
+
+        live = conf()
+        for key in ("default_agent_name", "default_agent_description"):
+            if not data.get(key) and live.get(key):
+                data[key] = live[key]
         return team.resolve(data)
 
     def _write(self, settings: Dict) -> None:
@@ -279,6 +286,20 @@ class AgentAdminService:
             logger.warning(f"[AgentAdmin] Could not create own knowledge for {destination}: {e}")
 
     @staticmethod
+    def _make_own_skills(destination: Path) -> None:
+        """Give a brand-new Agent its own skill set (opt out of shared).
+
+        Presence of the directory is what opts an Agent out of the shared copy,
+        so an empty ``skills/`` is enough: the Agent then starts with no shared
+        skills and installs its own.
+        """
+        sdir = destination / "skills"
+        try:
+            sdir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            logger.warning(f"[AgentAdmin] Could not create own skills for {destination}: {e}")
+
+    @staticmethod
     def _clone_persona(source: Path, destination: Path) -> None:
         """Copy how an Agent behaves, and nothing else.
 
@@ -337,10 +358,13 @@ class AgentAdminService:
         skills: Optional[Iterable[str]] = None,
         knowledge: Optional[Iterable[str]] = None,
         knowledge_mode: str = None,
+        skill_mode: str = None,
         revision: str = None,
     ) -> Dict:
         if knowledge_mode not in (None, "shared", "own"):
             raise AgentAdminError("knowledge mode must be 'shared' or 'own'")
+        if skill_mode not in (None, "shared", "own"):
+            raise AgentAdminError("skill mode must be 'shared' or 'own'")
         with self._lock:
             settings = self._load()
             registry = self._registry(settings)
@@ -388,6 +412,8 @@ class AgentAdminService:
                 self._seed_name(workspace, name)
                 if knowledge_mode == "own":
                     self._make_own_knowledge(destination)
+                if skill_mode == "own":
+                    self._make_own_skills(destination)
 
                 profile = AgentProfile(
                     id=agent_id,
@@ -591,6 +617,18 @@ class AgentAdminService:
                 session_prefs.forget_agent(agent_id)
             except Exception as e:
                 logger.warning(f"[AgentAdmin] session prefs cleanup after delete failed: {e}")
+
+            # The project store keys its bindings the same way and needs the same
+            # sweep: an Agent's own sessions go away with its workspace, so their
+            # ``{id}::*`` entries would linger forever and a new Agent reusing the
+            # id would inherit them. Best-effort too, and separate so one store
+            # failing cannot swallow the other's cleanup.
+            try:
+                from agent.workspace import project_store
+
+                project_store.forget_agent(agent_id)
+            except Exception as e:
+                logger.warning(f"[AgentAdmin] project store cleanup after delete failed: {e}")
 
             return {"id": agent_id, "deleted": True}
 
