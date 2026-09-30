@@ -1,6 +1,6 @@
 # 企微线上协作流程 · 实施方案
 
-> 版本：**v0.26**（共 88 项决策，见 §12.1；十轮审查 + 三次需求变更 + 两次上游同步适配（CowAgent v2.2.0）记录见 §0）
+> 版本：**v0.27**（共 89 项决策，见 §12.1；十轮审查 + 三次需求变更 + 两次上游同步适配（CowAgent v2.2.0）+ 一次交互级核查记录见 §0）
 > 状态：**方案待评审通过 → 可进入开发**（原型已出并通过脚本冒烟测试）
 > 适用范围：`CowAgent` Web 控制台新增的**唯一页面** —— **协作流程页 `/collab`**（企微菜单**只此一个入口**）。文件管理（含"按线上协作流程查找文件"）是**该页中栏的一个 Tab**，见 §8.4。
 > 关联原型：`prototype/collab-workflow-prototype.html`（单一三栏布局 + 响应式收缩）
@@ -593,7 +593,7 @@
 | 1 | **接入方式** | ✅ 改按 v2.2.0 约定：后端 `channel/web/api/collab.py`（一视图一模块）+ `web_channel.py` **URLS 表**注册；页面按**独立页三件套**（`collab.html` + `static/js/pages/collab.js` + `static/css/collab.css`，照 `/analysis`）；**不新建** `collab_api.py`；认证 / 上传 / 预览令牌 / 路径白名单复用 `core/_common.py`（**v0.26 修正**：不用 `views/collab.js` —— `views/` 是应用内视图） | §3、§7、决策 84 / 88 |
 | 2 | **数据根目录** | ✅ `collab_root()` / `collab_db()` **基于 `shared_root()`**（协作数据跨 Agent 共享）；`collab_files_root` 缺省 = `shared_root()/collab`，**不挂 per-agent `state_root()`** | §5.1、决策 85 |
 | 3 | **现状表行号** | ✅ v2.2.0 后：企微免密登录迁至 `api/kingdee.py`（L60/L106/L140/L173）、白名单 `config.py` L282、文件通道 `api/files.py` + `core/_common.py` `_serve_allowed_roots()` L836、路径清洗 L567/L595、`state_dir` L48/L69/L83/L238/L254 → **一律改为符号引用 + 现状行号** | §3.1 |
-| 4 | **复用公共件（替代自研）** | ✅ 通知限流 → `common/token_bucket.py`；单实例锁 → `common/singleton.py`；原子写 → `common/atomic_write.py`；权限判定 → `common/permission_checker.py`；临时目录 → `common/tmp_dir.py` | §7、§10 |
+| 4 | **复用公共件（替代自研）** | ✅ 通知限流 → `common/token_bucket.py`（`TokenBucket(tpm)`：容量=每分钟令牌数、速率 tpm/60，**按用户建桶** → 默认 `TokenBucket(10)`）；原子写 → `common/atomic_write.py`（`write_text_atomic`）；权限判定 → `common/permission_checker.py`；临时目录 → `common/tmp_dir.py`。⚠️ **v0.27 更正**：单实例锁**不复用** `common/singleton.py`（进程内单例装饰器，非跨进程锁）—— 按 §7 第 1 条自实现 `collab.lock` | §7、§10 |
 | 5 | **企微免密入口增强** | ✅ 复用「菜单 URL 直带 `?code=` → 后端换票」（`api/pages.py` / `ChatHandler`）+ `state` 校验（`_validate_wecom_state`）+ 落地视图 `?target=`；`/auth/wecom/*` 四路由保留 | §9、决策 87 |
 | 6 | **i18n** | ✅ 独立页**不接**控制台 i18n（已核实 `/analysis` 亦未接：`pages/analysis.js` 无 `t()`、`analysis.html` 不加载 `core/i18n.js`）→ **中文为准**；未来要双语再按 `views/kingdee-i18n.js` 方式补（**v0.26 修正**，见决策 86） | §8、决策 86 |
 | 7 | **命名与品牌** | ✅ 前台统一「**线上协作流程**」，与「**多 Agent 协作**」（`agent/multiagent/`）区分；页面标题 / 菜单名遵循品牌「**揽盛电气智能体**」 | 决策 87 |
@@ -619,6 +619,24 @@
 | 7 | **陈旧表述清理** | ✅ 随决策 83（v0.24 全员可见）订正：§7 第 7 条与 §8.1 的「无权限置灰」、§13「流程动态仅发起人可见」、§14「操作记录测试」的置灰断言；§8.5 面板示意图标题改为「操作记录」 | §7、§8.1、§8.5、§13、§14 |
 
 > **原型（`prototype/collab-workflow-prototype.html`）仍不受影响**：本次发现全部落在"方案 ↔ 代码"的落点层，原型的界面与交互无一处与之冲突（已复扫：无 `views/`、`nav.js`、i18n 等实现细节引用）。
+
+---
+
+### 0.21 交互级对照 + 逐功能核查（v0.27）
+
+> 起因：用户要求「原型交互与方案做交互级对照」+「逐功能核查方案对代码的依赖」。原型侧：清点 **69 个事件处理器 / 279 处调用点 / 61 个状态键**，按 41 组功能关键词核对 —— **40/41 组在方案中已有落点**，1 组存在差异（见下 #1）。代码侧：逐项验证方案断言的"可复用件"，发现 **1 处断言错误**（见 #2）。
+
+| # | 议题 | ✅ 结论 | 落点 |
+|---|------|--------|------|
+| 1 | **显式响应入口**（原型有 / 方案无） | ✅ 采用**双入口等价**：隐式打点（发讨论 / 传文件）+ 提醒条「**✅ 我已响应 · 设定处理时限**」按钮（原型 `respondTask`）；两者都写 `responded_at`；纯表情 / 空文本都不算 | §13.5、决策 89 |
+| 2 | **`common/singleton.py` 误用（v0.25 断言错误）** | ✅ 该模块是**进程内单例装饰器**（缓存类实例），**不是**跨进程单实例锁 → 单实例锁改为**自实现 `collab.lock`**（文件锁 + PID 存活探测 + 陈旧锁接管） | §7 第 1 条、§0.19 第 4 条 |
+| 3 | **发起流程时的通知开关**（原型有 / 方案无） | ✅ 发起表单提供「发起后向成员发送企微通知」复选（默认开），与拉人弹层同款 | §10、§8.2 |
+| 4 | **`token_bucket` 用法** | ✅ `TokenBucket(tpm)`：容量 = 每分钟令牌数、速率 `tpm/60`、初始 0 → **按用户建桶**，默认 `TokenBucket(10)` 实现"单用户每分钟推送上限 10 条" | §10、§7 |
+| 5 | **SQLite 既有范式** | ✅ 方案明确照 `agent/memory/storage.py` / `agent/memory/conversation_store.py` / `agent/workspace/service.py` 的 **WAL + 进程内锁 + 事务**写法 | §5.2、§10 #23 |
+| 6 | **调度器 interval 单位** | ✅ `schedule_type='interval'` 的**单位是秒** → SLA 每分钟扫描写 `60` | §7 第 10 条 |
+| 7 | **两条边界（避免实现跑偏）** | ✅ ① 协作**不接入**控制台权限管理页（`views/permissions.js` / `api/permissions.py` 的知识库与金蝶体系）—— 协作管理员 = web 管理员（`session_` 前缀）；② 讨论 / 批注正文 = **纯文本 + @提及高亮**，**不做 Markdown 渲染** | §6.1、§10 #27/#28 |
+
+> **原型结论：无需改动**。本轮唯一差异是"原型多了一个显式响应按钮"，处理方式为**在方案中采纳**（而非删除原型交互）；其余 40 组关键词原型与方案一一对应。
 
 ---
 ## 1. 背景与目标
@@ -1348,6 +1366,7 @@ def _collab_node_can_edit(flow: dict, node: dict, userid: str) -> bool:
 > **时限与流转接口（v0.11）**：本节的 `inbox` 已**升级为按时限分组的待办**；另新增 `tasks` / `task/respond_deadline` / `task/respond` / `task/handle_deadline` / `task/handover` / `task/owner_action` / `task/changes` **七个接口，统一定义在 §13.12**。
 >
 > **隐式打点约定（v0.11）**：`POST /api/collab/message` 与 `POST /api/collab/file` 成功时，若当前用户在该节点有**未响应的任务**，后端**同事务**写 `responded_at`，并在响应体带上 `need_handle_deadline: true`（前端据此弹层要求设处理时限）。**这是唯一允许"写接口带副作用"的地方**，必须在实现与测试里显式覆盖。
+> **显式响应入口（v0.27 补充）**：任务提醒条同时提供用户可见的「**✅ 我已响应 · 设定处理时限**」按钮（原型已有 `respondTask`）—— 与隐式打点**等价**（都写 `responded_at` 并进入设处理时限流程），用于用户"不知道该发什么"时的兜底；仍要求二次校验「已响应则拒绝重复打点」。注意**不要**把纯表情 / 空文本纳入打点口径（隐式打点继续要求实质内容）。
 
 ---
 
@@ -1797,7 +1816,7 @@ def _collab_node_can_edit(flow: dict, node: dict, userid: str) -> bool:
 | **通知：@提及** | **即时推送**被 @ 的人（即使他不是该节点成员：**只推送通知，不自动授予编辑权**）；被 @ 的消息进入「＠ 我的提及」列表（§8.6） |
 | **通知：管理员操作**（v0.7） | **不推送**：管理员巡查/介入时不惊动全员；其操作仅写 `events`，在「操作记录」中可见 |
 | **v0.11/v0.13：时限与流转的 13 类通知** | 见 **§13.9**（被派活 / 响应临期 / 响应逾期 / 已响应 / 未设处理时限 / 处理临期 / 处理逾期 / 升级待处置 / 改期 / 完成并流转 / 节点已流转 / 发起人处置 / **流程已归档（任务被关闭）**）。**提醒类强制去重**（同一任务同类只推一次）；逾期扫描**复用既有 `SchedulerService`**（每分钟），**不新起 daemon 线程** |
-| **通知总开关** | 配置项 `collab_notify`（默认开，全局）；用户在页面内可临时关闭个人通知；拉人时可勾选"是否通知" |
+| **通知总开关** | 配置项 `collab_notify`（默认开，全局）；用户在页面内可临时关闭个人通知；**拉人时**可勾选"是否通知"；**发起流程表单**同样提供「发起后向成员发送企微通知」复选（**v0.27 补**：原型已有该复选，方案原缺） |
 | **通知实现** | 复用 `agent/tools/wechatcom/wecom_app_send.py` 的 `WechatComAppChannel.client`（发送在**后台线程**执行，不阻塞请求）；通知失败只记日志，不影响主流程，由页面未读角标兜底 |
 | **合规** | 通知仅推送给**对该内容有查看权**的人（节点成员 + 流程成员），内容 = 流程标题 + 节点标题 + 操作人 + 讨论正文摘要（截断 50 字）；**不外发、不含附件内容** |
 
@@ -1829,7 +1848,7 @@ def _collab_node_can_edit(flow: dict, node: dict, userid: str) -> bool:
 | 20 | **@提及解析** | 通知错漏 | `mentions` 独立字段（JSON 数组）存储，不靠正文正则解析 |
 | 21 | **移动端输入** | 键盘遮挡 | 输入栏 `position: sticky` + `safe-area-inset-bottom` 适配 |
 | 22 | **深色模式** | 不一致 | 全部使用既有 `dark:` 语义类 |
-| 23 | **SQLite 并发写** | 锁冲突 | 启用 WAL；写操作加进程内锁；批量写用事务 |
+| 23 | **SQLite 并发写** | 锁冲突 | 启用 WAL；写操作加进程内锁；批量写用事务 —— **照既有范式**（`agent/memory/storage.py`、`agent/memory/conversation_store.py`、`agent/workspace/service.py` 均为 SQLite + WAL + 进程内锁 + 事务） |
 | 24 | **数据备份** | 丢失 | `collab.db` + `files/` 纳入既有备份范围；提供流程导出（二期） |
 | 25 | **归档后误操作** | 数据被改 | 归档 = 全流程只读，所有写接口先校验 `flow.status == 'active'` |
 | 26 | **只读成员越权写**（v0.2 新增） | 🔴 权限绕过 | 后端 `_collab_node_can_edit` 是**唯一判定**；所有写接口强制校验；前端置灰仅作体验层 |
@@ -1883,13 +1902,15 @@ def _collab_node_can_edit(flow: dict, node: dict, userid: str) -> bool:
 | **74** | **在文件视图点左栏流程卡片被踢回树形**（v0.10 新增） | 交互断裂 | `switchFlow` **保留当前中栏 Tab**（`files` / `graph` / `events` 不被重置），仅当当前是树形时才回到树形（**v0.17 收敛**：只保留"当前流程"语境的 Tab；**跨流程态（全部文件 / 我的待办）切流程一律回树形**） |
 | **75** | **筛选状态刷新即丢、无法分享**（v0.10 新增） | 复现困难 | 状态写回 URL（§8.7）：`history.replaceState`，默认值不写入；与通知链接共用同一套解析 |
 | **76** | **facets 每次切范围都全表聚合**（v0.10 新增） | 大流程量下变慢 | 进程内**缓存 60s**（按 `(userid, scope, flow_id)` 分键）；文件数超阈值时降级为"只返回流程列表、不算容量" |
+| 77 | **与权限管理页的关系**（v0.27 补） | 误接体系 | 协作**不接入** `views/permissions.js` / `api/permissions.py` 的知识库与金蝶权限体系；协作的"管理员"口径 = **web 管理员（`session_` 前缀）**（§6.1），两套权限**相互独立** |
+| 78 | **讨论正文的渲染**（v0.27 补） | 实现偏差 | 讨论 / 批注正文为**纯文本 + @提及高亮**（与原型一致），**不做 Markdown 渲染**；只有"流程导出"才转 Markdown（§11 Phase 2） |
 
 ---
 
 ## 11. 分期实施
 
 ### Phase 1 — 协作闭环（核心）
-1. `common/state_dir.py` 增 `collab_root()` / `collab_db()`（identity-aware，**基于 `shared_root()`**）+ 启动**可写自检** + **单实例锁**（**复用 `common/singleton.py`**，含 PID 存活探测、陈旧锁自动接管）+ 根目录变更告警
+1. `common/state_dir.py` 增 `collab_root()` / `collab_db()`（identity-aware，**基于 `shared_root()`**）+ 启动**可写自检** + **单实例锁**（**自实现 `collab.lock`**：文件锁 + PID 存活探测 + 陈旧锁自动接管）。⚠️ **v0.27 更正**：**不复用 `common/singleton.py`** —— 那是**进程内单例装饰器**（缓存类实例），与跨进程单实例锁无关+ 根目录变更告警
 2. `agent/collab/store.py`：**十张表**建表（前八张见 §5.2，含 `uq_files_display` / `uq_files_current` **两个部分唯一索引**；第 9、10 张 `node_tasks` / `task_changes` 见 §13.2，一并建）+ CRUD + 树构建 + 事务（创建节点 + 成员继承 + 操作日志 + `_touch()` 统一刷新 `updated_at`）
 3. `agent/collab/service.py`：业务编排 + 权限判定（`_collab_is_admin` / `_collab_can_view_flow` / `_collab_node_can_edit` / `_collab_file_can_delete` / `_collab_can_delete_message` 为唯一入口，**管理员旁路在最前**；与 **`common/permission_checker.py`** 既有策略对齐，不重造一套）+ 成员继承 + 移出成员
 4. **`agent/collab/files.py`**：`_resolve_display_name` 同名去重（**事务 + `IntegrityError` 重试**）、唯一磁盘名、配额校验、**软删除/恢复/彻底删除/清空回收站**、流程级与跨流程查询、**流式打包 zip（自动分卷）**、**内联预览白名单**。**上限核对（v0.25）**：上传受服务器 **multipart body 上限 512MB**（`core/_common.py` `MAX_LOCAL_IMPORT_BYTES`）约束，单文件上限取 `collab_max_file_mb` = 50MB（安全区内）；**打包下载为响应流式**，不受 multipart / 外部抓取限制，zip 分卷规则保持（200 文件 / 2GB 总包），**每卷可选 ≤ 512MB**
@@ -1901,7 +1922,7 @@ def _collab_node_can_edit(flow: dict, node: dict, userid: str) -> bool:
 8.2 **（v0.17）导航组件复用**：抽出 `midTabs(f)` 作为**唯一的中栏 Tab 组件**，由「流程头（树形 / 图谱）· 文件面板 · 动态面板」共用 —— 避免再出现"某个视图里没有 Tab 条 → 进去出不来"（原「📁 文件」即此情况）
 8.2 **（v0.10）URL 状态同步**：`readUrl()` → 首屏渲染前解析；每次 `render()` 用 `history.replaceState` 写回；默认值不写入（§8.7）
 9. 企微入口：`wecom_open_pages` **只增 `"collab": "线上协作流程"`**；**复用 v2.2.0 链路** —— 菜单 URL 直带 `?code=` → 后端换票（`api/pages.py`）+ `state` 校验 + `?target=collab`；`/auth/wecom/*` 四路由保留
-10. 后台任务：注册到既有**调度器** —— `agent/tools/scheduler/scheduler_service.py`（`schedule_type='interval'`；入口 `agent/tools/scheduler/integration.py` 的 `init_scheduler()`）（**SLA 逾期扫描：每分钟** + 回收站到期清理 + `.part` 残留清理）
+10. 后台任务：注册到既有**调度器** —— `agent/tools/scheduler/scheduler_service.py`（`schedule_type='interval'`（**单位为秒** → 每分钟扫描 = `60`）；入口 `agent/tools/scheduler/integration.py` 的 `init_scheduler()`）（**SLA 逾期扫描：每分钟** + 回收站到期清理 + `.part` 残留清理）
 11. 单测：store / 权限矩阵（管理员 vs 成员 vs 只读 vs 非成员）/ 树构建 / **同名去重并发冲突重试** / **「当前结论」唯一性** / **未读时间戳（含管理员为 0、默认节点不算已读）** / **讨论撤回窗口** / 响应式断点
 12. **（v0.11）`agent/collab/sla.py`**：任务状态推导（**不落库**）+ 有效截止时间 + 临期 / 逾期扫描（注册到既有**调度器** `agent/tools/scheduler/`，`interval`，**每分钟**）+ 升级判定与 `remind_*` / `escalate_at` 去重位维护
 13. **（v0.11）时限与流转闭环**：拉人 / 流转时设**响应时限** → 发讨论 / 传文件**隐式打点**（响应体带 `need_handle_deadline`）→ 弹层设**处理时限** → 「🕒 改期」（必填理由 + 写 `task_changes`）→ 「✅ 完成并流转」（选下一节点 + 负责人 + 注册 `node_members` + 建任务 + 关闭其余任务）→ 逾期三级提醒 + 发起人处置（催办 / 改派 / 关闭）
@@ -1922,6 +1943,7 @@ def _collab_node_can_edit(flow: dict, node: dict, userid: str) -> bool:
 15.11 **（v0.25）上游 CowAgent v2.2.0 同步适配**（§0.19，决策 84~87）：① **接入方式改为模块化** —— `channel/web/api/collab.py` + URLS 表注册 + `static/js/views/collab.js`（+ i18n），**不再新建** `collab_api.py` / `collab.html` / `collab.js` / `collab.css`；② **`collab_root()` / `collab_db()` 基于 `shared_root()`**（identity 模型）；③ **复用公共件**替换自研（`token_bucket` 限流 / `singleton` 单实例锁 / `atomic_write` 原子写 / `permission_checker` 权限 / `tmp_dir` 临时目录）；④ i18n + 品牌与命名对齐；⑤ 修正风险 19 与全部旧行号引用
 > ⚠️ 本条 ① 里的 `static/js/views/collab.js` 已在 **v0.26 修正为独立页三件套**（`collab.html` + `static/js/pages/collab.js` + `static/css/collab.css`），见 15.12 / §0.20。
 15.12 **（v0.26）二次深挖修正**（§0.20，决策 88；修正决策 84 / 86）：① **页面形态纠正** —— `/collab` 按**独立页三件套**（`collab.html` + `static/js/pages/collab.js` + `static/css/collab.css`），**不用** `views/collab.js`（那是应用内视图）；② **独立页服务范式**照 `AnalysisPageHandler`（`?code=` 换票 / 会话 / 重定向 / 普通浏览器渲染 + 密码登录框 / `{{CACHE_BUST}}`）；③ **入口不加控制台侧边栏**；④ **i18n 修正为「中文为准」**（独立页不接控制台 i18n）；⑤ **管理员口径**复用 `_is_admin_user()`（`session_` 前缀）；⑥ **调度器**点名 `agent/tools/scheduler/`（`interval`）；⑦ 清理 §7 / §8.1 / §13 / §14 中随决策 83 失效的「置灰 / 流程动态仅发起人可见」表述
+15.13 **（v0.27）交互级对照 + 逐功能核查**（§0.21，决策 89）：① **更正 singleton 误用** —— `common/singleton.py` 是进程内单例装饰器，单实例锁改为自实现 `collab.lock`；② **补显式响应入口**（提醒条「我已响应」按钮，与隐式打点等价）；③ **补发起流程表单的通知复选**；④ **token_bucket 用法精确化**（按用户建桶，默认 10/分钟）与 **SQLite 既有范式引用**；⑤ **调度器 interval 单位 = 秒**（每分钟 = 60）；⑥ **补两条边界**：不接入控制台权限管理页、讨论不做 Markdown 渲染
 
 ### Phase 2 — 通知与体验
 16. `agent/collab/notify.py`：拉人 / 新讨论 / 新批注 / 阶段结果 / @提及 / **删除阶段结果 / 删除他人讨论 / 移出成员**（全部即时推送，**管理员操作不推送**）+ 每分钟推送上限
@@ -2019,6 +2041,7 @@ def _collab_node_can_edit(flow: dict, node: dict, userid: str) -> bool:
 | **86** | **i18n 策略**（v0.25；**v0.26 修正**） | ✅ `/collab` 是**独立页**（与 `/analysis` 同级）→ **不接控制台 i18n**（已核实 `/analysis` 亦未接：`pages/analysis.js` 无 `t()` 调用、`analysis.html` 不加载 `core/i18n.js`），**中文为准**；若未来控制台要求双语，再按 `views/kingdee-i18n.js` 的方式补 | 独立页自带外壳、不进应用内 i18n 运行时（决策 86 / §0.20） |
 | **87** | **命名与品牌**（v0.25） | ✅ 前台统一称「**线上协作流程**」，与既有「**多 Agent 协作**」（`agent/multiagent/`、`agent/team.py`）明确区分；页面标题 / 菜单名遵循控制台品牌「**揽盛电气智能体**」 | 控制台已存在「协作」语义（AI 与 AI 协作），两者混称会让用户无法判断入口（决策 87 / §0.19） |
 | **88** | **独立页形态与入口**（v0.26） | ✅ `/collab` 采用**独立页**（`collab.html` + `static/js/pages/collab.js` + `static/css/collab.css`）；**不进**控制台应用内路由与侧边栏（已核实 `/analysis` 同样不在 `core/nav.js`）；入口 = **企微菜单（`wecom_open_pages`）+ 直链 URL**；页面服务照 `AnalysisPageHandler`（`?code=` 换票 → 会话 → 重定向；普通浏览器渲染 + 密码登录框） | `views/` + `nav.js` + `router.js` 是**应用内视图**通道，独立页复用它们会与"单一入口"和外壳设计冲突（决策 88 / §0.20） |
+| **89** | **响应入口形态**（v0.27） | ✅ **双入口等价**：① 隐式打点（发讨论 / 传文件，§13.5）；② 提醒条上用户可见的「**✅ 我已响应 · 设定处理时限**」按钮 —— 两者都写 `responded_at` 并进入设处理时限流程；纯表情 / 空文本两者都不算 | 用户在"不知道该发什么"时无从响应，会卡在逾期；原型已有该按钮，方案原缺（决策 89 / §13.5） |
 | **58** | **「改状态」的范围与联动**（v0.14） | ✅ **保留四态自由切换**（不强制走完成并流转）；但改为「已完成 / 已关闭」时**同事务关闭该节点全部未完成任务**（`closed_reason='node_done'` / `'node_closed'`）+ 通知本人 + 写 `events`；切回**不复活**；归档流程拒绝。⚠️ 因此「完成并流转」由"唯一路径"**改为"推荐路径"** | 用户确认实现最简；联动关闭是**必须的补丁**，否则进度与任务双口径打架（决策 58 / §13.14） |
 | **59** | **SLA 阈值是否可配**（v0.14） | ✅ **一期写死**为 `agent/collab/sla.py` 顶部**模块常量**（`RESPOND_DUE_SOON` 4h / `HANDLE_DUE_SOON` 2h / `ESCALATE_AFTER` 30min / `NEED_DEADLINE_REMIND_EVERY` 24h），**不进 config**、**禁止散落魔法数字** | 项目没有热加载配置的习惯；集中一处便于日后开放（决策 59） |
 | **60** | **「每天一次」提醒的界定**（v0.14） | ✅ **滚动 24 小时**：`now - remind_handle_at >= 24h` 即再推（`remind_handle_at=0` 视为从未推过）；**不按自然日** | 不依赖定时任务跑到哪个点、不因重启而抖，也无需额外存"当天已推"标记（决策 60） |
