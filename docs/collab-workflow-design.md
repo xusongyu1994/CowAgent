@@ -1,6 +1,6 @@
 # 企微线上协作流程 · 实施方案
 
-> 版本：**v0.25**（共 87 项决策，见 §12.1；十轮审查 + 三次需求变更 + 一次上游同步适配（CowAgent v2.2.0）记录见 §0）
+> 版本：**v0.26**（共 88 项决策，见 §12.1；十轮审查 + 三次需求变更 + 两次上游同步适配（CowAgent v2.2.0）记录见 §0）
 > 状态：**方案待评审通过 → 可进入开发**（原型已出并通过脚本冒烟测试）
 > 适用范围：`CowAgent` Web 控制台新增的**唯一页面** —— **协作流程页 `/collab`**（企微菜单**只此一个入口**）。文件管理（含"按线上协作流程查找文件"）是**该页中栏的一个 Tab**，见 §8.4。
 > 关联原型：`prototype/collab-workflow-prototype.html`（单一三栏布局 + 响应式收缩）
@@ -105,7 +105,7 @@
 >
 > **v0.17 变更说明（第八轮核查：导航入口重构）** ★ 起因：原型用起来"乱" —— 同一件事有三套入口：
 > ① 顶部**演示脚手架**（导航条 + 变更点 + URL 条）**收进顶栏「ℹ 原型说明」抽屉**（默认收起）；
-> ② 导航定稿**三层**：**顶栏 = 跨流程**（＠ 我的待办 / 📁 全部文件 / ＋ 发起流程 / 用户）· **左栏 = 只负责选流程**（**底部不再放跨流程入口**）· **中栏 = 当前流程内的视图**（**固定四 Tab**，无权限的那项**置灰而非隐藏**）；
+        **v0.24 起四项全部对流程成员可见**（「操作记录」随决策 83 放开；原"无权限置灰"口径废止）
 > ③ **「📁 文件」拆成两个语义入口**：中栏 = 当前流程的文件；顶栏 = 全部文件（跨流程检索）；**面板内删除"范围切换"**；
 > ④ 修掉重构暴露的 2 个死胡同：**「📁 文件」里没有 Tab 条（进去出不来）**、**跨流程态右栏错显"当前流程的节点详情"**。详见 **§0.12**。
 >
@@ -590,17 +590,35 @@
 
 | # | 议题 | ✅ 结论 | 落点 |
 |---|------|--------|------|
-| 1 | **接入方式** | ✅ 改按 v2.2.0 约定：`channel/web/api/collab.py`（一视图一模块）+ URLS 表注册 + `static/js/views/collab.js`（+ i18n）；**不新建** `collab_api.py` / `collab.html` / `collab.js` / `collab.css`；认证 / 上传 / 预览令牌 / 路径白名单**复用** `core/_common.py` | §3、§7、决策 84 |
+| 1 | **接入方式** | ✅ 改按 v2.2.0 约定：后端 `channel/web/api/collab.py`（一视图一模块）+ `web_channel.py` **URLS 表**注册；页面按**独立页三件套**（`collab.html` + `static/js/pages/collab.js` + `static/css/collab.css`，照 `/analysis`）；**不新建** `collab_api.py`；认证 / 上传 / 预览令牌 / 路径白名单复用 `core/_common.py`（**v0.26 修正**：不用 `views/collab.js` —— `views/` 是应用内视图） | §3、§7、决策 84 / 88 |
 | 2 | **数据根目录** | ✅ `collab_root()` / `collab_db()` **基于 `shared_root()`**（协作数据跨 Agent 共享）；`collab_files_root` 缺省 = `shared_root()/collab`，**不挂 per-agent `state_root()`** | §5.1、决策 85 |
 | 3 | **现状表行号** | ✅ v2.2.0 后：企微免密登录迁至 `api/kingdee.py`（L60/L106/L140/L173）、白名单 `config.py` L282、文件通道 `api/files.py` + `core/_common.py` `_serve_allowed_roots()` L836、路径清洗 L567/L595、`state_dir` L48/L69/L83/L238/L254 → **一律改为符号引用 + 现状行号** | §3.1 |
 | 4 | **复用公共件（替代自研）** | ✅ 通知限流 → `common/token_bucket.py`；单实例锁 → `common/singleton.py`；原子写 → `common/atomic_write.py`；权限判定 → `common/permission_checker.py`；临时目录 → `common/tmp_dir.py` | §7、§10 |
 | 5 | **企微免密入口增强** | ✅ 复用「菜单 URL 直带 `?code=` → 后端换票」（`api/pages.py` / `ChatHandler`）+ `state` 校验（`_validate_wecom_state`）+ 落地视图 `?target=`；`/auth/wecom/*` 四路由保留 | §9、决策 87 |
-| 6 | **i18n** | ✅ 走 `common/i18n.py` + `static/js/views/collab-i18n.js`（照 `views/kingdee-i18n.js` 先例）；原型不体现语言切换 | §8、决策 86 |
+| 6 | **i18n** | ✅ 独立页**不接**控制台 i18n（已核实 `/analysis` 亦未接：`pages/analysis.js` 无 `t()`、`analysis.html` 不加载 `core/i18n.js`）→ **中文为准**；未来要双语再按 `views/kingdee-i18n.js` 方式补（**v0.26 修正**，见决策 86） | §8、决策 86 |
 | 7 | **命名与品牌** | ✅ 前台统一「**线上协作流程**」，与「**多 Agent 协作**」（`agent/multiagent/`）区分；页面标题 / 菜单名遵循品牌「**揽盛电气智能体**」 | 决策 87 |
 | 8 | **服务端上限核对（已核实：无冲突）** | ✅ 核查结论：① v2.2.0 的「外部下载限大小与总耗时」位于 `common/media_download.py`（`MAX_IMAGE_BYTES` 20MB / `MAX_FILE_BYTES` 100MB / `max_seconds`），只约束**出站抓取外部 URL 媒体**，与协作文件无关；② `core/_common.py` 的 `MAX_LOCAL_IMPORT_BYTES` = **512MB**（注释明确「与 HTTP 服务器 multipart body 上限一致」）约束**上传请求体** —— 协作单文件上限 **50MB** 在安全区内；③ **打包下载是响应流式**，不受上述任何限制 → **无需放宽全局配置**；可选优化：zip 每卷 ≤ 512MB（便于单包落地） | §8.4、§10 |
 | 9 | **修正历史条目** | ✅ 风险 19「图片预览复用 `/preview`」与决策 24「不复用 `/preview`」矛盾 → 统一为**独立通道 `/api/collab/file?inline=1`**；`collab_dir()` 命名统一为 `collab_root()` | §10、§5.1 |
 
 > **原型（`prototype/collab-workflow-prototype.html`）本轮不动**：原型是产品 UI 演示，与代码结构解耦；v2.2.0 的模块化重构不影响三栏布局、交互与文案。可选微调 = 顶栏品牌注记（非必须）。
+
+---
+
+### 0.20 二次深挖修正：独立页形态与既有能力对齐（v0.26）
+
+> 起因：用户要求「继续检查是否还有遗漏」。本轮**逐项验证方案对既有代码的假设**（而非只扫旧路径），发现 7 处需要修正/补充 —— 其中 **1 处是 v0.25 自身的判断错误**（页面形态）。
+
+| # | 议题 | ✅ 结论 | 落点 |
+|---|------|--------|------|
+| 1 | **页面形态（v0.25 判错）** | ✅ `/collab` 是**独立页**（与 `/analysis` 同级）：`channel/web/collab.html`（自带外壳：本地 vendor Tailwind / FontAwesome / Inter + `assets/css/collab.css` + 注入 `WECOM_CONFIGURED` + 密码登录框 + `{{CACHE_BUST}}`）+ `static/js/pages/collab.js` + `static/css/collab.css`；**不用 `views/collab.js`**（`views/` 是应用内视图，走 `nav.js` + `router.js` + 控制台外壳） | §3.2、§7、决策 84 / 88 |
+| 2 | **独立页服务模式** | ✅ 照 `AnalysisPageHandler`（`channel/web/api/kingdee.py` **L404**）：企微 `?code=` → 换票 → 建会话 → `_js_redirect_page`；企微浏览器未认证 → OAuth；**普通浏览器未认证 → 渲染页面 + 前端密码登录框**；HTML 内 `{{CACHE_BUST}}` 打资源戳 | §3.1、§8.8 |
+| 3 | **入口与导航** | ✅ 入口 = **企微菜单（`wecom_open_pages`）+ 直链 URL**；**不加**控制台侧边栏 / 应用内路由（已核实 `/analysis` 亦不在 `core/nav.js`）；资源经 `/assets/*` 映射到 `static/` | 决策 88 |
+| 4 | **i18n（决策 86 修正）** | ✅ 独立页**不接**控制台 i18n（已核实 `analysis.js` 无 `t()`、`analysis.html` 不加载 `core/i18n.js`）→ **中文为准**；未来要双语再按 `views/kingdee-i18n.js` 的方式补 | 决策 86 |
+| 5 | **管理员口径** | ✅ 复用 `common/permission_checker._is_admin_user()`（**web 管理员 = `session_` 前缀**，`WEB_ADMIN_SESSION_PREFIX`）；与金蝶业务级 `super_admins`（`_is_super_admin()`）是**两个概念**；会话与密码判定在 `core/_common.py`（`_get_web_password()` L186 / `_check_auth()` L307 / `_require_auth()` L318） | §6.1、§6.2 |
+| 6 | **调度器** | ✅ 既有调度器在 `agent/tools/scheduler/scheduler_service.py`（`schedule_type` = `once` / `cron` / **`interval`**），注册入口 `integration.init_scheduler()` → **SLA 每分钟扫描用 `interval`** | §7、§13 |
+| 7 | **陈旧表述清理** | ✅ 随决策 83（v0.24 全员可见）订正：§7 第 7 条与 §8.1 的「无权限置灰」、§13「流程动态仅发起人可见」、§14「操作记录测试」的置灰断言；§8.5 面板示意图标题改为「操作记录」 | §7、§8.1、§8.5、§13、§14 |
+
+> **原型（`prototype/collab-workflow-prototype.html`）仍不受影响**：本次发现全部落在"方案 ↔ 代码"的落点层，原型的界面与交互无一处与之冲突（已复扫：无 `views/`、`nav.js`、i18n 等实现细节引用）。
 
 ---
 ## 1. 背景与目标
@@ -684,16 +702,18 @@
 |----|---------|------|
 | 企微免密登录 | OAuth `code` → `userid`；无状态 HMAC 会话 Cookie | `channel/web/api/kingdee.py`：`_get_wecom_open_pages` L60、`_check_wecom_auth` L106、`_create_wecom_session` L140、`_wecom_get_userid_by_code` L173（`core/_common.py` L323-329 以**延迟导入**复用，避开循环依赖） |
 | OAuth 入口/回调 | `/auth/wecom/start?target=xxx` → `/auth/wecom/callback` → JS 重定向（已解决 PNA 追溯问题）；**v2.2.0 增「菜单 URL 直带 `?code=` → 后端换票」**（免跳转）+ **`state` 校验**（`_validate_wecom_state`）+ 落地视图 `target` | URLS 表 `web_channel.py` **L105-108**（`/auth/wecom/{start,callback,check,logout}`）；`api/pages.py` 的 `ChatHandler` 分支；`api/kingdee.py` |
-| 独立页面渲染 | 读 HTML → 注入缓存版本号 / 企微标记 → 返回；**资产戳 / 缓存策略集中在 `core/template.py`** | `channel/web/api/pages.py`（页面注册：`/`、`/chat`、`/analysis` L100 等）；`channel/web/core/template.py` |
+| 独立页面渲染（**独立页范式**） | 页面在 URLS 表注册；服务实现：**企微 `?code=` → 后端换票 → 建会话 → `_js_redirect_page`**；企微浏览器未认证 → OAuth；**普通浏览器未认证 → 渲染 HTML + 前端密码登录框**；HTML 内用 `{{CACHE_BUST}}` 打资源戳 | 注册：URLS 表 `web_channel.py` L100（`/analysis` → `AnalysisPageHandler`）；**实现：`channel/web/api/kingdee.py` L404**；控制台外壳是另一套装配（`core/template.py`），独立页不经此路 |
 | 页面白名单 | `wecom_open_pages: {view_id: 显示名}` | `config.py` **L282**、`_get_wecom_open_pages()` **`api/kingdee.py` L60** |
 | 通讯录同步 | 拉全量部门 + 用户（含部门完整路径），落 `tmp/permission_config.json` 的 `users` | `channel/web/api/permissions.py`（`PermissionsSyncUsersHandler` / `_fetch_all_users_from_api`） |
 | 姓名映射缓存 | `userid ↔ 姓名`，文件缓存 `tmp/wecom_name_mapping.json` | `agent/tools/wechatcom/wecom_app_send.py`（`_ensure_name_mapping` / `_build_name_mapping`；**行号一律以符号为准**） |
 | 文件上传/预览/下载 | `/upload`、`/uploads/(.*)`、`/api/file`、`/preview/(.+)` | **`channel/web/api/files.py`**（`UploadHandler` / `UploadsHandler` / `FileServeHandler` / `PreviewHandler`）+ **`core/_common.py` 的 `_serve_allowed_roots()` L836**（含 `web_file_serve_root` / 工作区 / **已打开项目目录**） |
 | 路径安全 | 上传相对路径清洗、目录穿越校验 | **`core/_common.py`**：`_sanitize_upload_relative_path` **L567**、`_is_within_directory` **L595** |
-| 主动发企微消息 | 应用消息（文本/文件），支持姓名→userid | `agent/tools/wechatcom/wecom_app_send.py` |
+| 主动发企微消息 | 应用消息（文本 / 文件；v2.2.0 起支持文件与视频回复并**校验企业 ID**），支持姓名→userid | `agent/tools/wechatcom/wecom_app_send.py`（`WecomAppSend`、`_get_channel` L325）；**渠道类 `channel/wechatcom/wechatcomapp_channel.py` 的 `WechatComAppChannel`** |
 | 动态注册渠道单例 | 取 `WechatComAppChannel` 实例拿 `client` | 同上 `_get_channel`（**以符号为准，不再写行号**） |
 | 图谱可视化 | 无依赖 SVG 力导向（桌面端）、d3（Web 端） | `desktop/src/renderer/src/components/KnowledgeGraph.tsx`、**`channel/web/static/js/views/knowledge.js`**（`loadKnowledgeGraph`） |
 | 数据根目录 | **identity-aware** 命名助手（v2.2.0：`RuntimeIdentity`） | `common/state_dir.py`：`state_root` **L48**、`shared_root` **L69**、`user_root` **L83**、`tmp_dir` **L238**、`memory_index_db` **L254**（`skills_dir` L147 / `knowledge_dir` L151 … 均带 `identity` 参数） |
+| 调度器 | 定时任务：`schedule_type` = `once` / `cron` / **`interval`**；`init_scheduler()` 注册入口 | `agent/tools/scheduler/scheduler_service.py`、`agent/tools/scheduler/integration.py`（Web 侧视图是 `channel/web/api/scheduler.py`，与协作无关） |
+| 管理员口径 | **web 管理员 = `session_` 前缀用户**（`WEB_ADMIN_SESSION_PREFIX`）；与金蝶业务级 `super_admins` 名单是**两个概念，勿混用** | `common/permission_checker.py`：`_is_admin_user()` L160、`_is_super_admin()` L264；会话 / 密码：`core/_common.py` `_get_web_password()` L186、`_check_auth()` L307、`_require_auth()` L318 |
 
 ### 3.2 真正要新增
 
@@ -701,11 +721,11 @@
 |----|------------|------|
 | 数据层 | `agent/collab/store.py` | **独立 SQLite**：`flows` / `nodes` / `flow_members` / `node_members` / `messages` / `files` / `events` / **`flow_reads`** / **`node_tasks`** / **`task_changes`**（v0.11 起共**十张表**，后两张见 §13.2）+ CRUD + 树构建 + 事务（创建节点 + 成员继承 + 操作日志） |
 | 业务层 | `agent/collab/service.py` | 建流程、建/下延/改名/删除节点、拉人/移人、发讨论、发批注、上传附件、阶段结果、整树查询、权限校验；**v0.11：派活（响应时限）、响应打点、处理时限、改期、完成并流转、发起人处置**（§13） |
-| **时限层** | `agent/collab/sla.py`（新增，v0.11） | **任务状态推导**（不落库）、**有效截止时间计算**、**临期 / 逾期扫描**（注册到既有 `SchedulerService`，每分钟）、**升级判定与去重位维护**；**所有状态判断收敛到这一个模块**，禁止散落各处 |
+| **时限层** | `agent/collab/sla.py`（新增，v0.11） | **任务状态推导**（不落库）、**有效截止时间计算**、**临期 / 逾期扫描**（注册到既有**调度器** `agent/tools/scheduler/scheduler_service.py`，`schedule_type='interval'`，每分钟）、**升级判定与去重位维护**；**所有状态判断收敛到这一个模块**，禁止散落各处 |
 | **文件层** | `agent/collab/files.py`（新增，v0.5） | **同名去重（`display_name`）**、唯一磁盘名、配额校验、软删除/恢复/彻底删除、**单流程 + 跨流程文件查询（同一函数，传 `flow_ids` 范围）**、筛选器候选值（facets）、**批量打包 zip（流式 + 自动分卷）**、回收站到期清理后台任务 |
 | 通知层 | `agent/collab/notify.py` | 复用 `WechatComAppChannel` 发企微应用消息（拉人 / 新讨论 / 新批注 / 阶段结果 / @提及，**全部即时推送**）；**v0.11 增 12 类时限与流转通知 + v0.13 增「流程已归档（任务被关闭）」= 共 13 类**（§13.9），其中提醒类**靠 `node_tasks` 的去重位**保证同一任务同类只推一次（去重位设计见 §13.9） |
 | API | **`channel/web/api/collab.py`**（一视图一模块） | 约 18 个 Handler；路由加入 **`web_channel.py` 的 URLS 表**（归入「Custom business features」区块，L72 起）；`build_app()` 按**名字**在该模块 globals 里解析 handler → 必须在文件顶部 import |
-| 页面 | **`channel/web/api/pages.py`**（页面注册；参照 `/analysis` L100）<br>**`channel/web/static/js/views/collab.js`**<br>**`channel/web/static/js/views/collab-i18n.js`**（可选，见决策 86） | **单一三栏布局**（流程列表 / 节点树·图谱·**文件** / 节点·**文件**详情）+ 拉人弹窗；样式并入 `channel/web/static/`，**资产戳 / 缓存由 `core/template.py` 统一处理**；**窄屏按 CSS 纵向堆叠，不写移动端专属页面** |
+| 页面（**独立页三件套**，照 `/analysis` 先例） | **`channel/web/collab.html`**（自带外壳：本地 vendor Tailwind / FontAwesome / Inter + `assets/css/collab.css` + 注入 `WECOM_CONFIGURED` + 密码登录框 + `{{CACHE_BUST}}` 资源戳）<br>**`channel/web/static/js/pages/collab.js`**<br>**`channel/web/static/css/collab.css`** | **单一三栏布局**（流程列表 / 节点树·图谱·**文件** / 节点·**文件**详情）+ 拉人弹窗；HTML 中按 `assets/...` 引用（服务端映射到 `static/`）；**独立页不走应用内路由与侧边栏 → 无需改 `core/nav.js` / `core/router.js`**；**窄屏按 CSS 纵向堆叠，不写移动端专属页面** |
 | 路径 | `common/state_dir.py` | 新增 **`collab_root()` / `collab_db()`**（沿用 identity-aware 风格，**基于 `shared_root()`**；缺省 `collab_files_root = shared_root()/collab`，见决策 85） |
 | 配置 | `config.py` | 新增 `collab_enabled`、`collab_notify`（即时推送总开关）；`wecom_open_pages` **只增 `"collab": "线上协作流程"`**（v0.9：不再有 `"docs"` 入口）。现有键参照 L276-282：`web_port` / `web_password` / `web_file_serve_root` / `wecom_open_pages` |
 | 测试 | `tests/test_collab_*.py` | store CRUD、树构建、权限校验、通知去重、**跨流程检索的范围隔离** |
@@ -1132,7 +1152,7 @@ ON CONFLICT(flow_id, userid) DO UPDATE SET last_read_at = excluded.last_read_at;
 
 | 层 | 判断 | 说明 |
 |----|------|------|
-| **⓪ 管理员旁路** | userid 是否为 `session_web_admin`（`web_password` 登录） | **命中即超级成员**：跳过 ②③ 的全部限制，可查看**所有**流程、对**任何节点可编辑**、可归档/移出成员/清空回收站。操作写入 `events` 且显示为"管理员" |
+| **⓪ 管理员旁路** | userid 是否为 web 管理员：**`session_` 前缀**（`WEB_ADMIN_SESSION_PREFIX`，`web_password` 登录）—— **复用 `common/permission_checker._is_admin_user()`**，不自行判断 | **命中即超级成员**：跳过 ②③ 的全部限制，可查看**所有**流程、对**任何节点可编辑**、可归档 / 移出成员 / 清空回收站。操作写入 `events` 且显示为"管理员" |
 | **① 认证层** | `_check_wecom_auth()` 或 `_check_auth()`（密码管理员） | 未认证 → 企微浏览器自动跳 OAuth（`target=collab`）；普通浏览器显示密码登录框 |
 | **② 流程层（可见性）** | 当前 userid 是否在 `flow_members` 中 | **不在 → 一律拒绝**（不区分"不存在"与"无权限"，防流程探测）；在 → **可见该流程全部节点与全部内容** |
 | **③ 节点层（编辑权）** | ① 是否在 `node_members` ② 是否为该节点创建者 ③ **是否为流程发起人** | 命中**任一** → **可编辑**；否则 → **只读**（完全只读，见 6.2 矩阵） |
@@ -1367,7 +1387,7 @@ def _collab_node_can_edit(flow: dict, node: dict, userid: str) -> bool:
      · **左栏 = 只负责选流程**：搜索 + 「我参与的 / 我发起的」Tab + 流程卡片 + 归档折叠；
        **底部不再放任何跨流程入口**（原「＠ 我的待办」「📁 文件」已上移顶栏）
      · **中栏 = 当前流程内的视图切换**：**固定四 Tab** [🌳 节点树] [🕸 关系图] [📁 文件] [📜 操作记录]；
-       无权限的那项**置灰而非隐藏**（PC 有 tooltip，**移动端点击时 toast 说明原因**）
+        **v0.24 起四项全部对流程成员可见**（「操作记录」随决策 83 放开；原"无权限置灰"口径废止）
       · 「＠ 我的待办」「＋ 发起流程」**不在中栏 Tab 内**（跨流程，属顶栏）；
         它们与"全部文件"一样，在**中栏整体替换视图**，右侧槽位统一放「← 返回节点树」
    · 🔴 **中栏头位置恒定（v0.18，决策 71）** —— 四个视图**共用同一个头部，按钮位置永不移动**：
@@ -1665,7 +1685,7 @@ def _collab_node_can_edit(flow: dict, node: dict, userid: str) -> bool:
 
 ```
 ┌────────────────────────────────────────────────┐
-│ 📜 流程动态                                     │
+│ 📜 操作记录                                     │
 ├────────────────────────────────────────────────┤
 │ 今天 14:32  张三  把 ② 资质审核 改名为 ③ 资质复查 │
 │ 今天 14:10  李四  在 ② 资质审核 上传了 营业执照.pdf│
@@ -1875,15 +1895,15 @@ def _collab_node_can_edit(flow: dict, node: dict, userid: str) -> bool:
 4. **`agent/collab/files.py`**：`_resolve_display_name` 同名去重（**事务 + `IntegrityError` 重试**）、唯一磁盘名、配额校验、**软删除/恢复/彻底删除/清空回收站**、流程级与跨流程查询、**流式打包 zip（自动分卷）**、**内联预览白名单**。**上限核对（v0.25）**：上传受服务器 **multipart body 上限 512MB**（`core/_common.py` `MAX_LOCAL_IMPORT_BYTES`）约束，单文件上限取 `collab_max_file_mb` = 50MB（安全区内）；**打包下载为响应流式**，不受 multipart / 外部抓取限制，zip 分卷规则保持（200 文件 / 2GB 总包），**每卷可选 ≤ 512MB**
 5. **`agent/collab/reads.py`**（或并入 service）：未读计算（时间戳比对，**管理员返回 0**）+ 已读标记（写到节点最新消息时间，**仅主动点击触发**）+ 归档清未读
 6. **`channel/web/api/collab.py`**（一视图一模块）+ **URLS 表注册**（`web_channel.py` 的 Custom business 区块；`build_app()` 按名字解析 handler，需在顶部 import）（节点响应带 `can_edit`，文件响应带 `can_delete`，列表带 `unread`，**新增 `/api/collab/flow/events`**）
-7. 前端 **`channel/web/static/js/views/collab.js`**（+ `views/collab-i18n.js`）：**顶栏 + 单一三栏**（**v0.17 定稿**）—— **顶栏 = 跨流程入口**（ℹ 原型说明（演示抽屉）/ ＠ 我的待办 / 📁 全部文件 / ＋ 发起流程 / 用户）；**左栏 = 只负责选流程**（搜索 / Tab / 归档分组；**v0.10 起无流程复选框**，**v0.17 起无底部跨流程入口**）；**中栏 = 当前流程内的视图**（树 · 图谱 · **当前流程文件** · 流程动态，**固定四 Tab**，无权限的「动态」**置灰**）；跨流程态（全部文件 / 我的待办）与发起表单**在中栏整体替换视图**；右栏 节点详情 · **文件详情** · 跨流程态**空态占位** + 拉人弹窗 + **「可编辑·只读」标识** + **文件下载/删除/来源跳转** + **窄屏 Flex 纵向堆叠 + 表格降级为卡片 + 浮动「↑ 节点树」按钮**
+7. 前端**独立页三件套**（`collab.html` + `static/js/pages/collab.js` + `static/css/collab.css`，照 `/analysis`）：**顶栏 + 单一三栏**（**v0.17 定稿**）—— **顶栏 = 跨流程入口**（ℹ 原型说明（演示抽屉）/ ＠ 我的待办 / 📁 全部文件 / ＋ 发起流程 / 用户）；**左栏 = 只负责选流程**（搜索 / Tab / 归档分组；**v0.10 起无流程复选框**，**v0.17 起无底部跨流程入口**）；**中栏 = 当前流程内的视图**（节点树 · 关系图 · **当前流程文件** · **操作记录**，**固定四 Tab**，全部成员可见 —— v0.24 决策 83）；跨流程态（全部文件 / 我的待办）与发起表单**在中栏整体替换视图**；右栏 节点详情 · **文件详情** · 跨流程态**空态占位** + 拉人弹窗 + **「可编辑·只读」标识** + **文件下载/删除/来源跳转** + **窄屏 Flex 纵向堆叠 + 表格降级为卡片 + 浮动「↑ 节点树」按钮**
 8. 前端补齐：节点**改名/改描述**、**全部展开/收起**、**讨论撤回/删除**、管理员视图横幅 + **管理员徽标**、**「📜 操作记录」面板**（原「流程动态」，v0.18 改名）、**「＠ 我的待办」面板**（v0.11 升级 / v0.12 并入「提及」，**入口在顶栏**）
-8.1 **（v0.9 / v0.10 / v0.17）文件管理**：**两个入口**（中栏「📁 文件」= 当前流程；顶栏「📁 全部文件」= 跨流程检索，**面板内不再有范围切换**）+ 分组·平铺 + **中栏「流程 ▾」多选筛选器**（仅在"全部文件"入口内）+ 节点/类型/上传人/时间筛选 + 回收站视图切换 + 右栏文件详情（含 `★ 标记为当前结论`、内联预览、来源跳转、回收站态恢复/彻底删除）；**不新增页面文件**，全部在 `views/collab.js` + `static/` 内实现（资产戳由 `core/template.py` 处理）
+8.1 **（v0.9 / v0.10 / v0.17）文件管理**：**两个入口**（中栏「📁 文件」= 当前流程；顶栏「📁 全部文件」= 跨流程检索，**面板内不再有范围切换**）+ 分组·平铺 + **中栏「流程 ▾」多选筛选器**（仅在"全部文件"入口内）+ 节点/类型/上传人/时间筛选 + 回收站视图切换 + 右栏文件详情（含 `★ 标记为当前结论`、内联预览、来源跳转、回收站态恢复/彻底删除）；**不新增页面文件**，全部在 `static/js/pages/collab.js` + `static/css/collab.css` 内实现（独立页外壳 `collab.html` 仅承载布局与资源引用）（资产戳由 `core/template.py` 处理）
 8.2 **（v0.17）导航组件复用**：抽出 `midTabs(f)` 作为**唯一的中栏 Tab 组件**，由「流程头（树形 / 图谱）· 文件面板 · 动态面板」共用 —— 避免再出现"某个视图里没有 Tab 条 → 进去出不来"（原「📁 文件」即此情况）
 8.2 **（v0.10）URL 状态同步**：`readUrl()` → 首屏渲染前解析；每次 `render()` 用 `history.replaceState` 写回；默认值不写入（§8.7）
 9. 企微入口：`wecom_open_pages` **只增 `"collab": "线上协作流程"`**；**复用 v2.2.0 链路** —— 菜单 URL 直带 `?code=` → 后端换票（`api/pages.py`）+ `state` 校验 + `?target=collab`；`/auth/wecom/*` 四路由保留
-10. 后台日任务：注册到既有 `SchedulerService`（回收站到期清理 + `.part` 残留清理）
+10. 后台任务：注册到既有**调度器** —— `agent/tools/scheduler/scheduler_service.py`（`schedule_type='interval'`；入口 `agent/tools/scheduler/integration.py` 的 `init_scheduler()`）（**SLA 逾期扫描：每分钟** + 回收站到期清理 + `.part` 残留清理）
 11. 单测：store / 权限矩阵（管理员 vs 成员 vs 只读 vs 非成员）/ 树构建 / **同名去重并发冲突重试** / **「当前结论」唯一性** / **未读时间戳（含管理员为 0、默认节点不算已读）** / **讨论撤回窗口** / 响应式断点
-12. **（v0.11）`agent/collab/sla.py`**：任务状态推导（**不落库**）+ 有效截止时间 + 临期 / 逾期扫描（注册到既有 `SchedulerService`，**每分钟**）+ 升级判定与 `remind_*` / `escalate_at` 去重位维护
+12. **（v0.11）`agent/collab/sla.py`**：任务状态推导（**不落库**）+ 有效截止时间 + 临期 / 逾期扫描（注册到既有**调度器** `agent/tools/scheduler/`，`interval`，**每分钟**）+ 升级判定与 `remind_*` / `escalate_at` 去重位维护
 13. **（v0.11）时限与流转闭环**：拉人 / 流转时设**响应时限** → 发讨论 / 传文件**隐式打点**（响应体带 `need_handle_deadline`）→ 弹层设**处理时限** → 「🕒 改期」（必填理由 + 写 `task_changes`）→ 「✅ 完成并流转」（选下一节点 + 负责人 + 注册 `node_members` + 建任务 + 关闭其余任务）→ 逾期三级提醒 + 发起人处置（催办 / 改派 / 关闭）
    - **（v0.12）流转补三个出口**：`流转到已有节点` / **`＋ 新建下一个节点`**（同事务先建子节点）/ **`仅标记完成（不流转）`**；
    - **（v0.12）复用任务行必须重置全部状态位**（拉人 / 流转 / 改派三处都要），否则被派活者拿到一条永远"已关闭"的任务（§13.6）；
@@ -1900,6 +1920,8 @@ def _collab_node_can_edit(flow: dict, node: dict, userid: str) -> bool:
 15.9 **（v0.23）渲染保滚**（§8.9#16~17 / §0.17，决策 82）：`render()` 前快照、后回放 `#stage` 内全部可滚动容器 `scrollTop`（+ 整页滚动）—— 修掉"右栏按钮一点就跳回顶部"；发送讨论 / 批注后滚到底部、自动展开被批注的收起讨论；无头浏览器逐项实测通过
 15.10 **（v0.24）操作记录全员可见**（§8.5 / §0.18，决策 83）：「📜 操作记录」从「仅发起人 / 管理员」放开为**全流程成员可见**——移除置灰 Tab / 锁定占位 / 权限横幅 / canSeeEvents；接口对 flow_members 返回 200、非成员仍拒绝
 15.11 **（v0.25）上游 CowAgent v2.2.0 同步适配**（§0.19，决策 84~87）：① **接入方式改为模块化** —— `channel/web/api/collab.py` + URLS 表注册 + `static/js/views/collab.js`（+ i18n），**不再新建** `collab_api.py` / `collab.html` / `collab.js` / `collab.css`；② **`collab_root()` / `collab_db()` 基于 `shared_root()`**（identity 模型）；③ **复用公共件**替换自研（`token_bucket` 限流 / `singleton` 单实例锁 / `atomic_write` 原子写 / `permission_checker` 权限 / `tmp_dir` 临时目录）；④ i18n + 品牌与命名对齐；⑤ 修正风险 19 与全部旧行号引用
+> ⚠️ 本条 ① 里的 `static/js/views/collab.js` 已在 **v0.26 修正为独立页三件套**（`collab.html` + `static/js/pages/collab.js` + `static/css/collab.css`），见 15.12 / §0.20。
+15.12 **（v0.26）二次深挖修正**（§0.20，决策 88；修正决策 84 / 86）：① **页面形态纠正** —— `/collab` 按**独立页三件套**（`collab.html` + `static/js/pages/collab.js` + `static/css/collab.css`），**不用** `views/collab.js`（那是应用内视图）；② **独立页服务范式**照 `AnalysisPageHandler`（`?code=` 换票 / 会话 / 重定向 / 普通浏览器渲染 + 密码登录框 / `{{CACHE_BUST}}`）；③ **入口不加控制台侧边栏**；④ **i18n 修正为「中文为准」**（独立页不接控制台 i18n）；⑤ **管理员口径**复用 `_is_admin_user()`（`session_` 前缀）；⑥ **调度器**点名 `agent/tools/scheduler/`（`interval`）；⑦ 清理 §7 / §8.1 / §13 / §14 中随决策 83 失效的「置灰 / 流程动态仅发起人可见」表述
 
 ### Phase 2 — 通知与体验
 16. `agent/collab/notify.py`：拉人 / 新讨论 / 新批注 / 阶段结果 / @提及 / **删除阶段结果 / 删除他人讨论 / 移出成员**（全部即时推送，**管理员操作不推送**）+ 每分钟推送上限
@@ -1992,10 +2014,11 @@ def _collab_node_can_edit(flow: dict, node: dict, userid: str) -> bool:
 | **81** | **右栏讨论区强化**（v0.22） | ✅ ① 右栏 **420 → 520px**；② 节点头**收纳折叠**（默认只留 标题+状态+可编辑标识+「ℹ 节点信息」开关；描述/成员/子节点进折叠块，默认收起；只读提示条常驻）；③ 输入框 **2 行起** + 聚焦高亮 + 「发送」文字按钮 + 📎/@ 主色 | 讨论是流程协作的核心产出，右栏是它的唯一承载区；输入框是讨论模块的动作入口，视觉权重必须与其地位匹配（决策 81 / §0.16） |
 | **82** | **渲染保滚（修"跳来跳去"）**（v0.23） | ✅ `render()` 快照 / 回放 `#stage` 内全部可滚动容器的 `scrollTop` + 整页滚动；发送讨论 / 批注后 `detailBody` 滚到底部；提交批注自动展开收起的讨论 | 右栏按钮全部触发全量重渲染，滚动丢失 = "每点一下就跳回顶部"，直接摧毁讨论区可用性（决策 82 / §0.17） |
 | **83** | **操作记录全员可见**（v0.24） | ✅ 「📜 操作记录」Tab 对**全流程成员**开放（节点成员 / 只读成员均可）；删除置灰 Tab、锁定占位、权限横幅与 canSeeEvents；接口对 flow_members 返回 200，非成员仍拒绝 | 原「避免被监视感」原则被用户否决 —— 留痕的价值正是全员可追溯；与「全流程可见」口径对齐（决策 83 / §0.18） |
-| **84** | **接入方式对齐 v2.2.0 模块化**（v0.25） | ✅ 后端 **`channel/web/api/collab.py`**（一视图一模块）+ **`web_channel.py` URLS 表**注册（Custom business 区块，L72 起）；前端 **`static/js/views/collab.js`**（+ `views/collab-i18n.js`）；**不新建** `collab_api.py` / `collab.html` / `collab.js` / `collab.css`；认证 / 上传 / 预览令牌 / 路径白名单复用 `core/_common.py` | 控制台已按 `core/`+`api/`+`views/` 模块化，旧方案的三件套落点已不存在（决策 84 / §0.19） |
+| **84** | **接入方式对齐 v2.2.0 模块化**（v0.25；**v0.26 修正页面形态**） | ✅ 后端 **`channel/web/api/collab.py`**（一视图一模块）+ **`web_channel.py` URLS 表**注册（Custom business 区块，L72 起）；页面按**独立页**落地（`collab.html` + `static/js/pages/collab.js` + `static/css/collab.css`，照 `/analysis`）；**不新建** `collab_api.py`；认证 / 上传 / 预览令牌 / 路径白名单复用 `core/_common.py` | `/collab` 与 `/analysis` 同属**独立页**（自带外壳、不走应用内路由与侧边栏）；`views/` 是应用内视图专用，故不用（决策 84 / §0.20） |
 | **85** | **协作数据根目录的定位**（v0.25） | ✅ `collab_root()` / `collab_db()` **基于 `shared_root()`**（协作数据跨 Agent 共享，非 per-agent）；`collab_files_root` 缺省 = `shared_root()/collab` | v2.2.0 的 `state_dir` 已是 identity-aware；挂 `state_root()` 会让协作数据随 Agent 分裂（决策 85 / §5.1） |
-| **86** | **i18n 策略**（v0.25） | ✅ 协作页文案走 `common/i18n.py` + `static/js/views/collab-i18n.js`（照 `views/kingdee-i18n.js` 先例）；中文为准、英文键补齐；**原型不体现语言切换** | 控制台已全面 i18n（语言 / 主题切换），新增页面不接会出现中英混排（决策 86 / §8） |
+| **86** | **i18n 策略**（v0.25；**v0.26 修正**） | ✅ `/collab` 是**独立页**（与 `/analysis` 同级）→ **不接控制台 i18n**（已核实 `/analysis` 亦未接：`pages/analysis.js` 无 `t()` 调用、`analysis.html` 不加载 `core/i18n.js`），**中文为准**；若未来控制台要求双语，再按 `views/kingdee-i18n.js` 的方式补 | 独立页自带外壳、不进应用内 i18n 运行时（决策 86 / §0.20） |
 | **87** | **命名与品牌**（v0.25） | ✅ 前台统一称「**线上协作流程**」，与既有「**多 Agent 协作**」（`agent/multiagent/`、`agent/team.py`）明确区分；页面标题 / 菜单名遵循控制台品牌「**揽盛电气智能体**」 | 控制台已存在「协作」语义（AI 与 AI 协作），两者混称会让用户无法判断入口（决策 87 / §0.19） |
+| **88** | **独立页形态与入口**（v0.26） | ✅ `/collab` 采用**独立页**（`collab.html` + `static/js/pages/collab.js` + `static/css/collab.css`）；**不进**控制台应用内路由与侧边栏（已核实 `/analysis` 同样不在 `core/nav.js`）；入口 = **企微菜单（`wecom_open_pages`）+ 直链 URL**；页面服务照 `AnalysisPageHandler`（`?code=` 换票 → 会话 → 重定向；普通浏览器渲染 + 密码登录框） | `views/` + `nav.js` + `router.js` 是**应用内视图**通道，独立页复用它们会与"单一入口"和外壳设计冲突（决策 88 / §0.20） |
 | **58** | **「改状态」的范围与联动**（v0.14） | ✅ **保留四态自由切换**（不强制走完成并流转）；但改为「已完成 / 已关闭」时**同事务关闭该节点全部未完成任务**（`closed_reason='node_done'` / `'node_closed'`）+ 通知本人 + 写 `events`；切回**不复活**；归档流程拒绝。⚠️ 因此「完成并流转」由"唯一路径"**改为"推荐路径"** | 用户确认实现最简；联动关闭是**必须的补丁**，否则进度与任务双口径打架（决策 58 / §13.14） |
 | **59** | **SLA 阈值是否可配**（v0.14） | ✅ **一期写死**为 `agent/collab/sla.py` 顶部**模块常量**（`RESPOND_DUE_SOON` 4h / `HANDLE_DUE_SOON` 2h / `ESCALATE_AFTER` 30min / `NEED_DEADLINE_REMIND_EVERY` 24h），**不进 config**、**禁止散落魔法数字** | 项目没有热加载配置的习惯；集中一处便于日后开放（决策 59） |
 | **60** | **「每天一次」提醒的界定**（v0.14） | ✅ **滚动 24 小时**：`now - remind_handle_at >= 24h` 即再推（`remind_handle_at=0` 视为从未推过）；**不按自然日** | 不依赖定时任务跑到哪个点、不因重启而抖，也无需额外存"当天已推"标记（决策 60） |
@@ -2290,7 +2313,7 @@ CREATE INDEX IF NOT EXISTS idx_task_changes ON task_changes(task_id, created_at 
 | 是否需审批 | **不需要**（确认结论：留痕但不审批） |
 | 会重置什么 | **清除该任务的 `remind_handle_at` / `escalate_at`**，即**改期后逾期状态解除、升级记录清零**，按新时限重新计 |
 | 会通知谁 | **派活人 + 该节点全部成员**（除本人）：「② 资质审核 · 李四 把处理时限从 明天 18:00 改到 后天 18:00，理由：缺少 3 家供应商的资质扫描件」 |
-| 可见性 | 改期历史显示在**节点详情的任务卡**上（就地展开），**不依赖「📜 流程动态」**（那个只有发起人 / 管理员可见，见 §8.5） |
+| 可见性 | 改期历史显示在**节点详情的任务卡**上（就地展开）；**不依赖「📜 操作记录」**（v0.24 起因决策 83 已全员可见）—— 但「已改期 N 次 + 理由」本身仍按**决策 56 的两级可见性** |
 
 > ⚠️ **必须知道的一个副作用**：既然**改期免审批 + 改期即解除逾期**，本人理论上可以**用无限改期规避逾期**。
 > 按确认结论这是**可接受的**——因为：① 每次改期都要填理由且**全节点成员可见**；② 次数与理由都在任务卡上明示（如「已改期 3 次」）；
@@ -2508,7 +2531,7 @@ CREATE INDEX IF NOT EXISTS idx_task_changes ON task_changes(task_id, created_at 
 | **zip 分卷测试**（v0.7） | 单节点 250 个文件 → 一次请求得到 `_part1.zip`（含前 200 个）且响应头 `X-Zip-Parts: 2`；两卷内容**无重复无遗漏**；2GB 上限同样触发分卷 |
 | **管理员未读测试**（v0.7） | 管理员打开左栏 → **无任何未读角标**；`flow_reads` 表中**不存在** `session_web_admin` 行；普通成员未读口径不受影响 |
 | **默认节点不算已读测试**（v0.7） | 用户进入流程（右栏自动展示第一个节点）→ 该节点未读**仍存在**；**显式点击**该节点后 → 未读清零；`flow_reads.last_read_at` 等于该节点最新消息时间（非 `now()`） |
-| **操作记录测试**（v0.7，v0.18 改名） | 发起人/管理员可见「📜 操作记录」且能搜到上述 6 类动作；**普通成员与只读成员**看到的是**置灰**的同名 Tab（点击给 toast 说明），**进不去**；后端已渲染成中文句子（前端无 action 映射表）；`detail` 变更前后正确 |
+| **操作记录测试**（v0.7；v0.18 改名；**v0.24 改口径**） | **全流程成员**（发起人 / 管理员 / 节点成员 / 只读成员）都能点开「📜 操作记录」并搜到上述 6 类动作（**不再有置灰 Tab 与 🔒 占位**）；**非流程成员**直调 `/api/collab/flow/events` 被拒（不区分"不存在"与"无权限"）；后端已渲染成中文句子（前端无 action 映射表）；`detail` 变更前后正确 |
 | **空正文讨论测试**（v0.7） | 只传附件不写文字 → 讨论列表**不出现空正文区**、只渲染附件芯片；企微通知文案 = 「② 资质审核 · 张三 上传了 2 个附件」；该条 `@` 解析跳过不报错 |
 | **文件管理跨流程测试**（v0.9） | 中栏「📁 文件」范围切「全部流程」→ 分组视图出现 `流程 → 节点 → 文件` 三层；普通成员**看不到**自己未参与流程的文件（构造两个流程各传文件，断言只出现自己那份）；管理员看到全部；分组计数与平铺总数一致；被移出成员后刷新 → 其文件立即消失；批量下载 zip 内路径 = `{流程名}/{节点标题}/{文件名}` |
 | **文件管理两个入口测试**（v0.9，v0.17 更新） | 中栏「📁 文件」→ 只出**当前流程**文件且**不渲染「流程 ▾」下拉**；顶栏「📁 全部文件」→ 出**全部可见流程**且下拉出现；两个入口的**回收站范围各自跟随**；`仅我上传` 筛选等价于原「我的文件」；**页面内没有任何上传入口**；**面板内不存在范围切换控件** |
