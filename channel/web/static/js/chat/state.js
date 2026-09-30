@@ -40,7 +40,7 @@ function updateEditButtonsState() {
 let streamBuffers = {};   // request_id -> { items: [event...], timestamp } for re-attach replay
 const resumedRequests = new Set();  // in-flight replies picked up after a page load, at most once each
 let isComposing = false;
-let appConfig = { use_agent: false, title: 'CowAgent', subtitle: '', providers: {}, api_bases: {} };
+let appConfig = { use_agent: false, title: '揽盛电气智能体', subtitle: '', providers: {}, api_bases: {} };
 
 let activeAgentId = localStorage.getItem('cow_active_agent') || '';
 const SESSION_ID_KEY = 'cow_session_id';

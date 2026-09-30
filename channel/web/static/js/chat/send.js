@@ -1048,7 +1048,7 @@ function startPolling() {
                     // only notify for an ordinary missed reply.
                     if (!isSchedulerRequest(rid)) {
                     showTaskNotification(
-                        sessionTitleOf(sessionId) || 'CowAgent',
+                        sessionTitleOf(sessionId) || '揽盛电气智能体',
                         firstLineSnippet(data.content),
                             sessionId,
                             activeAgentId

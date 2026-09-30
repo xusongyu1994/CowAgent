@@ -232,7 +232,7 @@ function _waitForBackend() {
                     unsupported_reason: data.unsupported_reason || ''
                 };
                 APP_VERSION = `v${data.version}`;
-                _setSidebarVersionLabel(`CowAgent ${APP_VERSION}`);
+                _setSidebarVersionLabel(`揽盛电气智能体 ${APP_VERSION}`);
                 UPDATE_CHECK = { up_to_date: true, newer_releases: [], latest: null, current_release: null };
                 _updateRunning = false;
                 _renderUpdateAction('up_to_date', t('update_done'));
