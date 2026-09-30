@@ -597,7 +597,7 @@
 | 5 | **企微免密入口增强** | ✅ 复用「菜单 URL 直带 `?code=` → 后端换票」（`api/pages.py` / `ChatHandler`）+ `state` 校验（`_validate_wecom_state`）+ 落地视图 `?target=`；`/auth/wecom/*` 四路由保留 | §9、决策 87 |
 | 6 | **i18n** | ✅ 走 `common/i18n.py` + `static/js/views/collab-i18n.js`（照 `views/kingdee-i18n.js` 先例）；原型不体现语言切换 | §8、决策 86 |
 | 7 | **命名与品牌** | ✅ 前台统一「**线上协作流程**」，与「**多 Agent 协作**」（`agent/multiagent/`）区分；页面标题 / 菜单名遵循品牌「**揽盛电气智能体**」 | 决策 87 |
-| 8 | **服务端安全基线对齐** | ✅ v2.2.0 的「外部下载限大小与总耗时」等基线生效：协作 **zip 分卷阈值（200 文件 / 2GB）需与全局上限对齐**（避免全局先于业务分卷生效） | §8.4、§10 |
+| 8 | **服务端上限核对（已核实：无冲突）** | ✅ 核查结论：① v2.2.0 的「外部下载限大小与总耗时」位于 `common/media_download.py`（`MAX_IMAGE_BYTES` 20MB / `MAX_FILE_BYTES` 100MB / `max_seconds`），只约束**出站抓取外部 URL 媒体**，与协作文件无关；② `core/_common.py` 的 `MAX_LOCAL_IMPORT_BYTES` = **512MB**（注释明确「与 HTTP 服务器 multipart body 上限一致」）约束**上传请求体** —— 协作单文件上限 **50MB** 在安全区内；③ **打包下载是响应流式**，不受上述任何限制 → **无需放宽全局配置**；可选优化：zip 每卷 ≤ 512MB（便于单包落地） | §8.4、§10 |
 | 9 | **修正历史条目** | ✅ 风险 19「图片预览复用 `/preview`」与决策 24「不复用 `/preview`」矛盾 → 统一为**独立通道 `/api/collab/file?inline=1`**；`collab_dir()` 命名统一为 `collab_root()` | §10、§5.1 |
 
 > **原型（`prototype/collab-workflow-prototype.html`）本轮不动**：原型是产品 UI 演示，与代码结构解耦；v2.2.0 的模块化重构不影响三栏布局、交互与文案。可选微调 = 顶栏品牌注记（非必须）。
@@ -1872,7 +1872,7 @@ def _collab_node_can_edit(flow: dict, node: dict, userid: str) -> bool:
 1. `common/state_dir.py` 增 `collab_root()` / `collab_db()`（identity-aware，**基于 `shared_root()`**）+ 启动**可写自检** + **单实例锁**（**复用 `common/singleton.py`**，含 PID 存活探测、陈旧锁自动接管）+ 根目录变更告警
 2. `agent/collab/store.py`：**十张表**建表（前八张见 §5.2，含 `uq_files_display` / `uq_files_current` **两个部分唯一索引**；第 9、10 张 `node_tasks` / `task_changes` 见 §13.2，一并建）+ CRUD + 树构建 + 事务（创建节点 + 成员继承 + 操作日志 + `_touch()` 统一刷新 `updated_at`）
 3. `agent/collab/service.py`：业务编排 + 权限判定（`_collab_is_admin` / `_collab_can_view_flow` / `_collab_node_can_edit` / `_collab_file_can_delete` / `_collab_can_delete_message` 为唯一入口，**管理员旁路在最前**；与 **`common/permission_checker.py`** 既有策略对齐，不重造一套）+ 成员继承 + 移出成员
-4. **`agent/collab/files.py`**：`_resolve_display_name` 同名去重（**事务 + `IntegrityError` 重试**）、唯一磁盘名、配额校验、**软删除/恢复/彻底删除/清空回收站**、流程级与跨流程查询、**流式打包 zip（自动分卷）**、**内联预览白名单**
+4. **`agent/collab/files.py`**：`_resolve_display_name` 同名去重（**事务 + `IntegrityError` 重试**）、唯一磁盘名、配额校验、**软删除/恢复/彻底删除/清空回收站**、流程级与跨流程查询、**流式打包 zip（自动分卷）**、**内联预览白名单**。**上限核对（v0.25）**：上传受服务器 **multipart body 上限 512MB**（`core/_common.py` `MAX_LOCAL_IMPORT_BYTES`）约束，单文件上限取 `collab_max_file_mb` = 50MB（安全区内）；**打包下载为响应流式**，不受 multipart / 外部抓取限制，zip 分卷规则保持（200 文件 / 2GB 总包），**每卷可选 ≤ 512MB**
 5. **`agent/collab/reads.py`**（或并入 service）：未读计算（时间戳比对，**管理员返回 0**）+ 已读标记（写到节点最新消息时间，**仅主动点击触发**）+ 归档清未读
 6. **`channel/web/api/collab.py`**（一视图一模块）+ **URLS 表注册**（`web_channel.py` 的 Custom business 区块；`build_app()` 按名字解析 handler，需在顶部 import）（节点响应带 `can_edit`，文件响应带 `can_delete`，列表带 `unread`，**新增 `/api/collab/flow/events`**）
 7. 前端 **`channel/web/static/js/views/collab.js`**（+ `views/collab-i18n.js`）：**顶栏 + 单一三栏**（**v0.17 定稿**）—— **顶栏 = 跨流程入口**（ℹ 原型说明（演示抽屉）/ ＠ 我的待办 / 📁 全部文件 / ＋ 发起流程 / 用户）；**左栏 = 只负责选流程**（搜索 / Tab / 归档分组；**v0.10 起无流程复选框**，**v0.17 起无底部跨流程入口**）；**中栏 = 当前流程内的视图**（树 · 图谱 · **当前流程文件** · 流程动态，**固定四 Tab**，无权限的「动态」**置灰**）；跨流程态（全部文件 / 我的待办）与发起表单**在中栏整体替换视图**；右栏 节点详情 · **文件详情** · 跨流程态**空态占位** + 拉人弹窗 + **「可编辑·只读」标识** + **文件下载/删除/来源跳转** + **窄屏 Flex 纵向堆叠 + 表格降级为卡片 + 浮动「↑ 节点树」按钮**
