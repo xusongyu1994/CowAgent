@@ -80,3 +80,7 @@ desktop/resources/bin/
 
 # Persistent Agent Mail credentials and npm runtime created by the optional compose overlay.
 docker/agent-mail-data/
+
+# Local CodeBuddy workspace (plan archives, memory, caches): per-developer
+# agent state, kept on disk but never committed.
+.codebuddy/
