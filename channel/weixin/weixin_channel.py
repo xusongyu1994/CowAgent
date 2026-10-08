@@ -11,6 +11,7 @@ import os
 import threading
 import time
 import uuid
+from typing import Tuple
 
 import requests
 
@@ -26,6 +27,7 @@ from channel.weixin.weixin_message import WeixinMessage
 from common import state_dir
 from common.expired_dict import ExpiredDict
 from common.log import logger
+from common.media_download import MAX_FILE_BYTES, save_response
 from common.singleton import singleton
 from common.utils import is_cloud_deployment
 from config import conf, get_weixin_credentials_path
@@ -59,6 +61,16 @@ def _media_tmp_path(prefix: str, ext: str = "") -> str:
     ``tmp_dir()`` also creates the directory, which ``/tmp`` does not guarantee.
     """
     return os.path.join(str(state_dir.tmp_dir()), f"{prefix}_{uuid.uuid4().hex[:8]}{ext}")
+
+
+def _remove_media_tmp(path: str) -> None:
+    """Delete a media file this channel downloaded."""
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except OSError as e:
+        logger.warning(f"[Weixin] media temp cleanup failed for {path}: {e}")
 
 
 def _load_credentials(cred_path: str) -> dict:
@@ -500,6 +512,14 @@ class WeixinChannel(ChatChannel):
                     qr_resp = api.fetch_qr_code()
                     qrcode = qr_resp.get("qrcode", "")
                     qrcode_url = qr_resp.get("qrcode_img_content", "")
+                    # A 200 with an error body has no qrcode; polling an empty
+                    # code only ever reports "wait".
+                    if not qrcode:
+                        logger.error(
+                            "[Weixin] QR refresh returned no qrcode; stopping login"
+                        )
+                        self._current_qr_url = ""
+                        return {}
                     scanned_printed = False
                     self._current_qr_url = qrcode_url
                     logger.info(f"[Weixin] 微信二维码链接 ({refresh_count}/{QR_MAX_REFRESHES}): {qrcode_url}")
@@ -900,7 +920,7 @@ class WeixinChannel(ChatChannel):
         return chunks
 
     def _send_image(self, img_path_or_url: str, receiver: str, context_token: str):
-        local_path = self._resolve_media_path(img_path_or_url)
+        local_path, downloaded = self._resolve_media(img_path_or_url)
         if not local_path:
             self._send_text("[Image send failed: file not found]", receiver, context_token)
             return
@@ -918,9 +938,12 @@ class WeixinChannel(ChatChannel):
         except Exception as e:
             logger.error(f"[Weixin] Image send failed: {e}")
             self._send_text("[Image send failed]", receiver, context_token)
+        finally:
+            if downloaded:
+                _remove_media_tmp(local_path)
 
     def _send_file(self, file_path_or_url: str, receiver: str, context_token: str):
-        local_path = self._resolve_media_path(file_path_or_url)
+        local_path, downloaded = self._resolve_media(file_path_or_url)
         if not local_path:
             self._send_text("[File send failed: file not found]", receiver, context_token)
             return
@@ -939,9 +962,12 @@ class WeixinChannel(ChatChannel):
         except Exception as e:
             logger.error(f"[Weixin] File send failed: {e}")
             self._send_text("[File send failed]", receiver, context_token)
+        finally:
+            if downloaded:
+                _remove_media_tmp(local_path)
 
     def _send_video(self, video_path_or_url: str, receiver: str, context_token: str):
-        local_path = self._resolve_media_path(video_path_or_url)
+        local_path, downloaded = self._resolve_media(video_path_or_url)
         if not local_path:
             self._send_text("[Video send failed: file not found]", receiver, context_token)
             return
@@ -959,6 +985,9 @@ class WeixinChannel(ChatChannel):
         except Exception as e:
             logger.error(f"[Weixin] Video send failed: {e}")
             self._send_text("[Video send failed]", receiver, context_token)
+        finally:
+            if downloaded:
+                _remove_media_tmp(local_path)
 
     @staticmethod
     def _resolve_media_path(path_or_url: str) -> str:
@@ -972,7 +1001,7 @@ class WeixinChannel(ChatChannel):
 
         if local_path.startswith(("http://", "https://")):
             try:
-                resp = requests.get(local_path, timeout=60)
+                resp = requests.get(local_path, timeout=60, stream=True)
                 resp.raise_for_status()
                 ct = resp.headers.get("Content-Type", "")
                 ext = ".bin"
@@ -990,8 +1019,7 @@ class WeixinChannel(ChatChannel):
                     ext = ".pdf"
 
                 tmp_path = _media_tmp_path("wx_media", ext)
-                with open(tmp_path, "wb") as f:
-                    f.write(resp.content)
+                save_response(resp, tmp_path, MAX_FILE_BYTES)
                 return tmp_path
             except Exception as e:
                 logger.error(f"[Weixin] Failed to download media: {e}")
@@ -1002,3 +1030,11 @@ class WeixinChannel(ChatChannel):
 
         logger.warning(f"[Weixin] Media file not found: {local_path}")
         return ""
+
+    @classmethod
+    def _resolve_media(cls, path_or_url: str) -> Tuple[str, bool]:
+        """Like :meth:`_resolve_media_path`, plus whether the file was downloaded here."""
+        downloaded = bool(path_or_url) and path_or_url.startswith(
+            ("http://", "https://"))
+        local_path = cls._resolve_media_path(path_or_url)
+        return local_path, bool(local_path) and downloaded

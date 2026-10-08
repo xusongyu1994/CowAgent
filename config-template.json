@@ -50,8 +50,7 @@
     {
       "id": "kingdee-analysis",
       "name": "金蝶数据分析智能体",
-      "enabled": true,
-      "model": ""
+      "enabled": true
     }
   ],
   "subagent": {

@@ -154,7 +154,10 @@ class WechatComAppChannel(ChatChannel):
                 if len(files) > 1:
                     logger.info("[wechatcom] voice too long {}s > 60s , split into {} parts".format(duration / 1000.0, len(files)))
                 for path in files:
-                    response = self.client.media.upload("voice", open(path, "rb"))
+                    # 上传后必须关闭句柄：Windows 上仍被占用的文件无法删除，
+                    # 会让下面的临时文件清理静默失败（reply*.amr 残留）。
+                    with open(path, "rb") as voice_file:
+                        response = self.client.media.upload("voice", voice_file)
                     logger.debug("[wechatcom] upload voice response: {}".format(response))
                     media_ids.append(response["media_id"])
             except ImportError as e:
@@ -164,12 +167,11 @@ class WechatComAppChannel(ChatChannel):
             except WeChatClientException as e:
                 logger.error("[wechatcom] upload voice failed: {}".format(e))
                 return
-            try:
-                os.remove(file_path)
-                if amr_file != file_path:
-                    os.remove(amr_file)
-            except Exception:
-                pass
+            for path in {file_path, amr_file, *files}:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
             for media_id in media_ids:
                 self.client.message.send_voice(self.agent_id, receiver, media_id)
                 time.sleep(1)

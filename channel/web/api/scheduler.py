@@ -17,6 +17,11 @@ from common.log import logger
 from config import conf
 
 
+# `tool_call` / `skill_call` would run a tool on a timer without the agent's
+# permission check, so neither route may produce them.
+_ALLOWED_ACTION_TYPES = ("send_message", "agent_task")
+
+
 def _resolve_instance_agent_id(instance_id: str) -> str:
     """The Agent a channel instance is currently bound to, or "" for none.
 
@@ -244,9 +249,16 @@ class SchedulerToggleHandler:
             store = _global_task_store()
             if store is None:
                 return json.dumps({"status": "error", "message": "Scheduler store unavailable"})
-            store.enable_task(task_id, enabled)
             task = store.get_task(task_id)
-            return json.dumps({"status": "success", "task": task}, ensure_ascii=False)
+            if not task:
+                return json.dumps(
+                    {"status": "error", "message": f"Task '{task_id}' not found"}
+                )
+            store.enable_task(task_id, enabled)
+            return json.dumps(
+                {"status": "success", "task": store.get_task(task_id)},
+                ensure_ascii=False,
+            )
         except Exception as e:
             logger.error(f"[WebChannel] Scheduler toggle error: {e}")
             return json.dumps({"status": "error", "message": str(e)})
@@ -282,7 +294,13 @@ class SchedulerUpdateHandler:
             
             # Update schedule
             if "schedule" in body:
-                updates["schedule"] = body["schedule"]
+                schedule_patch = body["schedule"]
+                if not isinstance(schedule_patch, dict) or not schedule_patch.get("type"):
+                    return json.dumps({
+                        "status": "error",
+                        "message": "schedule must be an object with a type"
+                    }, ensure_ascii=False)
+                updates["schedule"] = schedule_patch
                 # If schedule config changed, recalculate next_run_at
                 # Build merged temp task data for calculation (without modifying the original object)
                 merged = dict(original_task)
@@ -320,6 +338,11 @@ class SchedulerUpdateHandler:
                 action = dict(original_action)
                 action.update(action_patch)
                 action_type = action.get("type")
+                if action_type not in _ALLOWED_ACTION_TYPES:
+                    return json.dumps({
+                        "status": "error",
+                        "message": "unsupported action type",
+                    }, ensure_ascii=False)
                 if action_type == "send_message":
                     action.pop("task_description", None)
                     action.pop("silent", None)
@@ -590,7 +613,7 @@ class SchedulerCreateHandler:
                 return json.dumps({"status": "error", "message": "action is required"})
 
             action_type = action_in.get("type")
-            if action_type not in ("send_message", "agent_task"):
+            if action_type not in _ALLOWED_ACTION_TYPES:
                 return json.dumps({"status": "error", "message": "unsupported action type"})
 
             channel_type = (action_in.get("channel_type") or "").strip()

@@ -76,7 +76,7 @@ class TaskStore:
     
     def _ensure_store_dir(self):
         """Ensure the storage directory exists"""
-        store_dir = os.path.dirname(self.store_path)
+        store_dir = os.path.dirname(self.store_path) or "."
         os.makedirs(store_dir, exist_ok=True)
     
     def load_tasks(self) -> Dict[str, dict]:
@@ -87,7 +87,7 @@ class TaskStore:
             Dictionary of task_id -> task_data
         """
         with self.lock:
-            if not os.path.exists(self.store_path):
+            if not os.path.exists(self.store_path) and not os.path.exists(f"{self.store_path}.bak"):
                 return {}
             
             try:

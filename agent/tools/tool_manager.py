@@ -332,7 +332,11 @@ class ToolManager:
             try:
                 with open(mcp_json_path, "r", encoding="utf-8") as f:
                     data = _json.load(f)
-                raw = data.get("mcpServers") or data.get("mcp_servers") or data
+                # Must match service.load_servers: an empty {"mcpServers": {}}
+                # means no servers, not a server named "mcpServers".
+                raw = data.get("mcpServers")
+                if raw is None:
+                    raw = data.get("mcp_servers", data)
                 # DEBUG: with N agents this fires N times for the same shared
                 # mcp.json; the real boot is logged once at INFO further below.
                 logger.debug(f"[ToolManager] Loading MCP config from {mcp_json_path}")

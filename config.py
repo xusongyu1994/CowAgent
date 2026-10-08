@@ -27,6 +27,9 @@ available_setting = {
     # openai api protocol: "auto" (Responses only for models that require it), "chat" (/chat/completions) or "responses" (/responses)
     "open_ai_api_type": "auto",
     "claude_api_base": "https://api.anthropic.com/v1",  # claude api base
+    # Prompt cache TTL for the system prompt + tools in agent mode: "1h" or "5m".
+    # Use "5m" if the endpoint rejects the 1h TTL; the conversation always uses 5m.
+    "claude_cache_ttl": "1h",
     "gemini_api_base": "https://generativelanguage.googleapis.com",  # gemini api base
     "custom_api_key": "",  # custom OpenAI-compatible provider api key (used when bot_type is "custom"); legacy single-provider field
     "custom_api_base": "",  # custom OpenAI-compatible provider api base (used when bot_type is "custom"); legacy single-provider field
@@ -275,11 +278,13 @@ available_setting = {
     "web_host": "",  # Web console bind address; empty means auto
     "web_port": 9899,
     "web_password": "",  # Web console password; empty means no authentication required
+    "external_api_token": "",  # Bearer token for the OpenAI-compatible /v1/chat/completions API; empty disables it
     "web_session_expire_days": 30,  # Auth session expiry in days
     "web_file_serve_root": "~",  # Root dir the /api/file endpoint may serve; "/" allows the whole filesystem
     "mcp_oauth_redirect_base": "",  # Base URL for MCP OAuth callback (e.g. http://your-ip:9899); empty uses local web console
     "wecom_public_base": "",  # 企微 OAuth 回调公网地址，如 "http://office.landshr.com:9898"
     "wecom_open_pages": {},  # 企微用户可从菜单免密访问的页面白名单，格式：{"view_id": "显示名称"}
+    "permissions_enabled": False,  # 权限体系总开关（Web 控制台「权限」页）；关闭时不校验知识库/金蝶权限
     "agent": True,  # whether to enable Agent mode
     "agent_workspace": "~/cow",  # agent workspace path, used to store skills, memory, etc.
     # Optional native multi-agent registry. When empty or omitted, CowAgent
@@ -576,7 +581,8 @@ def load_config():
         if name.startswith("_"):
             continue
         if name in available_setting:
-            logger.info("[INIT] override config by environ args: {}={}".format(name, value))
+            logger.info("[INIT] override config by environ args: {}={}".format(
+                name, drag_sensitive({name: value})[name]))
             try:
                 # SECURITY: Use ast.literal_eval instead of eval().
                 # ast.literal_eval only parses Python literals (strings, numbers,
@@ -588,10 +594,14 @@ def load_config():
                 # strings, but also TypeError/RecursionError on malformed input
                 # (e.g. unhashable dict keys); catch broadly to avoid crashing
                 # startup, and fall back to treating the value as a plain string.
+                # Numeric keys reject it instead: a string there fails much later.
                 if value.lower() == "false":
                     config[name] = False
                 elif value.lower() == "true":
                     config[name] = True
+                elif type(available_setting[name]) in (int, float):
+                    logger.warning("[INIT] ignoring environment override {}: not a {}".format(
+                        name, type(available_setting[name]).__name__))
                 else:
                     config[name] = value
 

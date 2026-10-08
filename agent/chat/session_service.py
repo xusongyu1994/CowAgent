@@ -336,8 +336,24 @@ class SessionService:
         self._cancel_running(session_id, agent_id)
         store = self._get_store(agent_id)
         store.clear_session(session_id)
+        self._forget_side_stores(session_id, agent_id)
         self._remove_agent(session_id, agent_id)
         logger.info(f"[SessionService] Session deleted: {session_id}")
+
+    def _forget_side_stores(self, session_id: str, agent_id: str = None) -> None:
+        """Drop the session's project binding and prefs, each best-effort."""
+        try:
+            scoped = self._resolve_agent_id(agent_id)
+        except Exception as e:
+            logger.debug(f"[SessionService] Side-store cleanup skipped: {e}")
+            return
+        from agent.workspace import project_store, session_prefs
+
+        for module in (project_store, session_prefs):
+            try:
+                module.forget_session(session_id, agent_id=scoped)
+            except Exception as e:
+                logger.debug(f"[SessionService] Side-store cleanup skipped: {e}")
 
     def rename_session(
         self, session_id: str, title: str, agent_id: str = None

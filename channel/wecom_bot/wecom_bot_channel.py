@@ -72,7 +72,7 @@ def _download_remote_media(url: str, prefix: str, ext, max_bytes: int, read_time
     ``ext=None`` means an image whose extension comes from the Content-Type.
     """
     path = _media_tmp_path(prefix)
-    size, content_type = download_to_file(url, path, max_bytes, timeout=(5, read_timeout))
+    size, content_type = download_to_file(url, path, max_bytes, timeout=(5, read_timeout), guarded=True)
     if not size:
         os.remove(path)
         raise ValueError("remote media is empty")
@@ -916,12 +916,22 @@ class WecomBotChannel(ChatChannel):
                 has_images = bool(state.get("images"))
                 state["url_sent"] = True
 
-            self._send_via_response_url(stream_id, response_url, content, image_urls, has_images)
+            if not self._send_via_response_url(stream_id, response_url, content, image_urls, has_images):
+                # Refused, so hand the answer back to a late poll.
+                with self._callback_lock:
+                    state = self._callback_streams.get(stream_id)
+                    if state:
+                        state["url_sent"] = False
 
         threading.Thread(target=_run, daemon=True, name=f"wecom-respurl-{stream_id}").start()
 
-    def _send_via_response_url(self, stream_id, response_url, content, image_urls, has_images):
-        """Push a one-shot active markdown reply to response_url (valid 1h, single use)."""
+    def _send_via_response_url(
+        self, stream_id, response_url, content, image_urls, has_images
+    ) -> bool:
+        """Push a one-shot active markdown reply to response_url (valid 1h, single use).
+
+        Returns False only when WeCom answered and refused the reply.
+        """
         md = content or ""
         if image_urls:
             md += ("\n\n" if md else "") + "\n".join(f"![]({u})" for u in image_urls)
@@ -932,12 +942,26 @@ class WecomBotChannel(ChatChannel):
         payload = {"msgtype": "markdown", "markdown": {"content": md}}
         try:
             resp = requests.post(response_url, json=payload, timeout=15)
-            logger.info(
-                f"[WecomBot] response_url active reply sent for {stream_id}: "
+        except Exception as e:
+            # It may still have arrived; keep the claim so a poll cannot repeat it.
+            logger.error(f"[WecomBot] response_url active reply failed for {stream_id}: {e}")
+            return True
+
+        # WeCom answers HTTP 200 even when it refuses; errcode is the real signal.
+        try:
+            body = resp.json()
+        except Exception:
+            body = None
+        errcode = body.get("errcode", 0) if isinstance(body, dict) else None
+        if resp.status_code != 200 or errcode != 0:
+            logger.error(
+                f"[WecomBot] response_url active reply rejected for {stream_id}: "
                 f"status={resp.status_code}, body={resp.text[:200]}"
             )
-        except Exception as e:
-            logger.error(f"[WecomBot] response_url active reply failed for {stream_id}: {e}")
+            return False
+
+        logger.info(f"[WecomBot] response_url active reply sent for {stream_id}")
+        return True
 
     def _load_image_base64(self, img_path_or_url: str):
         """Load a local/remote image, ensure JPG/PNG within 10MB, return (base64, md5)."""
@@ -1015,26 +1039,59 @@ class WecomBotChannel(ChatChannel):
         # Determine req_id for responding or use send_msg for scheduled push
         req_id = getattr(msg, "req_id", None) if msg else None
 
-        if reply.type == ReplyType.TEXT:
-            self._send_text(reply.content, receiver, is_group, req_id)
-        elif reply.type in (ReplyType.IMAGE_URL, ReplyType.IMAGE):
-            self._send_image(reply.content, receiver, is_group, req_id)
-        elif reply.type == ReplyType.FILE:
-            if hasattr(reply, "text_content") and reply.text_content:
-                self._send_text(reply.text_content, receiver, is_group, req_id)
-                time.sleep(0.3)
-            self._send_file(reply.content, receiver, is_group, req_id)
-        elif reply.type == ReplyType.VIDEO or reply.type == ReplyType.VIDEO_URL:
-            self._send_file(reply.content, receiver, is_group, req_id, media_type="video")
-        elif reply.type == ReplyType.VOICE:
-            self._send_voice(reply.content, receiver, is_group, req_id)
-        else:
-            logger.warning(f"[WecomBot] Unsupported reply type: {reply.type}, falling back to text")
-            self._send_text(str(reply.content), receiver, is_group, req_id)
+        try:
+            if reply.type == ReplyType.TEXT:
+                self._send_text(reply.content, receiver, is_group, req_id)
+            elif reply.type in (ReplyType.IMAGE_URL, ReplyType.IMAGE):
+                self._send_image(reply.content, receiver, is_group, req_id)
+            elif reply.type == ReplyType.FILE:
+                if hasattr(reply, "text_content") and reply.text_content:
+                    self._send_text(reply.text_content, receiver, is_group, req_id)
+                    time.sleep(0.3)
+                self._send_file(reply.content, receiver, is_group, req_id)
+            elif reply.type == ReplyType.VIDEO or reply.type == ReplyType.VIDEO_URL:
+                self._send_file(reply.content, receiver, is_group, req_id, media_type="video")
+            elif reply.type == ReplyType.VOICE:
+                self._send_voice(reply.content, receiver, is_group, req_id)
+            else:
+                logger.warning(f"[WecomBot] Unsupported reply type: {reply.type}, falling back to text")
+                self._send_text(str(reply.content), receiver, is_group, req_id)
+        finally:
+            # Media replies skip _send_text, which is what normally closes the stream.
+            self._close_stream(req_id)
 
     # ------------------------------------------------------------------
     # Respond message (via websocket)
     # ------------------------------------------------------------------
+
+    def _finish_stream(self, req_id: str, stream_id: str, content: str):
+        """Send the finish packet that closes an open reply stream."""
+        # Brief pause so the server finishes processing the last intermediate chunk
+        # before receiving the finish packet
+        time.sleep(0.15)
+
+        self._ws_send({
+            "cmd": "aibot_respond_msg",
+            "headers": {"req_id": req_id},
+            "body": {
+                "msgtype": "stream",
+                "stream": {
+                    "id": stream_id,
+                    "finish": True,
+                    "content": content,
+                },
+            },
+        })
+
+    def _close_stream(self, req_id: str = None):
+        """Free a turn's stream state, finishing the stream if anything was shown."""
+        if not req_id:
+            return
+        state = self._stream_states.pop(req_id, None)
+        # The state exists from the moment the message arrives; finishing a
+        # stream that never pushed anything would post an empty bubble.
+        if state and (state["committed"] or state["last_push_len"]):
+            self._finish_stream(req_id, state["stream_id"], state["committed"] or state["current"])
 
     def _send_text(self, content: str, receiver: str, is_group: bool, req_id: str = None):
         """Send text/markdown reply. Reuses stream state if available (streaming mode)."""
@@ -1047,22 +1104,7 @@ class WecomBotChannel(ChatChannel):
                 final_content = content
                 stream_id = uuid.uuid4().hex[:16]
 
-            # Brief pause so the server finishes processing the last intermediate chunk
-            # before receiving the finish packet
-            time.sleep(0.15)
-
-            self._ws_send({
-                "cmd": "aibot_respond_msg",
-                "headers": {"req_id": req_id},
-                "body": {
-                    "msgtype": "stream",
-                    "stream": {
-                        "id": stream_id,
-                        "finish": True,
-                        "content": final_content,
-                    },
-                },
-            })
+            self._finish_stream(req_id, stream_id, final_content)
         else:
             self._active_send_markdown(content, receiver, is_group)
 
@@ -1161,8 +1203,9 @@ class WecomBotChannel(ChatChannel):
             logger.info(f"[WecomBot] Image converted from {fmt} -> {out_path}")
             return out_path
         except Exception as e:
+            # WeCom only accepts JPG/PNG, so the unconverted original is unusable.
             logger.error(f"[WecomBot] Image format check failed: {e}")
-            return file_path
+            return ""
 
     @staticmethod
     def _compress_image(file_path: str, max_bytes: int) -> str:

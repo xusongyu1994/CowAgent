@@ -19,6 +19,7 @@ as a purely local application.
 
 from bridge.context import Context, ContextType
 from bridge.reply import Reply, ReplyType
+from common.atomic_write import write_json_atomic
 from common.log import logger
 from linkai import LinkAIClient, PushMsg
 from config import conf, pconf, plugin_config, available_setting, write_plugin_config, get_root, get_weixin_credentials_path
@@ -128,6 +129,8 @@ def _make_peer_transport(send):
             }
             if request.history:
                 body["history"] = list(request.history)
+            if request.permission_mode:
+                body["permission_mode"] = request.permission_mode
             try:
                 self._send(body)
             except Exception as exc:
@@ -443,7 +446,7 @@ class CloudClient(LinkAIClient):
             if pconf("linkai")["midjourney"]:
                 pconf("linkai")["midjourney"]["enabled"] = True
                 pconf("linkai")["midjourney"]["use_image_create_prefix"] = True
-        elif config.get("text_to_image") and config.get("text_to_image") in ["dall-e-2", "dall-e-3"]:
+        elif config.get("text_to_image") in ["dall-e-2", "dall-e-3"] and pconf("linkai"):
             if pconf("linkai")["midjourney"]:
                 pconf("linkai")["midjourney"]["use_image_create_prefix"] = False
 
@@ -1335,7 +1338,7 @@ class CloudClient(LinkAIClient):
             return
 
         query = payload.get("query", "")
-        session_id = payload.get("session_id", "cloud_console")
+        session_id = payload.get("session_id") or "cloud_console"
         channel_type = payload.get("channel_type", "")
         # Console user on whose behalf this runs; usage is attributed to them
         # instead of the account this deployment is registered under.
@@ -1612,13 +1615,20 @@ class CloudClient(LinkAIClient):
     def _query_history(self, payload: dict) -> dict:
         """Query paginated conversation history using ConversationStore."""
         session_id = payload.get("session_id", "")
-        page = int(payload.get("page", 1))
-        page_size = int(payload.get("page_size", 20))
 
         if not session_id:
             return {
                 "action": "query",
                 "payload": {"status": "error", "message": "session_id required"},
+            }
+
+        try:
+            page = int(payload.get("page", 1))
+            page_size = int(payload.get("page_size", 20))
+        except (TypeError, ValueError):
+            return {
+                "action": "query",
+                "payload": {"status": "error", "message": "page and page_size must be integers"},
             }
 
         # Web channel stores sessions with a "session_" prefix
@@ -1699,14 +1709,12 @@ class CloudClient(LinkAIClient):
                 logger.warning(f"[CloudClient] config.json not found at {config_path}, skip saving")
                 return
 
-            # utf-8-sig tolerates a UTF-8 BOM (e.g. edited with Windows Notepad).
             with open(config_path, "r", encoding="utf-8-sig") as f:
                 file_config = json.load(f)
 
             file_config.update(dict(local_config))
 
-            with open(config_path, "w", encoding="utf-8") as f:
-                json.dump(file_config, f, indent=4, ensure_ascii=False)
+            write_json_atomic(config_path, file_config)
 
             logger.info("[CloudClient] Configuration saved to config.json successfully")
         except Exception as e:

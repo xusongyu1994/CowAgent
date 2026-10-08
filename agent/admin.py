@@ -92,9 +92,6 @@ class AgentAdminService:
             return team.resolve(self._settings)
         if not self.config_path.exists():
             return {}
-        # utf-8-sig tolerates a UTF-8 BOM (e.g. config.json edited with Windows
-        # Notepad / PowerShell). Plain utf-8 raises "Unexpected UTF-8 BOM" here,
-        # which surfaces as a failed /api/agents snapshot and an empty team page.
         with self.config_path.open("r", encoding="utf-8-sig") as handle:
             data = json.load(handle)
         if not isinstance(data, dict):
@@ -630,6 +627,14 @@ class AgentAdminService:
             except Exception as e:
                 logger.warning(f"[AgentAdmin] project store cleanup after delete failed: {e}")
 
+            # The avatar lives outside the workspace; a reused id must not inherit it.
+            try:
+                from channel.web.api.agents import delete_avatar_files
+
+                delete_avatar_files(agent_id)
+            except Exception as e:
+                logger.warning(f"[AgentAdmin] avatar cleanup after delete failed: {e}")
+
             return {"id": agent_id, "deleted": True}
 
     def knowledge_mode(self, agent_id: str) -> str:
@@ -813,7 +818,13 @@ class AgentAdminService:
     def read_core_file(self, agent_id: str, filename: str) -> Dict:
         with self._lock:
             path = self._core_path(agent_id, filename)
-            raw = path.read_bytes() if path.exists() else b""
+            if path.exists():
+                with path.open("rb") as handle:
+                    raw = handle.read(MAX_CORE_FILE_BYTES + 1)
+                if len(raw) > MAX_CORE_FILE_BYTES:
+                    raise AgentAdminError("core file exceeds 1 MiB")
+            else:
+                raw = b""
             return {
                 "filename": filename,
                 "content": raw.decode("utf-8"),

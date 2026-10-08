@@ -29,6 +29,7 @@ from agent.tools.base_tool import BaseTool, ToolResult
 from agent.tools.utils.url_safety import validate_url_safe, safe_get
 from common import const
 from common.log import logger
+from common.media_download import MAX_IMAGE_BYTES, MediaTooLargeError, read_response
 from common.utils import expand_path
 from config import conf
 
@@ -785,13 +786,22 @@ class Vision(BaseTool):
         public URL that 3xx-redirects into a loopback / link-local /
         cloud-metadata address would otherwise be pulled in unchecked.
         """
-        resp = safe_get(url, timeout=30)
-        if resp.status_code != 200:
-            raise VisionAPIError(f"Failed to download image: HTTP {resp.status_code}")
-        content_type = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
-        if not content_type.startswith("image/"):
-            content_type = "image/jpeg"
-        b64 = base64.b64encode(resp.content).decode("ascii")
+        resp = safe_get(url, timeout=30, stream=True)
+        try:
+            if resp.status_code != 200:
+                raise VisionAPIError(f"Failed to download image: HTTP {resp.status_code}")
+            content_type = resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+            if not content_type.startswith("image/"):
+                content_type = "image/jpeg"
+            try:
+                image = read_response(resp, MAX_IMAGE_BYTES)
+            except MediaTooLargeError as error:
+                raise VisionAPIError(
+                    f"Image too large: over {MAX_IMAGE_BYTES} bytes, url={url}"
+                ) from error
+            b64 = base64.b64encode(image).decode("ascii")
+        finally:
+            resp.close()
         data_url = f"data:{content_type};base64,{b64}"
         return {"type": "image_url", "image_url": {"url": data_url}}
 
@@ -807,13 +817,27 @@ class Vision(BaseTool):
 
         def _try_sips(max_dim: str, quality: str) -> bool:
             try:
+                info = subprocess.run(
+                    ["sips", "-g", "pixelHeight", "-g", "pixelWidth", path],
+                    capture_output=True, text=True, check=True,
+                )
+                dimensions = {}
+                for line in info.stdout.splitlines():
+                    name, _, value = line.strip().partition(": ")
+                    if name in ("pixelHeight", "pixelWidth"):
+                        dimensions[name] = int(value)
+                if len(dimensions) != 2 or min(dimensions.values()) <= 0:
+                    return False
+                # Unlike convert's ">" geometry, sips -Z also enlarges images.
+                # Omit resampling when the source already fits the maximum.
+                resize = ["-Z", max_dim] if max(dimensions.values()) > int(max_dim) else []
                 subprocess.run(
-                    ["sips", "-Z", max_dim, "-s", "formatOptions", quality,
+                    ["sips", *resize, "-s", "formatOptions", quality,
                      path, "--out", tmp.name],
                     capture_output=True, check=True,
                 )
                 return True
-            except (FileNotFoundError, subprocess.CalledProcessError):
+            except (FileNotFoundError, subprocess.CalledProcessError, ValueError):
                 return False
 
         def _try_convert(max_dim: str, quality: str) -> bool:
