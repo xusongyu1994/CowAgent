@@ -18,21 +18,32 @@ except ImportError:
     _pydub_available = False
 
 # Windows: 让 pydub 找到 ffmpeg 完整路径（必须在 pydub 导入之后）
+# 依次尝试常见安装位置（迁移后 ffmpeg 位于 D 盘，C 盘为历史位置），最后回退 PATH。
+# 两件事必须同时做到，否则语音转换会以 WinError 2（找不到文件）失败：
+#   1) AudioSegment.converter 要拿到完整路径——pydub 的默认值只是个裸名字，
+#      而且早先的版本只把 PATH 结果写进日志、并未赋值；
+#   2) pydub 的 ffprobe 解析走 pydub.utils.which()，它只认 os.environ["PATH"]，
+#      因此还要把 ffmpeg 所在目录并入本进程 PATH——进程继承到的 PATH 可能已过期
+#      （例如从很早就打开的终端启动服务时）。
 if _pydub_available:
-    _ffmpeg_path = r"C:\ffmpeg\bin\ffmpeg.exe"
-    _ffprobe_path = r"C:\ffmpeg\bin\ffprobe.exe"
-    if os.path.isfile(_ffmpeg_path):
+    def _resolve_binary(name: str) -> str:
+        filename = name + ".exe" if os.name == "nt" else name
+        for base in (r"D:\ffmpeg\bin", r"C:\ffmpeg\bin"):
+            candidate = os.path.join(base, filename)
+            if os.path.isfile(candidate):
+                return candidate
+        return shutil.which(name) or ""
+
+    _ffmpeg_path = _resolve_binary("ffmpeg")
+    if _ffmpeg_path:
         AudioSegment.converter = _ffmpeg_path
-        if os.path.isfile(_ffprobe_path):
-            AudioSegment.ffprobe = _ffprobe_path
+        _ffmpeg_dir = os.path.dirname(_ffmpeg_path)
+        _path_dirs = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+        if not any(os.path.normcase(d) == os.path.normcase(_ffmpeg_dir) for d in _path_dirs):
+            os.environ["PATH"] = _ffmpeg_dir + os.pathsep + os.environ.get("PATH", "")
         logger.info("[audio_convert] ffmpeg 路径: {}".format(_ffmpeg_path))
     else:
-        # 尝试从 PATH 查找
-        _ffmpeg_in_path = shutil.which("ffmpeg")
-        if _ffmpeg_in_path:
-            logger.info("[audio_convert] ffmpeg 从 PATH 找到: {}".format(_ffmpeg_in_path))
-        else:
-            logger.warning("[audio_convert] ffmpeg 未找到: {}".format(_ffmpeg_path))
+        logger.warning("[audio_convert] ffmpeg 未找到，语音格式转换将不可用")
 
 sil_supports = [8000, 12000, 16000, 24000, 32000, 44100, 48000]  # slk转wav时，支持的采样率
 

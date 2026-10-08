@@ -34,11 +34,14 @@ class SRVoice(Voice):
         return self._sr
 
     def _find_ffmpeg(self):
-        """查找 ffmpeg 可执行文件路径"""
+        """查找 ffmpeg 可执行文件路径。
+
+        依次尝试常见安装位置（迁移后位于 D 盘，C 盘为历史位置），再回退 PATH。
+        """
         # 优先使用完整路径
-        ffmpeg_exe = r"C:\ffmpeg\bin\ffmpeg.exe"
-        if os.path.isfile(ffmpeg_exe):
-            return ffmpeg_exe
+        for ffmpeg_exe in (r"D:\ffmpeg\bin\ffmpeg.exe", r"C:\ffmpeg\bin\ffmpeg.exe"):
+            if os.path.isfile(ffmpeg_exe):
+                return ffmpeg_exe
         # 从 PATH 查找
         ffmpeg_in_path = shutil.which("ffmpeg")
         if ffmpeg_in_path:
