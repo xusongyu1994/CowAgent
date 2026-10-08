@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>企微线上协作流程 · 可交互原型 v0.24</title>
+<title>企微线上协作流程 · 可交互原型 v0.30</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
 tailwind.config = {
@@ -62,7 +62,7 @@ tailwind.config = {
 <div id="helpDrawer" class="hidden max-w-[1400px] mx-auto px-4 sm:px-6 mb-4">
   <div class="bg-white rounded-2xl border border-slate-200 px-5 py-4 shadow-sm">
     <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
-      <span class="text-primary-600 font-semibold text-sm tracking-wide">企微线上协作流程 · 可交互原型 v0.24</span>
+      <span class="text-primary-600 font-semibold text-sm tracking-wide">企微线上协作流程 · 可交互原型 v0.30</span>
       <span class="text-[11px] text-slate-400">形态：Web 控制台唯一页 /collab · <b class="text-slate-500">电脑版三栏为唯一设计，手机端仅响应式收缩</b></span>
       <span class="ml-auto text-[11px] text-slate-400">配套方案：docs/collab-workflow-design.md</span>
       <button onclick="go('readonly')"
@@ -119,6 +119,9 @@ tailwind.config = {
       <span>🆕 <b>v0.22 右栏讨论区强化</b>：右栏 <b>420 → 520px</b>；节点头收纳为「ℹ 节点信息」折叠块（默认收起，讨论区一屏可见）；输入框<b>默认 2 行起</b>、聚焦高亮、发送按钮带「发送」文字、📎 / @ 主色可点</span>
       <span>🆕 <b>v0.23 渲染保滚</b>：修掉右栏按钮一点就"跳回顶部" —— <code class="bg-slate-100 px-1 rounded">render()</code> 前快照、后回放全部滚动位置；发送讨论 / 批注后<b>滚到底部</b>立刻看到新内容；被批注的讨论若已收起自动展开</span>
       <span>🆕 <b>v0.24 操作记录全员可见</b>：「📜 操作记录」Tab 对<b>全流程成员</b>开放（原"仅发起人 / 管理员可见、无权限置灰"废止）—— 移除置灰 Tab、锁定占位与权限横幅；接口对 flow_members 返回 200，非成员仍拒绝（防探测）</span>
+      <span>🆕 <b>v0.28 口径对齐（原型交互未变）</b>：协作文件缺省落在<b>独立根目录</b>（不在 Agent 工作区内）；控制台新增「菜单编辑器」可加 url 项，但<b>不采纳</b>为入口（仍走企微菜单 + 直链）；控制台「产物」（Agent 产出）与协作「全部文件」（人上传 / 阶段结果）是两回事</span>
+      <span>🆕 <b>v0.29 归档只读闭环 + 附件·提及·操作记录</b>：① 归档流程的<b>发讨论 / 上传阶段结果 / 删文件 / 恢复文件</b>全部拒写（此前只拦了状态 / 流转 / 改期 / 邀请），并隐藏讨论输入框、文件删除入口与树上「＋拉人 / ＋子节点」死入口；② 📎 变成<b>真的加附件</b>（选演示文件 → chips → 随讨论落 <code class="bg-slate-100 px-1 rounded">files[]</code>）、@ 变成<b>真的选成员提及</b>（写入 <code class="bg-slate-100 px-1 rounded">mentions</code> → 进「提到我的」）；③ <b>操作记录随动作写入</b>（发起 / 下延 / 拉人 / 移出 / 改状态 / 撤回·删除讨论 / 文件增删 / 标记结论 / 改期 / 流转 / 催办·改派·关闭 / 归档·取消归档 各记一条）；④ 补「阶段结论说明」显示与编辑、流程设置里补「流程改名」；⑤ <b>打开节点即标记已读</b></span>
+      <span>🆕 <b>v0.30 通知口径（原型无功能改动）</b>：一期只推 <b>4 类</b>关键通知（被拉入 / 被派活 / @提及 / 升级待处置），其余 20 类二期；推送前先落<b>幂等键</b>防重、失败只记日志不重试；<b>页面兜底（未读 / 待办 / 操作记录）才是必达通道</b></span>
       <span>🚫 文件管理<b>不提供上传入口</b>（文件必须挂在节点上）；不做打标 / 移动 / 重命名 / 版本</span>
       <span>✅ 通知：全部即时推送企微应用消息（管理员操作不推送；已发出的通知无法撤回）</span>
     </div>
@@ -148,6 +151,18 @@ tailwind.config = {
 
 <!-- ===================== 设计要点说明（v0.17：随「ℹ 原型说明」抽屉一起显隐） ===================== -->
 <div id="helpPoints" class="hidden max-w-6xl mx-auto px-6 mt-10 grid md:grid-cols-2 lg:grid-cols-4 gap-4 text-[12px]">
+  <!-- v0.29：把"原型没有模拟的东西"写清楚，避免把演示简化误读成产品缺口 -->
+  <div class="md:col-span-2 lg:col-span-4 bg-amber-50 border border-amber-200 rounded-xl p-4">
+    <div class="font-semibold text-amber-800 mb-2">⚠️ 本原型的简化（方案里都是完整设计，见 §0.23）</div>
+    <div class="text-amber-700/90 grid md:grid-cols-2 gap-x-6 gap-y-1">
+      <div>· <b>企微通知</b>：只弹 toast —— 方案里 <b>一期只推 4 类</b>（被拉入 / 被派活 / @提及 / 升级待处置），其余 20 类二期；推送幂等键、每分钟上限、提醒去重位都不在原型模拟</div>
+      <div>· <b>未读</b>：单一演示值（只有"打开节点即已读"与"归档清零"两种变化）</div>
+      <div>· <b>权限</b>：前端提前拦一次（归档只读 / 只读成员 / 发起人处置），真实现由后端接口再校验</div>
+      <div>· <b>单实例锁 / 配额 / 分卷 zip / 导出</b>：只在方案与文案里，原型不实现</div>
+      <div>· <b>文件上传</b>：讨论附件与阶段结果用"演示文件"模拟落盘</div>
+      <div>· <b>通知撤回</b>：企微平台不支持，原型也不做"撤回已发通知"</div>
+    </div>
+  </div>
   <div class="bg-white rounded-xl border border-slate-200 p-4">
     <div class="font-semibold text-slate-800 mb-2">① 数据模型（一棵树）</div>
     <div class="text-slate-500 space-y-1">
@@ -249,7 +264,27 @@ const MENTIONS = [
     text:'@张三 资质清单里第 3 家缺了安全生产许可，麻烦补一下。' },
 ];
 /* 演示：当前用户（张三）即被提及者；真实现按 messages.mentions 匹配 */
-const myMentions = () => MENTIONS;
+/* v0.29：**真实的「提到我的」出口** —— 扫描各流程 messages.mentions 含当前 userid 的记录
+   （真实现 GET /api/collab/inbox?mention=1），与上面的预置演示数据合并。
+   起因：📎 / @ 此前只是 toast 占位，@ 提及没有任何落点（§0.23）。 */
+const myMentions = () => MENTIONS.concat(
+  Object.keys(FLOWS).flatMap(fid => {
+    const f = FLOWS[fid];
+    if(!f || !flowWritable(fid)) return [];
+    return Object.keys(f.messages || {}).flatMap(nid =>
+      (f.messages[nid] || [])
+        .filter(m => !m.deleted && (m.mentions || []).includes(ME.id))
+        .map(m => ({ flowId:fid, nodeId:nid, from:m.user, time:m.time, text:m.text })));
+  })
+);
+
+/* v0.29：讨论附件 —— 原型用「选择演示文件」模拟上传管道
+   （真实现 POST /api/collab/file，kind=discussion；磁盘名 {file_id}.{ext} 永久唯一，§5.4） */
+const DEMO_FILES = [
+  { name:'资质清单补充.xlsx', size:'86 KB' },
+  { name:'现场照片_车间.jpg', size:'1.2 MB' },
+  { name:'法务意见_回函.pdf',  size:'340 KB' },
+];
 
 const FLOWS = {
   flw_001: {
@@ -572,6 +607,10 @@ const S = {
   statusConfirm:null,      // 改状态的二次确认 { nodeId, next }
   discardAsk:false,        // 弹层"放弃已填内容？"确认
   pickQ:'',                // 拉人弹层：成员搜索关键字（本地过滤）
+  msgAttach:[],            // v0.29：待发送的讨论附件（📎 选文件 → chips → 随讨论落 files[]）
+  msgMentions:[],          // v0.29：待发送的 @提及（@ 选成员 → 写入 messages.mentions）
+  resultNoteAsk:null,      // v0.29：阶段结果「结论说明」就地编辑中的节点 id
+  flowRenameAsk:false,     // v0.29：流程设置里「改流程名」编辑态
 };
 
 /* v0.9：scope=all 时左栏流程卡片兼作多选筛选器，默认全选 */
@@ -999,7 +1038,9 @@ function treeNode(flow, n, depth){
   const st = STATUS[n.status] || STATUS.pending;
   const s = nodeStats(flow, n.id);
   const collapsed = !!S.collapsed[n.id];
-  const editable = canEdit(n);
+  /* v0.29：归档 = 全流程只读 —— 树上行内快捷操作（＋子节点 / ＋拉人 / ⋯）一并隐藏，
+     不再出现"可见但点了没反应"的死入口（§0.23） */
+  const editable = canEdit(n) && flowWritable(flow.id);
   const canAdd = depth < 3 && editable;
 
   return `
@@ -1338,6 +1379,9 @@ function msgBlock(m, editable, nodeId){
         <div class="mt-1 text-[12.5px] text-slate-700 leading-relaxed">
           ${renderMentions(esc(m.text))}
         </div>
+        ${(m.mentions||[]).length?`<div class="mt-1.5 flex flex-wrap gap-1">${/* v0.29：这条讨论 @ 了谁 */''}
+          ${m.mentions.map(id=>`<span class="px-1.5 py-0.5 rounded bg-primary-50 border border-primary-200 text-[10px] text-primary-600">@${esc(shortName(pName(id)))}</span>`).join('')}
+        </div>`:''}
         ${(m.files&&m.files.length)?`
         <div class="mt-2 space-y-1.5">
           ${m.files.map(fl=>fileChip(fl, nodeId, editable, fl.user||m.user)).join('')}
@@ -1425,13 +1469,30 @@ function annotatePane(msgs){
 }
 
 function resultPane(results, n){
-  const editable = canEdit(n);
+  /* v0.29：归档 = 只读（此前只判 canEdit → 归档流程仍能上传 / 标记当前结论，实测漏洞） */
+  const editable = canEdit(n) && flowWritable(currentFlow().id);
   const list = results.filter(r=>!r.deleted);           // 已删除的从列表消失（可在回收站找回）
   const allSize = list.reduce((a,r)=>a + sizeNum(r.size), 0);
   return `
   <div class="p-3 space-y-2.5">
     <div class="bg-amber-50 border border-amber-200 rounded-xl px-3 py-2 text-[11px] text-amber-700">
       阶段结果 = 该节点对外交付的成果文件；可标记「当前结论」，并自动同步到节点摘要。
+    </div>
+    ${/* v0.29：nodes.result_note 双向同步的「反向编辑」入口 —— 此前只写不显示（§5.9） */''}
+    <div class="bg-white rounded-xl border border-slate-200 px-3 py-2.5">
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-[11px] text-slate-400">阶段结论说明（<code>nodes.result_note</code>，与「当前结论」配对）</span>
+        ${editable?`<span class="text-[11px] tbtn ${S.resultNoteAsk===n.id?'text-primary-600':'text-slate-400 hover:text-primary-600'}"
+          onclick="${S.resultNoteAsk===n.id?'S.resultNoteAsk=null;render()':`startResultNote('${jsq(n.id)}')`}">${S.resultNoteAsk===n.id?'收起':'✏ 编辑'}</span>`:''}
+      </div>
+      ${S.resultNoteAsk===n.id ? `
+        <textarea id="resultNoteInput" rows="2" autofocus placeholder="一句话说清当前结论（例：以「报价单 v2」为准）"
+          class="mt-1.5 w-full px-2.5 py-2 rounded-lg bg-slate-50 border border-primary-400 text-[12px] outline-none resize-none">${esc(n.result_note||'')}</textarea>
+        <div class="mt-1.5 flex justify-end gap-2">
+          <button onclick="S.resultNoteAsk=null;render()" class="px-2.5 py-1 rounded-lg border border-slate-200 text-[11px] text-slate-500 tbtn">取消</button>
+          <button onclick="doResultNote('${jsq(n.id)}',document.getElementById('resultNoteInput').value)" class="px-2.5 py-1 rounded-lg bg-primary-500 text-white text-[11px] tbtn">保存</button>
+        </div>`
+        : `<div class="mt-1 text-[12px] ${n.result_note?'text-slate-700':'text-slate-400'}">${n.result_note?esc(n.result_note):'还没有说明 —— 标记「当前结论」时会自动写入一条，也可在这里手写'}</div>`}
     </div>
     ${editable ? '' : `<div class="px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-[11px] text-slate-500">
       👁 只读：可查看与下载阶段结果，不能上传或修改</div>`}
@@ -1473,6 +1534,10 @@ function resultPane(results, n){
 }
 
 function openNode(id){
+  /* v0.29：**显式打开才算已读**（§5.7 —— 自动展示的默认节点不算已读，此处不再沉默）
+     真实现写在 flow_reads.last_read_at（该节点最新消息时间），不是 now。 */
+  const cur = currentFlow();
+  if(cur && cur.unread){ cur.unread = 0; }
   S.nodeId = id; S.mid = 'tree'; S.nodeTab = 'discuss'; S.replyTo = null;
   /* v0.7：切节点时同样清掉就地编辑态，避免切回同一节点时直接进入编辑框 */
   S.addingChildOf = null; S.renameAsk = null; S.descAsk = null;
@@ -1503,6 +1568,7 @@ function implicitRespond(nodeId){
   return true;                       // 返回 true → 前端弹层要求设处理时限
 }
 function sendMsg(){
+  if(archivedBlocked()) return;                        // v0.29：归档流程拒写（讨论 / 批注同拦）
   const inp=document.getElementById('msgInput');
   const text=(inp?.value||'').trim();
   if(!text){ toast('请输入内容'); return; }
@@ -1515,21 +1581,27 @@ function sendMsg(){
     let placed = false;
     for(const m of list){
       if(m.id === target){
-        (m.reply = m.reply || []).push({id:'r'+Date.now(), user:ME.id, time:'刚刚', text}); placed = true; break;
+        (m.reply = m.reply || []).push({id:'r'+Date.now(), user:ME.id, time:'刚刚', text,
+          files:(S.msgAttach||[]).splice(0), mentions:(S.msgMentions||[]).splice(0)}); placed = true; break;
       }
       for(const r of (m.reply || [])){
-        if(r.id === target){ (m.reply = m.reply || []).push({id:'r'+Date.now(), user:ME.id, time:'刚刚', text}); placed = true; break; }
+        if(r.id === target){ (m.reply = m.reply || []).push({id:'r'+Date.now(), user:ME.id, time:'刚刚', text,
+          files:(S.msgAttach||[]).splice(0), mentions:(S.msgMentions||[]).splice(0)}); placed = true; break; }
       }
       if(placed) break;
     }
     S.replyTo = null; S.msgDraft = '';
+    S.msgAttach = []; S.msgMentions = [];              // v0.29：批注也带走附件 / @提及，发完清空
     S.collapsed['r_' + target] = false;                // v0.23：刚批注的讨论若被收起，自动展开
     render(); scrollDetailBottom(); focusMsgInput();
     toast('批注已提交');
     return;
   }
 
-  list.push({ id:'m'+Date.now(), user:ME.id, time:'刚刚', text, files:[], reply:[] });
+  /* v0.29：附件 / @提及随这条讨论一起落库（真实现同事务写 files + messages.mentions） */
+  const att = (S.msgAttach || []).splice(0);
+  const men = (S.msgMentions || []).splice(0);
+  list.push({ id:'m'+Date.now(), user:ME.id, time:'刚刚', text, files:att, mentions:men, reply:[] });
   S.msgDraft = '';                                   // v0.15：发送后清草稿
 
   // v0.11：实质内容 → 隐式响应打点，并引导设定处理时限（弹层打开即已渲染）
@@ -1566,6 +1638,7 @@ function scrollDetailBottom(){
 /* 撤回 / 删除讨论：软删除，其下批注一并软删但记录保留 */
 function softDeleteMsg(mid, bySelf){
   const f = currentFlow();
+  if(archivedBlocked(f)) return;                       // v0.29：归档流程拒写
   const list = f.messages[S.nodeId] || [];
   for(const m of list){
     if(m.id !== mid) continue;
@@ -1583,6 +1656,7 @@ function softDeleteMsg(mid, bySelf){
 
 function uploadResult(nodeId){
   const f = currentFlow();
+  if(archivedBlocked(f)) return;                       // v0.29：归档流程拒写
   const nid = nodeId || S.nodeId;
   const list = f.results[nid] || (f.results[nid]=[]);
   list.forEach(r=>r.current=false);
@@ -1594,6 +1668,7 @@ function uploadResult(nodeId){
    文件详情那版（`FLOWS[nodeId]` 为 undefined 直接 return）→ **点了没反应**。改名区分。 */
 function markResultCurrent(nodeId, i){
   const f = currentFlow();
+  if(archivedBlocked(f)) return;                       // v0.29：归档流程拒写
   const list = f.results[nodeId || S.nodeId] || [];
   list.forEach((r,k)=>{ r.current = (k===i); });
   toast('已标记为当前结论');
@@ -1724,6 +1799,8 @@ function sheetHTML(){
   if(S.sheet === 'reassign')   return sheetReassign();          // v0.12 改派选人
   if(S.sheet === 'status')     return sheetStatus();            // v0.16 改状态（选择 + 确认）
   if(S.sheet === 'flowMore')   return sheetFlowMore();          // v0.19 流程设置（补上"归档"入口）
+  if(S.sheet === 'attach')     return sheetAttach();            // v0.29 讨论附件选择
+  if(S.sheet === 'mention')    return sheetMention();           // v0.29 @ 提及选择
   return '';
 }
 
@@ -1783,6 +1860,8 @@ function openSheet(kind, arg){
   S.sheetNode = arg || '';
   S.picked = {};
   if(kind === 'invite'){ S.inviteResp = '4h'; S.pickQ = ''; }
+  if(kind === 'attach'){ S.msgAttach = S.msgAttach || []; }   // v0.29：讨论附件选择
+  if(kind === 'mention'){ S.pickQ = ''; }                     // v0.29：@ 提及（限本流程成员）
   if(kind === 'handover'){
     const f = currentFlow();
     const nexts = nextNodeOptions(f, S.nodeId);
@@ -2049,6 +2128,19 @@ function sheetFlowMore(){
         并<b>同事务关闭全部未完成任务</b>（当前 ${openCnt} 个${myOpen?`，<b class="text-amber-700">其中你的 ${myOpen} 个</b>`:''}，会通知本人）。<br>
         <span class="text-slate-400">归档后仍可用「⟳ 取消归档」恢复（因归档而关闭的任务会一并恢复）；归档也是一期不做"删除流程"的替代方案（§6.2 / §13）。</span>
       </div>
+      ${/* v0.29：补「流程改名」入口 —— 此前 events 枚举里有 flow.rename，界面上却没有入口（§8.2） */''}
+      ${isOwner && !archived ? `<div class="rounded-lg border border-slate-200 px-3 py-2 text-[11.5px] text-slate-600">
+        <b>✏ 流程改名</b>
+        ${S.flowRenameAsk ? `
+        <div class="mt-1.5 flex items-center gap-2">
+          <input id="flowNameInput" value="${esc(f.title)}" autofocus
+            onkeydown="if(event.key==='Enter')doFlowRename('${jsq(f.id)}',this.value);if(event.key==='Escape'){S.flowRenameAsk=false;render();}"
+            class="flex-1 px-2.5 py-1.5 rounded-lg bg-slate-50 border border-primary-400 text-[12px] outline-none">
+          <button onclick="doFlowRename('${jsq(f.id)}',document.getElementById('flowNameInput').value)" class="px-2.5 py-1 rounded-lg bg-primary-500 text-white text-[11px] tbtn">保存</button>
+          <button onclick="S.flowRenameAsk=false;render()" class="px-2.5 py-1 rounded-lg border border-slate-200 text-[11px] text-slate-500 tbtn">取消</button>
+        </div>`
+        : `<span class="tbtn ml-2 text-primary-600" onclick="startFlowRename()">改名</span>`}
+      </div>`:''}
       <div class="rounded-lg border border-dashed border-slate-200 px-3 py-2 text-[11.5px] text-slate-400">
         ⤓ 导出流程（Markdown / Excel + 文件打包 zip）—— <b>二期</b>，本原型不实现
       </div>
@@ -2604,12 +2696,16 @@ function flowFileStats(fid){
 
 /* 权限判定：跨流程时文件所属流程各不相同，因此**按 x.flowId 解析**，
    而不是用 currentFlow()（否则会拿 A 流程的发起人去判定 B 流程的文件） */
+/* v0.29：归档流程 = 全流程只读 → 文件层同样不允许删除 / 彻底删除。
+   此前只判归属，归档流程的文件列表仍渲染「🗑」且点了真能删（实测漏洞，§0.23） */
 function canDeleteFile(x){
   const f = FLOWS[x.flowId] || currentFlow();
+  if(!flowWritable(f.id)) return false;
   return f.creator === ME.id || x.user === ME.id;
 }
 function canPurge(x){
   const f = x ? (FLOWS[x.flowId] || currentFlow()) : currentFlow();
+  if(!flowWritable(f.id)) return false;
   return f.creator === ME.id;
 }
 function fileTrashList(){
@@ -2623,6 +2719,7 @@ function fileTrashList(){
    v0.9：入参改为 flowId 优先 —— 跨流程范围下必须按文件所属流程解析，不能用 currentFlow() */
 function deleteFile(flowId, nodeId, kind, name){
   const f = FLOWS[flowId] || currentFlow();
+  if(archivedBlocked(f)) return;                       // v0.29：归档流程拒写
   let src = null;
   if(kind === 'discussion'){
     f.nodes.forEach(n=>(f.messages[n.id] || []).forEach(m=>(m.files || []).forEach(fl=>{
@@ -2643,6 +2740,7 @@ function deleteFile(flowId, nodeId, kind, name){
 function restoreFile(i){
   const t = TRASH[i];
   if(!t) return;
+  if(archivedBlocked(t.flowId)) return;                // v0.29：归档流程拒写
   const f = FLOWS[t.flowId] || currentFlow();
   if(t.kind === 'discussion'){
     f.nodes.forEach(n=>(f.messages[n.id] || []).forEach(m=>(m.files || []).forEach(fl=>{
@@ -2659,12 +2757,14 @@ function purgeFile(i){
   const t = TRASH[i];
   S.purgeAsk = null;
   if(!t) return;
+  if(archivedBlocked(t.flowId)) return;                // v0.29：归档流程拒写（彻底删除同样不可用）
   TRASH.splice(i,1);
   toast(`已彻底删除「${t.name}」（不可恢复）`);
 }
 function purgeAll(){
   // 范围跟随「📁 文件」Tab 的当前范围（当前流程 / 我可见的全部流程）
-  const targets = fileTrashList();
+  // v0.29：归档流程的回收站是只读的 → 从清空范围里剔除（§10#46）
+  const targets = fileTrashList().filter(t=>flowWritable(t.flowId));
   const n = targets.length;
   if(!n){ toast('回收站是空的'); return; }
   if(S.purgeAsk !== 'all'){ S.purgeAsk = 'all'; render(); return; }   // 二次确认
@@ -2879,8 +2979,9 @@ function midHeader(f, n, p){
           <span onclick="expandAll()" data-tip="展开全部节点" class="px-1.5 py-1 rounded-md border border-slate-200 text-[11px] tbtn hover:border-primary-300 hover:text-primary-600">⊞</span>
           <span onclick="collapseAll()" data-tip="收起全部节点（只留前 2 层）" class="px-1.5 py-1 rounded-md border border-slate-200 text-[11px] tbtn hover:border-primary-300 hover:text-primary-600">⊟</span>
         </div>` : ''}
+        ${flowWritable(f.id) ? `<!-- v0.29：归档 = 全流程只读 → 头部「＋拉人」一并隐藏（此前归档后仍显示，点了才被拒） -->
         <button onclick="openSheet('invite','')" data-tip="把同事拉进这个流程的某个节点（拉进来即可参与讨论）"
-          class="px-2.5 py-1 rounded-lg border border-primary-300 text-primary-600 text-[11px] tbtn">＋ 拉人</button>
+          class="px-2.5 py-1 rounded-lg border border-primary-300 text-primary-600 text-[11px] tbtn">＋ 拉人</button>`:''}
         ${(f.creator===ME.id || (n && canEdit(n)))?`<button onclick="openSheet('members','')" data-tip="查看流程成员、移出成员"
           class="px-2.5 py-1 rounded-lg border border-slate-200 text-slate-500 text-[11px] tbtn">👥 成员</button>`:''}
         ${canOwnerAct(f)?`<button id="flowMoreBtn" onclick="openSheet('flowMore','')" data-tip="流程设置：归档流程（归档后全流程只读、未完成任务会被关闭）"
@@ -3176,13 +3277,15 @@ function trashPane(f){
             <td class="px-2 py-2 text-slate-400">${esc(t.deletedAt)}</td>
             <td class="px-2 py-2 text-slate-400">${t.remain} 天</td>
             <td class="px-2 py-2 text-right whitespace-nowrap">
-              ${S.purgeAsk===realIdx ? `
+              ${!flowWritable(t.flowId) ? `<!-- v0.29：归档流程的回收站只读（§10#46） -->
+                <span class="text-[11px] text-slate-400">🔒 流程已归档，回收站只读</span>
+              ` : S.purgeAsk===realIdx ? `
                 <span class="text-[11px] text-red-500 mr-1">确认彻底删除？</span>
                 <span class="text-[12px] tbtn text-red-500" onclick="event.stopPropagation();purgeFile(${realIdx});S.fileId=null;render()">✓</span>
                 <span class="ml-1 text-[12px] tbtn text-slate-400" onclick="event.stopPropagation();S.purgeAsk=null;render()">✕</span>
               ` : `
                 <span class="text-[11px] tbtn text-primary-600" onclick="event.stopPropagation();restoreFile(${realIdx});S.fileId=null;render()">↺ 恢复</span>
-                ${canPurge(null)?`<span class="ml-2 text-[11px] tbtn text-red-500" onclick="event.stopPropagation();askPurge(${realIdx})">✖ 彻底删除</span>`:''}
+                ${canPurge(t)?`<span class="ml-2 text-[11px] tbtn text-red-500" onclick="event.stopPropagation();askPurge(${realIdx})">✖ 彻底删除</span>`:''}
               `}
             </td>
           </tr>`).join('')}
@@ -3420,8 +3523,9 @@ function desktopHTML(){
                   ${S.mid==='tree'
                     ? `<div class="space-y-2">
                          ${roots.map(r=>treeNode(f,r,0)).join('')}
+                         ${flowWritable(f.id) ? `<!-- v0.29：归档 = 全流程只读 → 隐藏"加顶层节点"（§10#46） -->
                          <button onclick="startAddChild('')" data-tip="在本流程下创建一个顶层节点"
-                           class="w-full py-2.5 rounded-xl border border-dashed border-slate-300 text-[12px] text-slate-500 tbtn hover:border-primary-400 hover:text-primary-600">＋ 添加顶层节点</button>
+                           class="w-full py-2.5 rounded-xl border border-dashed border-slate-300 text-[12px] text-slate-500 tbtn hover:border-primary-400 hover:text-primary-600">＋ 添加顶层节点</button>`:''}
                        </div>`
                     : `<div>
                         <div class="bg-white rounded-xl border border-slate-200 p-2">
@@ -3496,6 +3600,18 @@ function flowWritable(flowId){ const f = FLOWS[flowId]; return !!f && f.status !
 /* v0.12：归档 = 全流程只读 —— 时限与流转操作一律拒绝（§13.4 / §10#73） */
 function blockArchived(f){
   if(f && f.status === 'archived'){ toast('流程已归档（只读），时限与流转操作不可用'); return true; }
+  return false;
+}
+/* v0.29：**统一的写操作归档守卫** —— 真实现由后端对每个写接口校验 flow.status=='active'
+   （§10#46/#73），前端提前拦一次。入参可传流程对象或 flowId；命中归档则 toast 并返回 true。
+   起因：v0.28 全链路实测发现「发讨论 / 上传阶段结果 / 删除文件 / 恢复文件」四条**内容写路径**
+   没有归档守卫（改状态 / 流转 / 改期 / 邀请 / 删节点等已有）→ 归档只读不闭环（§0.23）。 */
+function archivedBlocked(f){
+  const target = (typeof f === 'string') ? FLOWS[f] : (f || currentFlow());
+  if(target && target.status === 'archived'){
+    toast('流程已归档（只读）· 讨论与文件仅可查看与下载');
+    return true;
+  }
   return false;
 }
 /* v0.12：发起人 / 管理员可处置（§13.4 —— 管理员旁路，与「待我处置」同口径） */
@@ -3815,7 +3931,9 @@ function myTaskBar(f, n){
 
 function deskNodePanel(f, n){
   if(!n) return `<div class="flex-1 flex items-center justify-center text-[12px] text-slate-400">从中间选择一个节点</div>`;
-  const editable = canEdit(n);
+  /* v0.29：归档 = 全流程只读 —— 讨论输入框 / ＋拉人 / ＋子节点 / 上传阶段结果一律不渲染 */
+  const archived = !flowWritable(f.id);
+  const editable = canEdit(n) && !archived;
   const st = STATUS[n.status]||STATUS.pending;
   const msgs = f.messages[n.id] || (f.messages[n.id]=[]);
   const results = f.results[n.id] || (f.results[n.id]=[]);
@@ -3834,7 +3952,9 @@ function deskNodePanel(f, n){
         class="px-2 py-0.5 rounded-md border text-[10px] tbtn shrink-0 ${S.nodeInfoOpen?'border-primary-300 text-primary-600 bg-primary-50/60':'border-slate-200 text-slate-500 hover:border-primary-300'}">ℹ ${S.nodeInfoOpen?'收起信息':'节点信息'}</button>
     </div>
     ${editable?'' : `<div class="mt-2 px-2.5 py-1.5 rounded-lg bg-slate-100 border border-slate-200 text-[11px] text-slate-500">
-      👁 你对该节点<strong class="text-slate-700">只读</strong>：内容可查看可下载，不能参与讨论
+      ${archived
+        ? `🔒 流程<strong class="text-slate-700">已归档</strong>（只读）：内容可查看可下载；讨论 / 上传 / 拉人 / 删除全部不可用`
+        : `👁 你对该节点<strong class="text-slate-700">只读</strong>：内容可查看可下载，不能参与讨论`}
     </div>`}
     ${S.nodeInfoOpen?`
     <div class="mt-2.5 pt-2.5 border-t border-slate-100 space-y-2.5">
@@ -3888,6 +4008,15 @@ function deskNodePanel(f, n){
     ${S.replyTo?`<div class="mb-2 px-2 py-1 rounded-lg bg-primary-50 text-[11px] text-primary-600 flex items-center justify-between">
       <span>正在批注：${esc(trunc(replyTargetText(),20))}</span>
       <span class="tbtn" onclick="S.replyTo=null;render()">✕</span></div>`:''}
+    ${((S.msgAttach||[]).length || (S.msgMentions||[]).length) ? `
+    <div class="mb-2 flex flex-wrap gap-1.5">${/* v0.29：待发送的附件 / @提及 chips */''}
+      ${(S.msgAttach||[]).map(a=>`<span class="px-2 py-0.5 rounded-md bg-white border border-slate-200 text-[10.5px] text-slate-600 flex items-center gap-1">
+        📎 ${esc(a.name)}
+        <span class="tbtn text-slate-400 hover:text-red-500" onclick="toggleAttach(${DEMO_FILES.findIndex(d=>d.name===a.name)})">✕</span></span>`).join('')}
+      ${(S.msgMentions||[]).map(id=>`<span class="px-2 py-0.5 rounded-md bg-primary-50 border border-primary-200 text-[10.5px] text-primary-600 flex items-center gap-1">
+        @${esc(shortName(pName(id)))}
+        <span class="tbtn text-primary-400 hover:text-red-500" onclick="toggleMention('${jsq(id)}')">✕</span></span>`).join('')}
+    </div>`:''}
     <div class="flex items-end gap-2">
       <!-- v0.22：输入框视觉强化 —— 默认 2 行起、聚焦高亮（主色边框 + 光圈）、发送按钮带文字、📎 / @ 主色可点 -->
       <div class="flex-1 flex items-end gap-1.5 px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 transition focus-within:border-primary-400 focus-within:bg-white focus-within:ring-2 focus-within:ring-primary-100">
@@ -3896,8 +4025,8 @@ function deskNodePanel(f, n){
           placeholder="${S.replyTo?'针对上文输入批注…（Enter 发送 · Shift+Enter 换行）':'和本节点成员讨论…（Enter 发送 · Shift+Enter 换行 · @ 提及同事）'}"
           oninput="S.msgDraft=this.value;autoGrowMsg(this)"
           onkeydown="if(event.key==='Enter' && !event.shiftKey){event.preventDefault();sendMsg();}"></textarea>
-        <span class="text-primary-400 hover:text-primary-600 text-[14px] tbtn" onclick="toast('选择图片 / 文件上传（附件）')">📎</span>
-        <span class="text-primary-400 hover:text-primary-600 text-[14px] tbtn" onclick="toast('@ 唤起成员选择，被提及者即时收到企微通知')">@</span>
+        <span class="text-primary-400 hover:text-primary-600 text-[14px] tbtn" data-tip="添加图片 / 文件（附件随这条讨论一起发送）" onclick="openSheet('attach')">📎</span>
+        <span class="text-primary-400 hover:text-primary-600 text-[14px] tbtn" data-tip="@ 提及流程成员（被提及者即时收到企微通知）" onclick="openSheet('mention')">@</span>
       </div>
       <button onclick="sendMsg()" class="h-9 px-3.5 rounded-xl bg-primary-500 hover:bg-primary-600 text-white flex items-center gap-1 tbtn shrink-0 shadow-sm">
         <span class="text-[13px]">➤</span><span class="text-[12px] font-medium">发送</span>
@@ -3905,10 +4034,269 @@ function deskNodePanel(f, n){
     </div>
   </div>` : `
   <div class="shrink-0 bg-white border-t border-slate-200 px-3 py-3">
-    <div class="w-full py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-[12px] text-slate-400 text-center select-none">👁 你对该节点只读，无法参与讨论</div>
+    <div class="w-full py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-[12px] text-slate-400 text-center select-none">${archived ? '🔒 流程已归档（只读），无法参与讨论' : '👁 你对该节点只读，无法参与讨论'}</div>
   </div>`}
   `;
 }
+
+/* =====================================================================
+   v0.29 新增：讨论附件（📎）/ @提及、操作记录埋点、结论说明、流程改名
+   ---------------------------------------------------------------------
+   起因（v0.28 全链路闭环实测，见方案 §0.23）：
+   ① 归档只读不闭环（发讨论 / 上传 / 删文件未拦）—— 已在各写函数加 archivedBlocked() 守卫；
+   ② 📎 与 @ 只是 toast 占位，@ 提及没有任何落点；
+   ③ 操作记录（events）是写死的演示数据 → 新建流程里是空的，v0.24「全员可见」无从演示；
+   ④ nodes.result_note 只写不显示、流程改名没有入口。
+   ===================================================================== */
+
+/* ---------- ① 讨论附件（📎） ---------- */
+function toggleAttach(i){
+  const d = DEMO_FILES[i]; if(!d) return;
+  const list = S.msgAttach || (S.msgAttach = []);
+  const at = list.findIndex(x => x.name === d.name);
+  if(at >= 0) list.splice(at,1); else list.push({ ...d, user:ME.id, time:'刚刚' });
+  render();
+}
+function sheetAttach(){
+  const list = S.msgAttach || [];
+  return modalWrap('添加附件', '演示：真实现走上传管道（POST /api/collab/file，kind=discussion）', `
+    <div class="text-[11.5px] text-slate-500 leading-relaxed">
+      选择要随这条讨论一起发出去的图片 / 文件（可多选）。附件同样受 <b>成员校验 + 扩展名白名单</b> 限制，
+      磁盘名用 <code>{file_id}.{ext}</code> 永久唯一（§5.4 / §8.4）。
+    </div>
+    <div class="space-y-1.5">
+      ${DEMO_FILES.map((d,i)=>{
+        const on = list.some(x => x.name === d.name);
+        return `<div class="flex items-center gap-2 px-3 py-2 rounded-lg border tbtn ${on?'border-primary-300 bg-primary-50/50':'border-slate-200 bg-white hover:border-primary-200'}"
+          onclick="toggleAttach(${i})">
+          <span class="text-[15px]">${fileIcon(d.name)}</span>
+          <span class="text-[12px] text-slate-700 truncate flex-1">${esc(d.name)}</span>
+          <span class="text-[10.5px] text-slate-400 shrink-0">${esc(d.size)}</span>
+          <span class="text-[11px] shrink-0 ${on?'text-primary-600':'text-slate-300'}">${on?'✓ 已选':'＋'}</span>
+        </div>`;
+      }).join('')}
+    </div>`,
+    `<button onclick="S.sheet=null;render()" class="flex-1 py-2 rounded-lg bg-primary-500 hover:bg-primary-600 text-white text-[12px] tbtn">完成（已选 ${list.length} 个）</button>`);
+}
+
+/* ---------- ② @ 提及（限流程成员；只发通知，不授予编辑权） ---------- */
+function toggleMention(uid){
+  const list = S.msgMentions || (S.msgMentions = []);
+  const at = list.indexOf(uid);
+  if(at >= 0) list.splice(at,1); else list.push(uid);
+  render();
+}
+function sheetMention(){
+  const f = currentFlow();
+  const list = S.msgMentions || [];
+  const q = (S.pickQ || '').trim().toLowerCase();
+  const shown = f.members.filter(id => id !== ME.id)
+    .filter(id => !q || pName(id).toLowerCase().includes(q) || id.toLowerCase().includes(q));
+  return modalWrap('@ 提及同事', '被提及者会即时收到企微通知，并出现在他的「提到我的」（§8.6）', `
+    <div class="text-[11.5px] text-slate-500 leading-relaxed">
+      只能 @ 本流程成员；<b>提及只发通知、不授予编辑权</b>（他只读你的节点）。
+    </div>
+    <input id="pickQ" value="${esc(S.pickQ)}" placeholder="搜索姓名（可输入）"
+      oninput="onFilterInput(event,'pickQ')"
+      class="w-full px-2.5 py-2 rounded-lg bg-slate-50 border border-slate-200 text-[12px] outline-none focus:border-primary-400">
+    <div class="space-y-1.5">
+      ${shown.map(id=>{
+        const on = list.includes(id);
+        return `<div class="flex items-center gap-2 px-3 py-2 rounded-lg border tbtn ${on?'border-primary-300 bg-primary-50/50':'border-slate-200 bg-white hover:border-primary-200'}"
+          onclick="toggleMention('${jsq(id)}')">
+          <span class="ai-ava" style="background:${avColor(id)};width:22px;height:22px;font-size:10px">${esc(initial(shortName(pName(id))))}</span>
+          <span class="text-[12px] text-slate-700 truncate flex-1">${esc(pName(id))}</span>
+          <span class="text-[11px] shrink-0 ${on?'text-primary-600':'text-slate-300'}">${on?'✓ 已选':'＋'}</span>
+        </div>`;
+      }).join('') || `<div class="py-8 text-center text-[12px] text-slate-400">没有匹配的成员</div>`}
+    </div>`,
+    `<button onclick="S.sheet=null;render()" class="flex-1 py-2 rounded-lg bg-primary-500 hover:bg-primary-600 text-white text-[12px] tbtn">完成（已 @ ${list.length} 人）</button>`);
+}
+
+/* ---------- ③ 阶段结论说明（nodes.result_note）就地编辑 ---------- */
+function startResultNote(id){ S.resultNoteAsk = id; render(); }
+function doResultNote(id, val){
+  const f = currentFlow();
+  if(archivedBlocked(f)) return;
+  const n = nodeById(f, id); if(!n) return;
+  n.result_note = String(val || '').trim();
+  S.resultNoteAsk = null;
+  logEvent(f.id, ME.id, n.result_note ? `更新了「${n.title}」的阶段结论说明` : `清空了「${n.title}」的阶段结论说明`);
+  toast('阶段结论说明已保存');
+  render();
+}
+
+/* ---------- ④ 流程改名（仅发起人 / 管理员；写 flow.rename） ---------- */
+function startFlowRename(){ S.flowRenameAsk = true; render(); }
+function doFlowRename(flowId, val){
+  const f = FLOWS[flowId]; if(!f) return;
+  if(archivedBlocked(f) || !canOwnerAct(f)) return;
+  const t = String(val || '').trim();
+  S.flowRenameAsk = false;
+  if(!t || t === f.title){ render(); return; }
+  const old = f.title;
+  f.title = t;
+  logEvent(f.id, ME.id, `把流程《${old}》改名为《${t}》`);
+  toast('流程名称已更新');
+  render();
+}
+
+/* ---------- ⑤ 操作记录埋点：events 随动作写入 ----------
+   真实现由后端在各写接口写 events 表；原型用一层**统一包装**埋点，避免 16 处散落。
+   包装器先取「动作前快照」，调用原函数后按**状态是否真的变了**决定是否记一条 ——
+   被归档守卫拦下、或权限不足被拒的动作，不会留下记录（操作记录只记"真的发生了的事"）。 */
+function evTime(){ return '刚刚'; }
+function logEvent(flowId, actor, text){
+  if(!flowId) return;
+  const list = EVENTS[flowId] || (EVENTS[flowId] = []);
+  list.unshift({ time: evTime(), actor: actor || ME.id, text });
+  const f = FLOWS[flowId]; if(f) f.updated = '刚刚';
+}
+(function instrumentEvents(){
+  const wrap = (name, make) => {
+    const orig = window[name];
+    if(typeof orig !== 'function') return;
+    window[name] = function(){
+      const args = [].slice.call(arguments);
+      const f = currentFlow();
+      const me = myTaskOn(S.nodeId) || {};
+      const pre = {
+        flowId: f && f.id, flowTitle: f && f.title, status: f && f.status,
+        nodeId: S.nodeId, sheetNode: S.sheetNode, inviteTarget: S.inviteTarget,
+        picked: Object.keys(S.picked || {}),
+        members: f ? f.members.slice() : [],
+        statuses: f ? f.nodes.reduce((m,n)=>(m[n.id]=n.status,m),{}) : {},
+        msgs: (f && f.messages[S.nodeId]) ? f.messages[S.nodeId].length : 0,
+        results: (f && f.results[S.nodeId]) ? f.results[S.nodeId].length : 0,
+        note: f ? ((nodeById(f, S.nodeId) || {}).result_note || '') : '',
+        trashLen: TRASH.length,
+        trashItem: TRASH[args[0]] ? { ...TRASH[args[0]] } : null,
+        handle: me.handleDeadline || 0,
+        changes: (me.changes || []).length,
+      };
+      const out = orig.apply(this, arguments);
+      try {
+        const rec = make(pre, args);
+        if(rec) logEvent(rec[0], ME.id, rec[1]);
+      } catch(e) { /* 埋点失败不影响主流程 */ }
+      return out;
+    };
+  };
+  const nm = id => pName(id);
+  wrap('createFlowSubmit', () => {
+    const f = currentFlow();
+    return f ? [f.id, `创建了流程《${f.title}》`] : null;
+  });
+  wrap('createNode', (pre, args) => {
+    const f = FLOWS[pre.flowId]; if(!f) return null;
+    const n = f.nodes[f.nodes.length - 1];
+    if(!n || n.parent !== args[0]) return null;
+    const p = nodeById(f, args[0]);
+    return [f.id, `在「${p ? p.title : '—'}」下新建子节点「${n.title}」`];
+  });
+  wrap('confirmInvite', (pre) => {
+    if(pre.inviteTarget === 'create' || !pre.picked.length) return null;
+    const f = FLOWS[pre.flowId]; if(!f) return null;
+    const names = pre.picked.map(nm).join('、');
+    const n = pre.sheetNode ? nodeById(f, pre.sheetNode) : null;
+    return [f.id, n ? `邀请 ${names} 加入「${n.title}」` : `邀请 ${names} 加入流程`];
+  });
+  wrap('removeMember', (pre, args) => {
+    const f = FLOWS[pre.flowId];
+    if(!f || !pre.members.includes(args[0])) return null;
+    return [f.id, `移出流程成员 ${nm(args[0])}（其未完成任务已关闭）`];
+  });
+  wrap('applyStatus', (pre, args) => {
+    const f = FLOWS[pre.flowId]; const n = nodeById(f, args[0]);
+    if(!n || pre.statuses[args[0]] === n.status) return null;
+    return [f.id, `把「${n.title}」状态改为「${(STATUS[n.status] || {}).label || n.status}」`];
+  });
+  wrap('softDeleteMsg', (pre, args) => {
+    const f = FLOWS[pre.flowId];
+    const m = ((f && f.messages[pre.nodeId]) || []).find(x => x.id === args[0]);
+    if(!m || !m.deleted) return null;
+    return [f.id, args[1] ? '撤回了一条讨论（其下批注一并隐藏）' : '删除了一条讨论（其下批注一并隐藏）'];
+  });
+  wrap('uploadResult', (pre) => {
+    const f = FLOWS[pre.flowId];
+    const list = (f && f.results[pre.nodeId]) || [];
+    if(list.length <= pre.results) return null;
+    const n = nodeById(f, pre.nodeId);
+    return [f.id, `在「${n ? n.title : ''}」上传了阶段结果 ${list[list.length - 1].name}`];
+  });
+  wrap('markResultCurrent', (pre) => {
+    const f = FLOWS[pre.flowId];
+    const cur = ((f && f.results[pre.nodeId]) || []).filter(r => r.current)[0];
+    if(!cur) return null;
+    return [f.id, `把 ${cur.name} 标记为「当前结论」`];
+  });
+  wrap('markCurrent', (pre, args) => {
+    const f = FLOWS[args[0]]; const n = nodeById(f, args[1]);
+    if(!n || n.result_note === pre.note) return null;
+    return [f.id, `把 ${args[2]} 标记为「当前结论」`];
+  });
+  wrap('deleteFile', (pre, args) => {
+    const f = FLOWS[args[0]];
+    if(!f || TRASH.length <= pre.trashLen) return null;
+    return [f.id, `删除了${args[2] === 'result' ? '阶段结果' : '讨论附件'} ${args[3]}（进回收站）`];
+  });
+  wrap('restoreFile', (pre) => {
+    if(!pre.trashItem || TRASH.length >= pre.trashLen) return null;
+    return [pre.trashItem.flowId, `从回收站恢复了 ${pre.trashItem.name}`];
+  });
+  wrap('purgeFile', (pre) => {
+    if(!pre.trashItem || TRASH.length >= pre.trashLen) return null;
+    return [pre.trashItem.flowId, `彻底删除了 ${pre.trashItem.name}（不可恢复）`];
+  });
+  wrap('purgeAll', (pre) => {
+    if(TRASH.length >= pre.trashLen) return null;
+    return [pre.flowId, `清空了回收站（${pre.trashLen - TRASH.length} 个文件）`];
+  });
+  wrap('applyHandleDeadline', (pre) => {
+    const t = myTaskOn(S.nodeId);
+    if(!t || t.handleDeadline === pre.handle) return null;
+    return [pre.flowId, `设定了处理时限（${fmtWhen(t.handleDeadline)}）`];
+  });
+  wrap('applyReschedule', (pre) => {
+    const t = myTaskOn(S.nodeId);
+    if(!t || (t.changes || []).length <= pre.changes) return null;
+    const c = t.changes[t.changes.length - 1];
+    return [pre.flowId, `把处理时限改到 ${fmtWhen(t.handleDeadline)}（理由：${c.reason}）`];
+  });
+  wrap('applyHandover', (pre) => {
+    const t = myTaskOn(S.nodeId);
+    if(!t || !t.doneAt) return null;
+    const n = nodeById(FLOWS[pre.flowId], pre.nodeId);
+    return [pre.flowId, t.handoverTo
+      ? `完成「${n ? n.title : ''}」并流转给 ${nm(t.handoverTo)}`
+      : `完成「${n ? n.title : ''}」（无后续流转）`];
+  });
+  wrap('ownerAction', (pre, args) => {
+    const t = TASKS.find(x => x.id === args[1]); if(!t) return null;
+    if(args[0] === 'nudge' && t.handleDeadline)
+      return [t.flowId, `催办 ${nm(t.user)} 并把处理时限顺延到 ${fmtWhen(t.handleDeadline)}`];
+    if(args[0] === 'close' && t.closedReason === 'owner_closed')
+      return [t.flowId, `关闭了 ${nm(t.user)} 的任务`];
+    return null;                                  // reassign 只是打开弹层，真正动作在 applyReassign
+  });
+  wrap('applyReassign', (pre) => {
+    const t = TASKS.find(x => x.flowId === pre.flowId && x.closedReason === 'reassigned');
+    if(!t) return null;
+    const nt = TASKS.find(x => x.flowId === pre.flowId && x.nodeId === t.nodeId
+      && !x.closedAt && !x.doneAt && x.id !== t.id);
+    return [pre.flowId, `把 ${nm(t.user)} 的任务改派给 ${nt ? nm(nt.user) : '新人'}`];
+  });
+  wrap('archiveFlow', (pre, args) => {
+    const f = FLOWS[args[0]];
+    if(!f || f.status !== 'archived') return null;
+    return [f.id, '归档了流程（未完成任务全部关闭 · 全流程只读）'];
+  });
+  wrap('unarchiveFlow', (pre, args) => {
+    const f = FLOWS[args[0]];
+    if(!f || f.status !== 'active') return null;
+    return [f.id, '取消归档（因归档而关闭的任务已恢复）'];
+  });
+})();
 
 /* =====================================================================
    启动
