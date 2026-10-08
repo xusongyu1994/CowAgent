@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>企微线上协作流程 · 可交互原型 v0.30</title>
+<title>企微线上协作流程 · 可交互原型 v0.31</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script>
 tailwind.config = {
@@ -62,7 +62,7 @@ tailwind.config = {
 <div id="helpDrawer" class="hidden max-w-[1400px] mx-auto px-4 sm:px-6 mb-4">
   <div class="bg-white rounded-2xl border border-slate-200 px-5 py-4 shadow-sm">
     <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
-      <span class="text-primary-600 font-semibold text-sm tracking-wide">企微线上协作流程 · 可交互原型 v0.30</span>
+      <span class="text-primary-600 font-semibold text-sm tracking-wide">企微线上协作流程 · 可交互原型 v0.31</span>
       <span class="text-[11px] text-slate-400">形态：Web 控制台唯一页 /collab · <b class="text-slate-500">电脑版三栏为唯一设计，手机端仅响应式收缩</b></span>
       <span class="ml-auto text-[11px] text-slate-400">配套方案：docs/collab-workflow-design.md</span>
       <button onclick="go('readonly')"
@@ -121,6 +121,7 @@ tailwind.config = {
       <span>🆕 <b>v0.24 操作记录全员可见</b>：「📜 操作记录」Tab 对<b>全流程成员</b>开放（原"仅发起人 / 管理员可见、无权限置灰"废止）—— 移除置灰 Tab、锁定占位与权限横幅；接口对 flow_members 返回 200，非成员仍拒绝（防探测）</span>
       <span>🆕 <b>v0.28 口径对齐（原型交互未变）</b>：协作文件缺省落在<b>独立根目录</b>（不在 Agent 工作区内）；控制台新增「菜单编辑器」可加 url 项，但<b>不采纳</b>为入口（仍走企微菜单 + 直链）；控制台「产物」（Agent 产出）与协作「全部文件」（人上传 / 阶段结果）是两回事</span>
       <span>🆕 <b>v0.29 归档只读闭环 + 附件·提及·操作记录</b>：① 归档流程的<b>发讨论 / 上传阶段结果 / 删文件 / 恢复文件</b>全部拒写（此前只拦了状态 / 流转 / 改期 / 邀请），并隐藏讨论输入框、文件删除入口与树上「＋拉人 / ＋子节点」死入口；② 📎 变成<b>真的加附件</b>（选演示文件 → chips → 随讨论落 <code class="bg-slate-100 px-1 rounded">files[]</code>）、@ 变成<b>真的选成员提及</b>（写入 <code class="bg-slate-100 px-1 rounded">mentions</code> → 进「提到我的」）；③ <b>操作记录随动作写入</b>（发起 / 下延 / 拉人 / 移出 / 改状态 / 撤回·删除讨论 / 文件增删 / 标记结论 / 改期 / 流转 / 催办·改派·关闭 / 归档·取消归档 各记一条）；④ 补「阶段结论说明」显示与编辑、流程设置里补「流程改名」；⑤ <b>打开节点即标记已读</b></span>
+      <span>🆕 <b>v0.31 开发计划立项（原型无功能改动）</b>：方案 §11 重写为**可执行开发计划**（一期范围 / WBS T01~T14 / 执行批次 B0~B10 + 完成判据 / 测试映射 §14）；一期含<b>关系图 · 回收站视图 · ＠我的待办 · 未读角标汇总</b>；**本原型继续作为前端功能基准**（§11.4 交互级对照）</span>
       <span>🆕 <b>v0.30 通知口径（原型无功能改动）</b>：一期只推 <b>4 类</b>关键通知（被拉入 / 被派活 / @提及 / 升级待处置），其余 20 类二期；推送前先落<b>幂等键</b>防重、失败只记日志不重试；<b>页面兜底（未读 / 待办 / 操作记录）才是必达通道</b></span>
       <span>🚫 文件管理<b>不提供上传入口</b>（文件必须挂在节点上）；不做打标 / 移动 / 重命名 / 版本</span>
       <span>✅ 通知：全部即时推送企微应用消息（管理员操作不推送；已发出的通知无法撤回）</span>
